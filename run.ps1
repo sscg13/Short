@@ -1,6 +1,5 @@
 param(
-    [string]$Model = "small",
-    [string]$Source = "hello.c",
+    [string]$Model = "large",
     [string]$CmdArgs = "",
     [string]$Cycles = "max",
     [string]$Fen = ""
@@ -12,12 +11,12 @@ $dosbox = "C:\Users\ckbao\AppData\Local\Programs\DOSBox Staging\dosbox.exe"
 
 # 1. Build
 pushd $root
-& powershell -NoProfile -ExecutionPolicy Bypass -File "$root\build.ps1" -Model $Model -Source $Source
+& powershell -NoProfile -ExecutionPolicy Bypass -File "$root\build.ps1" -Model $Model
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 popd
 
 # 2. Run in DOSBox and capture stdout to result.txt
-$exeName = [System.IO.Path]::GetFileNameWithoutExtension($Source) + ".exe"
+$exeName = "chess.exe"
 if ($Fen -ne "") { Set-Content -Path "$root\fen.txt" -Value $Fen -NoNewline }
 $runLine = $exeName + " " + $CmdArgs + " > result.txt"
 Remove-Item "$root\result.txt" -ErrorAction SilentlyContinue
