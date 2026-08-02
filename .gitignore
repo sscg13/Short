@@ -1,4 +1,5 @@
 *.obj
+*.o
 *.exe
 *.log
 *.txt

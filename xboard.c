@@ -65,7 +65,7 @@ static void move_to_coord(unsigned int m, char *buf) {
 }
 
 static unsigned int parse_coord(Pos *p, const char *s) {
-    unsigned int *list = movebuf[8];
+    unsigned int *list = movebuf[30];
     int n = gen_moves(p, list);
     int i, pr = 0;
     if (s[0] < 'a' || s[0] > 'h' || s[2] < 'a' || s[2] > 'h') return 0;
@@ -90,7 +90,7 @@ static unsigned int parse_coord(Pos *p, const char *s) {
 }
 
 static unsigned int parse_castle(Pos *p, const char *s) {
-    unsigned int *list = movebuf[8];
+    unsigned int *list = movebuf[30];
     int n = gen_moves(p, list), i, want = 0;
     if ((s[0] == 'O' || s[0] == '0') && s[1] == '-' && (s[2] == 'O' || s[2] == '0')) {
         if (s[3] == '-' && (s[4] == 'O' || s[4] == '0')) want = 0x02;
@@ -160,7 +160,7 @@ static void unapply(Pos *p) {
 }
 
 static void xb_go(void) {
-    unsigned int *list = movebuf[11];
+    unsigned int *list = movebuf[28];
     int n = gen_moves(&gpos, list);
     int i, legal = 0;
     unsigned int m = 0, first = 0;
@@ -249,9 +249,13 @@ int xboard_main(void) {
         } else if (strncmp(p, "new", 3) == 0) {
             xb_reset();
         } else if (strncmp(p, "setboard", 8) == 0) {
+            /* like `new` but with a given FEN: full state reset so a setboard
+               followed directly by `go` works even after a finished game. */
             parse_fen(&gpos, skipsp(p + 8));
             g_sigs_n = 0; gstack_n = 0;
             g_sigs[g_sigs_n++] = pos_sig(&gpos);
+            force_mode = 1; game_over = 0;
+            stop_now = 0; deadline = 0;
         } else if (strncmp(p, "force", 5) == 0) {
             force_mode = 1;
         } else if (strncmp(p, "playother", 9) == 0) {

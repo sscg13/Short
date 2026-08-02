@@ -1,17 +1,6 @@
-/* search.c - board representation, move generation, alpha-beta, perft */
+/* search.c - alpha-beta search and iterative deepening */
 
 #include "engine.h"
-
-static const int kn[8] = { -33, -31, -18, -14, 14, 18, 31, 33 };
-static const int ki[8] = { -17, -16, -15, -1, 1, 15, 16, 17 };
-static const int rb[4] = { -16, 1, 16, -1 };
-static const int bb[4] = { -17, -15, 15, 17 };
-static const int qd[8] = { -17, -16, -15, -1, 1, 15, 16, 17 };
-static const int pw[4] = { WN, WB, WR, WQ };
-static const int pb[4] = { BN, BB, BR, BQ };
-static const int mval[8] = { 0, 100, 320, 330, 500, 900, 0 };
-
-unsigned int movebuf[12][256];
 
 volatile int stop_now = 0;
 long deadline = 0;                   /* ms deadline, 0 = no limit */
@@ -20,291 +9,26 @@ static long nodes_search;
 static unsigned long rep_path[64];      /* position sigs along the current search line */
 static int rep_n;
 
-/* ------------------------------------------------------------------ */
-/* make / unmake                                                      */
-/* ------------------------------------------------------------------ */
+static int killers[MAXPLY][2];          /* two killer moves per ply (quiet only) */
 
-void do_make(Pos *p, unsigned int m, Undo *u) {
-    int from = mfrom(m), to = mto(m);
-    int fl = mfl(m);
-    int piece = p->board[from];
-    int promo = ispromo(m) ? (CO(piece) | (fl + 1)) : 0;
+/* root move list + scores, reused across iterative-deepening iterations */
+static unsigned int root_m[256];
+static int root_score[256];
+static int root_n;
 
-    u->cap = p->board[to];
-    u->castle = p->castle;
-    u->ep = p->ep;
-
-    p->board[to] = promo ? promo : piece;
-    p->board[from] = EMPTY;
-
-    if (fl == MF_CASTLE) {
-        if (to == 0x06)      { p->board[0x05] = WR; p->board[0x07] = EMPTY; }
-        else if (to == 0x02) { p->board[0x03] = WR; p->board[0x00] = EMPTY; }
-        else if (to == 0x76) { p->board[0x75] = BR; p->board[0x77] = EMPTY; }
-        else if (to == 0x72) { p->board[0x73] = BR; p->board[0x70] = EMPTY; }
-    } else if (fl == MF_EP) {
-        if (p->side == 0) p->board[to - 16] = EMPTY;
-        else              p->board[to + 16] = EMPTY;
-    }
-
-    if (TY(piece) == 6) {
-        if (from == 0x04) p->castle &= ~3;
-        else if (from == 0x74) p->castle &= ~12;
-    }
-    if (from == 0x00 || to == 0x00) p->castle &= ~2;
-    if (from == 0x07 || to == 0x07) p->castle &= ~1;
-    if (from == 0x70 || to == 0x70) p->castle &= ~8;
-    if (from == 0x77 || to == 0x77) p->castle &= ~4;
-
-    p->ep = -1;
-    if (piece == WP && to == from + 32) p->ep = from + 16;
-    else if (piece == BP && to == from - 32) p->ep = from - 16;
-
-    if (TY(piece) == 6) p->ks[p->side] = to;
-
-    p->side ^= 1;
-}
-
-void undo_move(Pos *p, unsigned int m, Undo *u) {
-    int from = mfrom(m), to = mto(m);
-    int fl = mfl(m);
-    int piece = p->board[to];
-
-    p->side ^= 1;
-
-    if (ispromo(m)) piece = (p->side == 0) ? WP : BP;
-    p->board[from] = piece;
-    p->board[to] = u->cap;
-
-    if (fl == MF_CASTLE) {
-        if (to == 0x06)      { p->board[0x07] = WR; p->board[0x05] = EMPTY; }
-        else if (to == 0x02) { p->board[0x00] = WR; p->board[0x03] = EMPTY; }
-        else if (to == 0x76) { p->board[0x77] = BR; p->board[0x75] = EMPTY; }
-        else if (to == 0x72) { p->board[0x70] = BR; p->board[0x73] = EMPTY; }
-    } else if (fl == MF_EP) {
-        if (p->side == 0) p->board[to - 16] = BP;
-        else              p->board[to + 16] = WP;
-    }
-
-    p->castle = u->castle;
-    p->ep = u->ep;
-    if (TY(piece) == 6) p->ks[p->side] = from;
-}
-
-/* ------------------------------------------------------------------ */
-/* attacks                                                            */
-/* ------------------------------------------------------------------ */
-
-int is_attacked(Pos *p, int sq, int by) {
-    int i, to, d;
-    int pc;
-
-    if (by == 0) {
-        to = sq - 17; if ((to & 0x88) == 0 && p->board[to] == WP) return 1;
-        to = sq - 15; if ((to & 0x88) == 0 && p->board[to] == WP) return 1;
-    } else {
-        to = sq + 15; if ((to & 0x88) == 0 && p->board[to] == BP) return 1;
-        to = sq + 17; if ((to & 0x88) == 0 && p->board[to] == BP) return 1;
-    }
-
-    for (i = 0; i < 8; i++) {
-        to = sq + kn[i];
-        if ((to & 0x88) == 0 && p->board[to] == (by ? BN : WN)) return 1;
-    }
-    for (i = 0; i < 8; i++) {
-        to = sq + ki[i];
-        if ((to & 0x88) == 0 && p->board[to] == (by ? BK : WK)) return 1;
-    }
-    for (i = 0; i < 4; i++) {
-        d = rb[i]; to = sq + d;
-        while ((to & 0x88) == 0) {
-            pc = p->board[to];
-            if (pc) {
-                if (by ? (pc == BR || pc == BQ) : (pc == WR || pc == WQ)) return 1;
-                break;
-            }
-            to += d;
+/* selection sort the root moves by last iteration's score (best first) */
+static void sort_root(void) {
+    int i, j, best;
+    for (i = 0; i < root_n - 1; i++) {
+        best = i;
+        for (j = i + 1; j < root_n; j++)
+            if (root_score[j] > root_score[best]) best = j;
+        if (best != i) {
+            unsigned int tm = root_m[i]; int ts = root_score[i];
+            root_m[i] = root_m[best]; root_m[best] = tm;
+            root_score[i] = root_score[best]; root_score[best] = ts;
         }
     }
-    for (i = 0; i < 4; i++) {
-        d = bb[i]; to = sq + d;
-        while ((to & 0x88) == 0) {
-            pc = p->board[to];
-            if (pc) {
-                if (by ? (pc == BB || pc == BQ) : (pc == WB || pc == WQ)) return 1;
-                break;
-            }
-            to += d;
-        }
-    }
-    return 0;
-}
-
-/* ------------------------------------------------------------------ */
-/* move generation (pseudo-legal)                                     */
-/* ------------------------------------------------------------------ */
-
-int gen_moves(Pos *p, unsigned int *list) {
-    int n = 0, from, to, to2, pc, pt, us = p->side, them = us ^ 1;
-    int i, d, fwd, r;
-
-    for (from = 0; from < 128; from++) {
-        pc = p->board[from];
-        if (!pc) continue;
-        if (CO(pc) != (us ? 8 : 0)) continue;
-        pt = TY(pc);
-
-        if (pt == WP || pt == BP) {
-            int isW = (pc == WP), prank, srank;
-            fwd = isW ? 16 : -16;
-            r = from >> 4;
-            prank = isW ? 6 : 1;   /* row index of from-square for a promoting push */
-            srank = isW ? 1 : 6;   /* row index of from-square for a double push */
-
-            to = from + fwd;
-            if ((to & 0x88) == 0 && p->board[to] == EMPTY) {
-                if (r == prank) {
-                    for (i = 0; i < 4; i++)
-                        list[n++] = MK(to, from, 0, isW ? pw[i] : pb[i]);
-                } else {
-                    list[n++] = MK(to, from, 0, 0);
-                    if (r == srank) {
-                        to2 = from + 2 * fwd;
-                        if ((to2 & 0x88) == 0 && p->board[to2] == EMPTY)
-                            list[n++] = MK(to2, from, 0, 0);
-                    }
-                }
-            }
-
-            for (d = -1; d <= 1; d += 2) {
-                to = from + fwd + d;
-                if ((to & 0x88) != 0) continue;
-                if (to == p->ep) {
-                    list[n++] = MK(to, from, MF_EP, 0);
-                } else {
-                    int tgt = p->board[to];
-                    if (tgt && CO(tgt) == (them ? 8 : 0)) {
-                        if (r == prank) {
-                            for (i = 0; i < 4; i++)
-                                list[n++] = MK(to, from, 0, isW ? pw[i] : pb[i]);
-                        } else {
-                            list[n++] = MK(to, from, 0, 0);
-                        }
-                    }
-                }
-            }
-        } else if (pt == WN || pt == BN) {
-            for (i = 0; i < 8; i++) {
-                to = from + kn[i];
-                if ((to & 0x88) != 0) continue;
-                if (!p->board[to] || CO(p->board[to]) != CO(pc))
-                    list[n++] = MK(to, from, 0, 0);
-            }
-        } else if (pt == WK || pt == BK) {
-            for (i = 0; i < 8; i++) {
-                to = from + ki[i];
-                if ((to & 0x88) != 0) continue;
-                if (!p->board[to] || CO(p->board[to]) != CO(pc))
-                    list[n++] = MK(to, from, 0, 0);
-            }
-        } else {
-            const int *dirs;
-            int ndir;
-            if (pt == WB || pt == BB)      { dirs = bb; ndir = 4; }
-            else if (pt == WR || pt == BR) { dirs = rb; ndir = 4; }
-            else                           { dirs = qd; ndir = 8; }
-            for (i = 0; i < ndir; i++) {
-                d = dirs[i];
-                to = from + d;
-                while ((to & 0x88) == 0) {
-                    int tgt = p->board[to];
-                    if (!tgt) {
-                        list[n++] = MK(to, from, 0, 0);
-                    } else {
-                        if (CO(tgt) != CO(pc)) list[n++] = MK(to, from, 0, 0);
-                        break;
-                    }
-                    to += d;
-                }
-            }
-        }
-    }
-
-    if (us == 0) {
-        if ((p->castle & 1) && p->board[0x04] == WK && p->board[0x07] == WR &&
-            p->board[0x05] == EMPTY && p->board[0x06] == EMPTY &&
-            !is_attacked(p, 0x04, 1) && !is_attacked(p, 0x05, 1) && !is_attacked(p, 0x06, 1))
-            list[n++] = MK(0x06, 0x04, MF_CASTLE, 0);
-        if ((p->castle & 2) && p->board[0x04] == WK && p->board[0x00] == WR &&
-            p->board[0x01] == EMPTY && p->board[0x02] == EMPTY && p->board[0x03] == EMPTY &&
-            !is_attacked(p, 0x04, 1) && !is_attacked(p, 0x03, 1) && !is_attacked(p, 0x02, 1))
-            list[n++] = MK(0x02, 0x04, MF_CASTLE, 0);
-    } else {
-        if ((p->castle & 4) && p->board[0x74] == BK && p->board[0x77] == BR &&
-            p->board[0x75] == EMPTY && p->board[0x76] == EMPTY &&
-            !is_attacked(p, 0x74, 0) && !is_attacked(p, 0x75, 0) && !is_attacked(p, 0x76, 0))
-            list[n++] = MK(0x76, 0x74, MF_CASTLE, 0);
-        if ((p->castle & 8) && p->board[0x74] == BK && p->board[0x70] == BR &&
-            p->board[0x71] == EMPTY && p->board[0x72] == EMPTY && p->board[0x73] == EMPTY &&
-            !is_attacked(p, 0x74, 0) && !is_attacked(p, 0x73, 0) && !is_attacked(p, 0x72, 0))
-            list[n++] = MK(0x72, 0x74, MF_CASTLE, 0);
-    }
-    return n;
-}
-
-/* ------------------------------------------------------------------ */
-/* perft                                                              */
-/* ------------------------------------------------------------------ */
-
-long perft(Pos *p, int depth) {
-    long nodes = 0;
-    unsigned int *list = movebuf[depth];
-    int n = gen_moves(p, list);
-    int i;
-
-    for (i = 0; i < n; i++) {
-        Undo u;
-        int us;
-        do_make(p, list[i], &u);
-        us = p->side ^ 1;              /* mover */
-        if (!is_attacked(p, p->ks[us], p->side)) {   /* enemy of mover */
-            if (depth == 1) nodes++;
-            else nodes += perft(p, depth - 1);
-        }
-        undo_move(p, list[i], &u);
-    }
-    return nodes;
-}
-
-/* ------------------------------------------------------------------ */
-/* evaluation (material only)                                         */
-/* ------------------------------------------------------------------ */
-
-static int evaluate(Pos *p) {
-    int score = 0, sq;
-    for (sq = 0; sq < 128; sq++) {
-        int pc = p->board[sq];
-        if (!pc) continue;
-        if (CO(pc) == 0) score += mval[TY(pc)];
-        else             score -= mval[TY(pc)];
-    }
-    return (p->side == 0) ? score : -score;   /* negamax: side to move */
-}
-
-/* ------------------------------------------------------------------ */
-/* position signature (for repetition)                                */
-/* ------------------------------------------------------------------ */
-
-unsigned long pos_sig(Pos *p) {
-    unsigned long h = 0x811C9DC5UL;
-    int i;
-    for (i = 0; i < 128; i++)
-        if (p->board[i])
-            h = (h * 16777619UL) ^ (unsigned long)((i << 4) | p->board[i]);
-    h = (h * 16777619UL) ^ (unsigned long)p->side;
-    h = (h * 16777619UL) ^ (unsigned long)(p->castle & 0xF);
-    h = (h * 16777619UL) ^ (unsigned long)(p->ep + 1);
-    return h;
 }
 
 /* ------------------------------------------------------------------ */
@@ -312,9 +36,9 @@ unsigned long pos_sig(Pos *p) {
 /* ------------------------------------------------------------------ */
 
 static int alphabeta(Pos *p, int depth, int alpha, int beta, int ply, int half) {
-    unsigned int *list = movebuf[depth];
-    int n = gen_moves(p, list);
-    int best = -INF, legal = 0, i;
+    MGen mg;
+    unsigned int m;
+    int best = -INF, legal = 0;
 
     nodes_search++;
     if ((nodes_search & 0x3FF) == 0 && deadline > 0 && (long)clock() >= deadline)
@@ -325,6 +49,7 @@ static int alphabeta(Pos *p, int depth, int alpha, int beta, int ply, int half) 
     {
         unsigned long sig = pos_sig(p);
         int prior = 0;
+        int i;
         for (i = 0; i < g_sigs_n; i++)
             if (g_sigs[i] == sig) { prior++; if (prior >= 2) break; }
         if (prior < 2)
@@ -337,24 +62,33 @@ static int alphabeta(Pos *p, int depth, int alpha, int beta, int ply, int half) 
     /* 50-move rule: 100 half-moves without a pawn move or capture is a draw */
     if (half >= 100) return 0;
 
-    for (i = 0; i < n; i++) {
+    mgen_init(p, &mg, ply, killers[ply][0], killers[ply][1], 0);   /* ttm empty for now */
+
+    while ((m = next_move(p, &mg)) != 0) {
         Undo u;
         int us, score, pc, is_cap, child_half;
-        pc = p->board[mfrom(list[i])];           /* moving piece, before the make */
-        do_make(p, list[i], &u);
+        pc = p->board[mfrom(m)];                 /* moving piece, before the make */
+        do_make(p, m, &u);
         us = p->side ^ 1;                        /* mover */
         if (!is_attacked(p, p->ks[us], p->side)) {
             legal = 1;
-            is_cap = (u.cap != EMPTY) || (mfl(list[i]) == MF_EP);
+            is_cap = (u.cap != EMPTY) || (mfl(m) == MF_EP);
             child_half = (TY(pc) == 1 || is_cap) ? 0 : half + 1;
             if (depth <= 0) score = -evaluate(p);
             else score = -alphabeta(p, depth - 1, -beta, -alpha, ply + 1, child_half);
             if (score > best) best = score;
             if (best > alpha) alpha = best;
-            undo_move(p, list[i], &u);
-            if (alpha >= beta) break;            /* beta cutoff */
+            undo_move(p, m, &u);
+            if (alpha >= beta) {
+                /* killer: a true quiet (no promo/ep/castle flag, empty target) */
+                if (mfl(m) == 0 && u.cap == EMPTY) {
+                    killers[ply][1] = killers[ply][0];
+                    killers[ply][0] = m;
+                }
+                break;                            /* beta cutoff */
+            }
         } else {
-            undo_move(p, list[i], &u);
+            undo_move(p, m, &u);
         }
     }
 
@@ -366,11 +100,11 @@ static int alphabeta(Pos *p, int depth, int alpha, int beta, int ply, int half) 
 }
 
 void search_root(Pos *p, int maxdepth) {
-    int d;
+    int d, i;
+    root_n = gen_moves(p, root_m);
+    for (i = 0; i < root_n; i++) root_score[i] = 0;
     for (d = 1; d <= maxdepth; d++) {
-        unsigned int *list = movebuf[11];                /* dedicated root row */
-        int n = gen_moves(p, list);
-        int alpha = -INF, beta = INF, i;
+        int alpha = -INF, beta = INF;
         int bestscore = -INF, bf = 0, bt = 0;
         clock_t t0, t1;
         double secs;
@@ -378,22 +112,24 @@ void search_root(Pos *p, int maxdepth) {
         nodes_search = 0;
         t0 = clock();
         rep_n = 0;
-        for (i = 0; i < n; i++) {
+        sort_root();
+        for (i = 0; i < root_n; i++) {
             Undo u;
             int us, score;
-            do_make(p, list[i], &u);
+            do_make(p, root_m[i], &u);
             us = p->side ^ 1;
             if (!is_attacked(p, p->ks[us], p->side)) {
-                int pc = p->board[mfrom(list[i])];   /* moving piece, before the make */
-                int is_cap = (u.cap != EMPTY) || (mfl(list[i]) == MF_EP);
+                int pc = p->board[mfrom(root_m[i])];   /* moving piece, before the make */
+                int is_cap = (u.cap != EMPTY) || (mfl(root_m[i]) == MF_EP);
                 int child_half = (TY(pc) == 1 || is_cap) ? 0 : g_half + 1;
                 score = -alphabeta(p, d - 1, -beta, -alpha, 1, child_half);
-                if (score > bestscore) { bestscore = score; bf = mfrom(list[i]); bt = mto(list[i]); }
+                root_score[i] = score;
+                if (score > bestscore) { bestscore = score; bf = mfrom(root_m[i]); bt = mto(root_m[i]); }
                 if (score > alpha) alpha = score;
-                undo_move(p, list[i], &u);
+                undo_move(p, root_m[i], &u);
                 if (alpha >= beta) break;
             } else {
-                undo_move(p, list[i], &u);
+                undo_move(p, root_m[i], &u);
             }
         }
         t1 = clock();
@@ -405,33 +141,35 @@ void search_root(Pos *p, int maxdepth) {
 
 /* iterative deepening root search; returns best move (0 if aborted before any depth) */
 unsigned int think(Pos *p, int maxdepth) {
-    int d;
+    int d, i;
     unsigned int bestm = 0;
     long t0 = (long)clock();
     dbgf("think begin maxdepth=%d deadline=%ld\n", maxdepth, deadline);
+    root_n = gen_moves(p, root_m);
+    for (i = 0; i < root_n; i++) root_score[i] = 0;
     for (d = 1; d <= maxdepth; d++) {
-        unsigned int *list = movebuf[11];
-        int n = gen_moves(p, list);
-        int alpha = -INF, beta = INF, i, bsc = -INF;
+        int alpha = -INF, beta = INF, bsc = -INF;
         unsigned int bm = 0;
         if (deadline > 0 && (long)clock() >= deadline) break;
         nodes_search = 0;
         stop_now = 0;
         rep_n = 0;
-        for (i = 0; i < n; i++) {
+        sort_root();
+        for (i = 0; i < root_n; i++) {
             Undo u; int us, score;
-            do_make(p, list[i], &u);
+            do_make(p, root_m[i], &u);
             us = p->side ^ 1;
             if (!is_attacked(p, p->ks[us], p->side)) {
-                int pc = p->board[mfrom(list[i])];   /* moving piece, before the make */
-                int is_cap = (u.cap != EMPTY) || (mfl(list[i]) == MF_EP);
+                int pc = p->board[mfrom(root_m[i])];   /* moving piece, before the make */
+                int is_cap = (u.cap != EMPTY) || (mfl(root_m[i]) == MF_EP);
                 int child_half = (TY(pc) == 1 || is_cap) ? 0 : g_half + 1;
                 score = -alphabeta(p, d - 1, -beta, -alpha, 1, child_half);
-                if (score > bsc) { bsc = score; bm = list[i]; }
+                root_score[i] = score;
+                if (score > bsc) { bsc = score; bm = root_m[i]; }
                 if (score > alpha) alpha = score;
-                undo_move(p, list[i], &u);
+                undo_move(p, root_m[i], &u);
                 if (alpha >= beta) break;
-            } else undo_move(p, list[i], &u);
+            } else undo_move(p, root_m[i], &u);
             if (stop_now) break;
         }
         if (stop_now) break;
@@ -443,4 +181,96 @@ unsigned int think(Pos *p, int maxdepth) {
     }
     dbgf("think end bestm=%04X stop=%d d=%d\n", (unsigned)bestm, (int)stop_now, d - 1);
     return bestm;
+}
+
+/* ------------------------------------------------------------------ */
+/* OpenBench bench                                                     */
+/* ------------------------------------------------------------------ */
+/* OpenBench invokes the engine as "<binary> bench", then scans stdout
+   (from the bottom) for a "nodes" count and an "nps" value. The bench
+   MUST be deterministic: fixed positions searched to a fixed depth, no
+   time-based cutoffs (deadline stays 0). Run "chess bench [depth]"
+   locally to tune BENCH_DEPTH so the whole run lands in ~1-5 seconds. */
+
+#define BENCH_DEPTH 6   /* calibrated: 8 positions at depth 6 ~= 4s on this machine */
+
+static const char *bench_fens[] = {
+    "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+    "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+    "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+    "r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/2N2N2/PPPP1PPP/R1BQK2R w KQkq - 0 1",
+    "r1bq1rk1/pppp1ppp/2n2n2/2b1p3/2B1P3/2N2N2/PPPP1PPP/R1BQ1RK1 w - - 0 1",
+    "4rrk1/ppp1bppp/2np1n2/8/2BP4/2N2N2/PP2BPPP/R4RK1 w - - 0 1",
+    "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10",
+    "8/2p5/3p1k2/4p3/4P3/3P4/5PKP/8 b - - 0 1"
+};
+
+#define BENCH_N ((int)(sizeof(bench_fens) / sizeof(bench_fens[0])))
+
+int bench(int depth) {
+    int i, d, k;
+    long total_nodes = 0;
+    clock_t b0, b1;
+    double bsecs;
+
+    if (depth < 1) depth = BENCH_DEPTH;
+    if (depth > 20) depth = 20;
+    deadline = 0;                                /* keep the search timing-independent */
+    stop_now = 0;
+
+    b0 = clock();
+    for (i = 0; i < BENCH_N; i++) {
+        Pos p;
+        long pos_nodes = 0;
+        int bestscore = -INF, bf = 0, bt = 0;
+        clock_t t0, t1;
+        double secs;
+
+        parse_fen(&p, bench_fens[i]);
+        g_sigs_n = 0;                            /* no game-history repetitions */
+        memset(killers, 0, sizeof killers);
+        root_n = gen_moves(&p, root_m);
+        for (k = 0; k < root_n; k++) root_score[k] = 0;
+
+        t0 = clock();
+        for (d = 1; d <= depth; d++) {
+            int alpha = -INF, beta = INF, bsc = -INF;
+            unsigned int bm = 0;
+            nodes_search = 0;
+            rep_n = 0;
+            stop_now = 0;
+            sort_root();
+            for (k = 0; k < root_n; k++) {
+                Undo u; int us, score;
+                do_make(&p, root_m[k], &u);
+                us = p.side ^ 1;
+                if (!is_attacked(&p, p.ks[us], p.side)) {
+                    int pc = p.board[mfrom(root_m[k])];
+                    int is_cap = (u.cap != EMPTY) || (mfl(root_m[k]) == MF_EP);
+                    int child_half = (TY(pc) == 1 || is_cap) ? 0 : g_half + 1;
+                    score = -alphabeta(&p, d - 1, -beta, -alpha, 1, child_half);
+                    root_score[k] = score;
+                    if (score > bsc) { bsc = score; bm = root_m[k]; }
+                    if (score > alpha) alpha = score;
+                    undo_move(&p, root_m[k], &u);
+                    if (alpha >= beta) break;
+                } else undo_move(&p, root_m[k], &u);
+            }
+            pos_nodes += nodes_search;
+            if (d == depth) { bestscore = bsc; bf = mfrom(bm); bt = mto(bm); }
+        }
+        t1 = clock();
+        secs = (double)(t1 - t0) / (double)CLOCKS_PER_SEC;
+        total_nodes += pos_nodes;
+        printf("position %2d/%d  depth %2d  score %5d  move %02X%02X  n=%10ld  t=%7.2fs\n",
+               i + 1, BENCH_N, depth, bestscore, bf, bt, pos_nodes, secs);
+    }
+    b1 = clock();
+    bsecs = (double)(b1 - b0) / (double)CLOCKS_PER_SEC;
+
+    /* these two lines must stay the last output: OpenBench matches them
+       scanning up from the bottom of stdout */
+    printf("\nNodes searched : %ld\n", total_nodes);
+    printf("NPS: %ld\n", (long)(total_nodes / (bsecs > 0.0 ? bsecs : 1.0)));
+    return 0;
 }

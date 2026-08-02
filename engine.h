@@ -58,6 +58,18 @@ typedef struct {
 
 typedef struct { int cap, castle, ep; } Undo;
 
+/* staged move generator state (see chess.c). One per active search node. */
+typedef struct {
+    unsigned int *list;   /* active move list (movebuf[ply]) */
+    int n;                /* number of moves in the active list */
+    int idx;              /* next index to consider */
+    int stage;            /* MG_TT .. MG_DONE */
+    unsigned int ttm;     /* transposition-table move (0 = none for now) */
+    unsigned int k0, k1;  /* killer moves (0 = none) */
+} MGen;
+
+#define MAXPLY 32         /* killers[] rows; movebuf rows cover ply 0..MAXPLY-1 */
+
 #define INF  30000
 #define MATE 29000
 
@@ -71,7 +83,7 @@ typedef struct { int cap, castle, ep; } Undo;
 extern int g_half, g_full;              /* halfmove clock, fullmove number */
 extern unsigned long g_sigs[1024];      /* position signatures for repetition */
 extern int g_sigs_n;
-extern unsigned int movebuf[12][256];   /* per-depth move lists + root + aux */
+extern unsigned int movebuf[32][256];   /* move lists, one row per search ply + aux */
 extern volatile int stop_now;
 extern long deadline;                   /* ms deadline, 0 = no limit */
 extern int post_on;
@@ -85,13 +97,19 @@ long perft(Pos *p, int depth);
 unsigned long pos_sig(Pos *p);
 void search_root(Pos *p, int maxdepth);
 unsigned int think(Pos *p, int maxdepth);
+int bench(int depth);
 
 /* ---- xboard.c ---- */
 void dbgf(const char *fmt, ...);
 void xb_outf(const char *fmt, ...);
 int xboard_main(void);
 
-/* ---- chess.c ---- */
+/* ---- chess.c (board, movegen, eval, perft, FEN) ---- */
 void parse_fen(Pos *p, const char *s);
+int evaluate(Pos *p);
+int gen_caps(Pos *p, unsigned int *list);
+int gen_quiets(Pos *p, unsigned int *list);
+void mgen_init(Pos *p, MGen *g, int ply, int k0, int k1, unsigned int ttm);
+unsigned int next_move(Pos *p, MGen *g);
 
 #endif
