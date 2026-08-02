@@ -66,6 +66,7 @@ typedef struct {
     int stage;            /* MG_TT .. MG_DONE */
     unsigned int ttm;     /* transposition-table move (0 = none for now) */
     unsigned int k0, k1;  /* killer moves (0 = none) */
+    int caps_only;        /* stop after the captures stage (quiescence) */
 } MGen;
 
 #define MAXPLY 32         /* killers[] rows; movebuf rows cover ply 0..MAXPLY-1 */
@@ -110,6 +111,7 @@ int evaluate(Pos *p);
 int gen_caps(Pos *p, unsigned int *list);
 int gen_quiets(Pos *p, unsigned int *list);
 void mgen_init(Pos *p, MGen *g, int ply, int k0, int k1, unsigned int ttm);
+void mgen_init_q(Pos *p, MGen *g, int ply);   /* captures only (quiescence) */
 unsigned int next_move(Pos *p, MGen *g);
 
 #endif

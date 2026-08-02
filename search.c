@@ -11,6 +11,9 @@ static int rep_n;
 
 static int killers[MAXPLY][2];          /* two killer moves per ply (quiet only) */
 
+#define MAX_QDEPTH 8    /* longest capture chain past the search leaf; guards against
+                           qsearch explosions (deep recapture lines) */
+
 /* root move list + scores, reused across iterative-deepening iterations */
 static unsigned int root_m[256];
 static int root_score[256];
@@ -34,6 +37,8 @@ static void sort_root(void) {
 /* ------------------------------------------------------------------ */
 /* alpha-beta search                                                  */
 /* ------------------------------------------------------------------ */
+
+static int qsearch(Pos *p, int alpha, int beta, int ply, int half, int qd);
 
 static int alphabeta(Pos *p, int depth, int alpha, int beta, int ply, int half) {
     MGen mg;
@@ -74,7 +79,7 @@ static int alphabeta(Pos *p, int depth, int alpha, int beta, int ply, int half) 
             legal = 1;
             is_cap = (u.cap != EMPTY) || (mfl(m) == MF_EP);
             child_half = (TY(pc) == 1 || is_cap) ? 0 : half + 1;
-            if (depth <= 0) score = -evaluate(p);
+            if (depth <= 0) score = -qsearch(p, -beta, -alpha, ply + 1, child_half, MAX_QDEPTH);
             else score = -alphabeta(p, depth - 1, -beta, -alpha, ply + 1, child_half);
             if (score > best) best = score;
             if (best > alpha) alpha = best;
@@ -97,6 +102,65 @@ static int alphabeta(Pos *p, int depth, int alpha, int beta, int ply, int half) 
         /* mate scores: -(MATE - ply) so the root prefers the SHORTEST mate */
         return is_attacked(p, p->ks[p->side], p->side ^ 1) ? -(MATE - ply) : 0;
     return best;
+}
+
+/* ------------------------------------------------------------------ */
+/* quiescence search                                                  */
+/* ------------------------------------------------------------------ */
+
+/* Stand-pat alpha-beta over captures only, ordered by MVV-LVA (reuses the staged
+   generator in caps-only mode). Called at every alpha-beta horizon (depth 0) so the
+   eval is stable and material wins/losses don't hide behind the horizon.
+   If the side to move is in check, stand-pat is invalid: generate ALL legal moves
+   (full staged generator) to find evasions, and score a mate properly.
+   Returns the score from the side-to-move's point of view (negamax). */
+static int qsearch(Pos *p, int alpha, int beta, int ply, int half, int qd) {
+    MGen mg;
+    unsigned int m;
+    int in_check, stand, legal = 0;
+
+    nodes_search++;
+    if ((nodes_search & 0x3FF) == 0 && deadline > 0 && (long)clock() >= deadline)
+        stop_now = 1;
+    if (stop_now) return evaluate(p);
+    if (qd <= 0) return evaluate(p);             /* ply budget spent: static eval */
+    if (ply >= MAXPLY - 4) return evaluate(p);   /* stay clear of movebuf aux rows */
+    if (half >= 100) return 0;
+
+    in_check = is_attacked(p, p->ks[p->side], p->side ^ 1);
+    if (!in_check) {
+        stand = evaluate(p);
+        if (stand >= beta) return stand;         /* stand-pat cutoff */
+        if (stand > alpha) alpha = stand;
+    }
+
+    if (in_check) mgen_init(p, &mg, ply, 0, 0, 0);  /* all legal evasions */
+    else          mgen_init_q(p, &mg, ply);          /* captures only, MVV-LVA */
+
+    while ((m = next_move(p, &mg)) != 0) {
+        Undo u;
+        int us, score, pc, is_cap, child_half;
+        pc = p->board[mfrom(m)];
+        do_make(p, m, &u);
+        us = p->side ^ 1;
+        if (!is_attacked(p, p->ks[us], p->side)) {
+            legal = 1;
+            is_cap = (u.cap != EMPTY) || (mfl(m) == MF_EP);
+            child_half = (TY(pc) == 1 || is_cap) ? 0 : half + 1;
+            score = -qsearch(p, -beta, -alpha, ply + 1, child_half, qd - 1);
+            undo_move(p, m, &u);
+            if (score > alpha) {
+                alpha = score;
+                if (alpha >= beta) break;         /* beta cutoff */
+            }
+        } else {
+            undo_move(p, m, &u);
+        }
+    }
+
+    if (!legal && in_check)
+        return -(MATE - ply);                    /* mated in the qsearch */
+    return alpha;
 }
 
 void search_root(Pos *p, int maxdepth) {
@@ -192,7 +256,8 @@ unsigned int think(Pos *p, int maxdepth) {
    time-based cutoffs (deadline stays 0). Run "chess bench [depth]"
    locally to tune BENCH_DEPTH so the whole run lands in ~1-5 seconds. */
 
-#define BENCH_DEPTH 6   /* calibrated: 8 positions at depth 6 ~= 4s on this machine */
+#define BENCH_DEPTH 5   /* calibrated: 8 positions at depth 5 ~= 2s on this machine
+                           (depth 6 ~= 8s; qsearch makes search nodes cheap per-node) */
 
 static const char *bench_fens[] = {
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",

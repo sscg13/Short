@@ -391,6 +391,19 @@ void mgen_init(Pos *p, MGen *g, int ply, int k0, int k1, unsigned int ttm) {
     g->ttm = ttm;
     g->k0 = k0;
     g->k1 = k1;
+    g->caps_only = 0;
+}
+
+/* quiescence init: captures only (MVV-LVA), no killers/quiets */
+void mgen_init_q(Pos *p, MGen *g, int ply) {
+    (void)p;
+    g->list = movebuf[ply];
+    g->n = 0;
+    g->idx = 0;
+    g->stage = MG_TT;
+    g->ttm = 0;
+    g->k0 = g->k1 = 0;
+    g->caps_only = 1;
 }
 
 unsigned int next_move(Pos *p, MGen *g) {
@@ -419,6 +432,7 @@ again:
             g->idx++;
             return m;
         }
+        if (g->caps_only) { g->stage = MG_DONE; return 0; }   /* quiescence */
         g->stage = MG_KILLERS; g->idx = 0;
         goto again;
 
