@@ -49,6 +49,22 @@ signed char nn_b1[NNUE_N];   /* layer-1 bias (per hidden neuron, shared by both 
 signed char nn_w2[NNUE_W2_SIZE];
 int nn_bias;                 /* output bias, i16, quantized at 128*64 */
 
+#if !defined(__WATCOMC__)
+/* Embed chess.net into the binary (gcc build: OpenBench runs the bare binary, so
+   there is no runtime file dependency). Rebuild after re-converting a net. */
+__asm__(
+    ".section .rodata\n"
+    ".global nn_embedded_net_start\n"
+    "nn_embedded_net_start:\n"
+    ".incbin \"chess.net\"\n"
+    ".global nn_embedded_net_end\n"
+    "nn_embedded_net_end:\n"
+    ".text\n"
+);
+extern const unsigned char nn_embedded_net_start[];
+extern const unsigned char nn_embedded_net_end[];
+#endif
+
 static short nn_acc[2][NNUE_N];   /* current pre-activations, white POV / black POV */
 
 /* per-ply record of which (row, sign) deltas were applied, so undo reverses them */
@@ -249,29 +265,56 @@ int nnue_eval(Pos *p) {
 /* weight loading                                                      */
 /* ------------------------------------------------------------------ */
 
-int nnue_load(const char *path) {
-    FILE *f = fopen(path, "rb");
-    unsigned char hdr[12], b[2];
+/* parse a net blob (engine format, see NNUE.md) from memory */
+static int nnue_parse_blob(const unsigned char *p, long len) {
     unsigned int feats, hN;
-    if (!f) return 0;
-    if (fread(hdr, 1, 12, f) != 12) goto bad;
-    if (hdr[0] != 'N' || hdr[1] != 'N' || hdr[2] != 'U' || hdr[3] != 'E') goto bad;
-    if (hdr[4] != 1 || hdr[5] != 0) goto bad;              /* version 1 */
-    feats = (unsigned int)hdr[6] | ((unsigned int)hdr[7] << 8);
-    hN    = (unsigned int)hdr[8] | ((unsigned int)hdr[9] << 8);
-    if (feats != NNUE_FEATURES || hN != NNUE_N) goto bad;
-    if (fread(nn_w1, 1, (size_t)NNUE_W1_SIZE, f) != (size_t)NNUE_W1_SIZE) goto bad;
-    if (fread(nn_b1, 1, (size_t)NNUE_N, f) != (size_t)NNUE_N) goto bad;
-    if (fread(nn_w2, 1, (size_t)NNUE_W2_SIZE, f) != (size_t)NNUE_W2_SIZE) goto bad;
-    if (fread(b, 1, 2, f) != 2) goto bad;
-    nn_bias = (int)(unsigned char)b[0] | ((int)(unsigned char)b[1] << 8);
-    if ((unsigned)nn_bias > 32767) nn_bias -= 65536;   /* sign-extend the i16 */
-    fclose(f);
+    long w1sz = (long)NNUE_FEATURES * NNUE_N;
+    long need = 12 + w1sz + NNUE_N + NNUE_W2_SIZE + 2;
+    if (len < need) return 0;
+    if (p[0] != 'N' || p[1] != 'N' || p[2] != 'U' || p[3] != 'E') return 0;
+    if (p[4] != 1 || p[5] != 0) return 0;                       /* version 1 */
+    feats = (unsigned int)p[6] | ((unsigned int)p[7] << 8);
+    hN    = (unsigned int)p[8] | ((unsigned int)p[9] << 8);
+    if (feats != NNUE_FEATURES || hN != NNUE_N) return 0;
+    memcpy(nn_w1, p + 12, (size_t)w1sz);
+    memcpy(nn_b1, p + 12 + w1sz, (size_t)NNUE_N);
+    memcpy(nn_w2, p + 12 + w1sz + NNUE_N, (size_t)NNUE_W2_SIZE);
+    nn_bias = (int)(unsigned char)p[12 + w1sz + NNUE_N + NNUE_W2_SIZE]
+            | ((int)(unsigned char)p[13 + w1sz + NNUE_N + NNUE_W2_SIZE] << 8);
+    if ((unsigned)nn_bias > 32767) nn_bias -= 65536;            /* sign-extend i16 */
     nnue_enabled = 1;
     return 1;
-bad:
+}
+
+int nnue_load(const char *path) {
+    FILE *f = fopen(path, "rb");
+    unsigned char *buf;
+    long len, got;
+    int ok;
+    if (!f) return 0;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 0; }
+    len = ftell(f);
+    if (len <= 0 || len > 200000L) { fclose(f); return 0; }
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return 0; }
+    buf = (unsigned char *)malloc((size_t)len);
+    if (!buf) { fclose(f); return 0; }
+    got = (long)fread(buf, 1, (size_t)len, f);
     fclose(f);
+    ok = (got == len) && nnue_parse_blob(buf, len);
+    free(buf);
+    return ok;
+}
+
+/* try the file first (lets --nnue override the bundled net), then the
+   embedded copy on the gcc build (OpenBench runs the bare binary) */
+int nnue_ensure_loaded(const char *path) {
+    if (nnue_load(path)) return 1;
+#if !defined(__WATCOMC__)
+    return nnue_parse_blob(nn_embedded_net_start,
+                           (long)(nn_embedded_net_end - nn_embedded_net_start));
+#else
     return 0;
+#endif
 }
 
 /* ------------------------------------------------------------------ */

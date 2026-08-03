@@ -640,13 +640,14 @@ int main(int argc, char **argv) {
     clock_t t0, t1;
     double secs;
 
-    /* NNUE net: `chess --nnue file ...` or auto-load chess.net from CWD */
+    /* NNUE net: `chess --nnue file ...` or auto-load chess.net from CWD
+       (the gcc build falls back to the net embedded in the binary) */
     if (argc > 2 && strcmp(argv[1], "--nnue") == 0) {
-        if (!nnue_load(argv[2])) printf("NNUE: load failed: %s\n", argv[2]);
+        if (!nnue_ensure_loaded(argv[2])) printf("NNUE: load failed: %s\n", argv[2]);
         for (j = 2; j < argc; j++) argv[j - 2] = argv[j];
         argc -= 2;
     } else {
-        nnue_load("chess.net");
+        nnue_ensure_loaded("chess.net");
     }
     if (argc == 1 || (argc > 1 && strcmp(argv[1], "xboard") == 0)) nn_log = 0;
     if (nn_log && nnue_enabled)

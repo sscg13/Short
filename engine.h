@@ -124,6 +124,7 @@ void nnue_make(Pos *p, unsigned int m, Undo *u);
 void nnue_undo(Pos *p);
 int nnue_eval(Pos *p);
 int nnue_load(const char *path);
+int nnue_ensure_loaded(const char *path);
 int nnue_selftest(const char *fen);
 
 /* ---- chess.c (board, movegen, eval, perft, FEN) ---- */
