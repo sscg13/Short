@@ -123,19 +123,35 @@ static int nn_row(int persp, int pc, int sq88, int mirror) {
     }
 }
 
-/* add sign * w1[row] to one perspective's accumulator and record the delta */
-static void nn_delta_apply(int persp, int row, int sign) {
+/* incremental add/remove of a feature row (make path): count, apply, record.
+   The loop is inline (no separate call) and pure add/sub (no sign multiply),
+   and base is a 16-bit shift instead of a 32-bit multiply (row<=703 -> <<6 fits). */
+static void nn_delta_add(int persp, int row) {
+    unsigned int base;
     int j;
     if (row < 0) return;
     PCOUNT(c_refresh);
-    {
-        long base = (long)row * NNUE_N;
-        for (j = 0; j < NNUE_N; j++)
-            nn_acc[persp][j] += (short)(sign * nn_w1[base + j]);
-    }
+    base = (unsigned)row << 6;
+    for (j = 0; j < NNUE_N; j++)
+        nn_acc[persp][j] += (short)nn_w1[base + j];
     if (nn_dn[nn_ply][persp] >= 0 && nn_dn[nn_ply][persp] < 4) {
         nn_delta[nn_ply][persp][nn_dn[nn_ply][persp]].row = (unsigned int)row;
-        nn_delta[nn_ply][persp][nn_dn[nn_ply][persp]].s = (signed char)sign;
+        nn_delta[nn_ply][persp][nn_dn[nn_ply][persp]].s = 1;
+    }
+    nn_dn[nn_ply][persp]++;
+}
+
+static void nn_delta_sub(int persp, int row) {
+    unsigned int base;
+    int j;
+    if (row < 0) return;
+    PCOUNT(c_refresh);
+    base = (unsigned)row << 6;
+    for (j = 0; j < NNUE_N; j++)
+        nn_acc[persp][j] -= (short)nn_w1[base + j];
+    if (nn_dn[nn_ply][persp] >= 0 && nn_dn[nn_ply][persp] < 4) {
+        nn_delta[nn_ply][persp][nn_dn[nn_ply][persp]].row = (unsigned int)row;
+        nn_delta[nn_ply][persp][nn_dn[nn_ply][persp]].s = -1;
     }
     nn_dn[nn_ply][persp]++;
 }
@@ -148,11 +164,11 @@ static void nn_compute_persp(Pos *p, int persp, short *out) {
     for (sq = 0; sq < 128; sq++) {
         int pc = p->board[sq];
         int row;
-        long base;
+        unsigned int base;
         if (!pc) continue;
         row = nn_row(persp, pc, sq, m[persp]);
         if (row < 0) continue;
-        base = (long)row * NNUE_N;
+        base = (unsigned)row << 6;
         for (k = 0; k < NNUE_N; k++)
             out[k] += (short)nn_w1[base + k];
     }
@@ -198,13 +214,13 @@ void nnue_make(Pos *p, unsigned int m, Undo *u) {
             PCOUNT(c_flip);
             nn_dn[nn_ply][persp] = -1;   /* every piece re-indexed: undo recomputes */
         } else {
-            nn_delta_apply(persp, nn_row(persp, mover, from, mpost[persp]), -1);
+            nn_delta_sub(persp, nn_row(persp, mover, from, mpost[persp]));
             if (u->cap != EMPTY && fl != MF_EP)
-                nn_delta_apply(persp, nn_row(persp, u->cap, to, mpost[persp]), -1);
+                nn_delta_sub(persp, nn_row(persp, u->cap, to, mpost[persp]));
             if (fl == MF_EP) {
                 int esq = (mover_col == 0) ? to - 16 : to + 16;
                 int ep = (mover_col == 0) ? BP : WP;
-                nn_delta_apply(persp, nn_row(persp, ep, esq, mpost[persp]), -1);
+                nn_delta_sub(persp, nn_row(persp, ep, esq, mpost[persp]));
             }
             if (fl == MF_CASTLE) {
                 int rf, rt, rook;
@@ -213,10 +229,10 @@ void nnue_make(Pos *p, unsigned int m, Undo *u) {
                 else if (to == 0x76) { rf = 0x77; rt = 0x75; }
                 else                 { rf = 0x70; rt = 0x73; }
                 rook = (mover_col == 0) ? WR : BR;
-                nn_delta_apply(persp, nn_row(persp, rook, rf, mpost[persp]), -1);
-                nn_delta_apply(persp, nn_row(persp, rook, rt, mpost[persp]), +1);
+                nn_delta_sub(persp, nn_row(persp, rook, rf, mpost[persp]));
+                nn_delta_add(persp, nn_row(persp, rook, rt, mpost[persp]));
             }
-            nn_delta_apply(persp, nn_row(persp, newp, to, mpost[persp]), +1);
+            nn_delta_add(persp, nn_row(persp, newp, to, mpost[persp]));
         }
     }
     for (persp = 0; persp < 2; persp++)
@@ -236,10 +252,14 @@ void nnue_undo(Pos *p) {
         }
         for (i = 0; i < nn_dn[nn_ply][persp]; i++) {
             unsigned int row = nn_delta[nn_ply][persp][i].row;
-            int sign = -nn_delta[nn_ply][persp][i].s;
-            long base = (long)row * NNUE_N;
-            for (j = 0; j < NNUE_N; j++)
-                nn_acc[persp][j] += (short)(sign * nn_w1[base + j]);
+            unsigned int base = row << 6;
+            if (nn_delta[nn_ply][persp][i].s > 0) {
+                for (j = 0; j < NNUE_N; j++)          /* reverse a recorded add */
+                    nn_acc[persp][j] -= (short)nn_w1[base + j];
+            } else {
+                for (j = 0; j < NNUE_N; j++)          /* reverse a recorded sub */
+                    nn_acc[persp][j] += (short)nn_w1[base + j];
+            }
         }
     }
 }
