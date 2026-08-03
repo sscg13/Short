@@ -8,8 +8,12 @@
 #   make CFLAGS='...'   -> override compile flags
 #   make clean          -> remove objects and the binary
 
+# The gcc build is a fast SCALAR oracle for the 16-bit target: OpenBench measures
+# its nps to scale time controls, and NOTES.md requires node-count fidelity. GCC
+# auto-vectorizes at -O2 (GCC >= 14 enables tree-loop/slp-vectorize), which would
+# inflate nps ~4x and break the speed-fidelity story, so keep it strictly scalar.
 CC      ?= gcc
-CFLAGS  ?= -O2 -Wall -Wextra -Werror
+CFLAGS  ?= -O2 -Wall -Wextra -Werror -fno-tree-vectorize -fno-tree-slp-vectorize
 SRCS    := chess.c search.c xboard.c nnue.c
 HDRS    := engine.h
 OBJS    := $(SRCS:.c=.o)
