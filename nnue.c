@@ -2,8 +2,9 @@
  *
  * Architecture (see NNUE.md):
  *   704 one-hot inputs -> two N-wide i16 accumulators (white POV, black POV)
- *   sharing ONE weight matrix -> CReLU (translation trick, i8 in [-128,127])
- *   -> 2N i8 output weights -> i32 bias -> raw score (>> NNUE_SCALE_SHIFT = cp).
+ *   sharing ONE weight matrix -> symmetric-clamp activation clamp(pre,-1,1)
+ *   (quantized to i8 in [-128,127]) -> 2N i8 output weights -> i32 bias ->
+ *   raw score (>> NNUE_SCALE_SHIFT = cp).
  *
  * The black POV is the white POV of the position rotated 180 degrees with
  * colors swapped, so the net is color-symmetric by construction. Both POVs
@@ -221,22 +222,18 @@ int nnue_eval(Pos *p) {
     long out = nn_bias;
     int j;
     for (j = 0; j < NNUE_N; j++) {
-        int a0 = nn_acc[0][j] - 128;
-        int a1 = nn_acc[1][j] - 128;
+        /* symmetric clamp activation clamp(pre,-1,1), quantized to i8 in
+           [-128,127]; the trainer trains exactly this, so no CReLU offset */
+        int a0 = nn_acc[0][j];
+        int a1 = nn_acc[1][j];
         int w0 = nn_w2[j];
         int w1_ = nn_w2[NNUE_N + j];
 
         if (a0 < -128) a0 = -128; else if (a0 > 127) a0 = 127;
         if (a1 < -128) a1 = -128; else if (a1 > 127) a1 = 127;
 
-        /* clamped terms are shift-only (no multiply); open terms i8 x i8 */
-        if (a0 == -128)      out -= (long)(w0 << 7);
-        else if (a0 == 127)  out += (long)((w0 << 7) - w0);
-        else                 out += (long)(a0 * w0);
-
-        if (a1 == -128)      out -= (long)(w1_ << 7);
-        else if (a1 == 127)  out += (long)((w1_ << 7) - w1_);
-        else                 out += (long)(a1 * w1_);
+        /* product stays i16 (i8 x i8); only the accumulator is long */
+        out += (long)(a0 * w0) + (long)(a1 * w1_);
     }
     {
         int s = (int)(out >> NNUE_SCALE_SHIFT);
