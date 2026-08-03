@@ -265,7 +265,7 @@ int nnue_load(const char *path) {
     if (fread(nn_w2, 1, (size_t)NNUE_W2_SIZE, f) != (size_t)NNUE_W2_SIZE) goto bad;
     if (fread(b, 1, 2, f) != 2) goto bad;
     nn_bias = (int)(unsigned char)b[0] | ((int)(unsigned char)b[1] << 8);
-    if (nn_bias >= 32768) nn_bias -= 65536;               /* sign-extend the i16 */
+    if ((unsigned)nn_bias > 32767) nn_bias -= 65536;   /* sign-extend the i16 */
     fclose(f);
     nnue_enabled = 1;
     return 1;
