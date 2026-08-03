@@ -5,6 +5,11 @@
 volatile int stop_now = 0;
 long deadline = 0;                   /* ms deadline, 0 = no limit */
 
+#ifdef PROFILE
+long c_anodes = 0;                   /* alphabeta entries */
+long c_qnodes = 0;                   /* qsearch entries */
+#endif
+
 static long nodes_search;
 static unsigned long rep_path[64];      /* position sigs along the current search line */
 static int rep_n;
@@ -45,6 +50,7 @@ static int alphabeta(Pos *p, int depth, int alpha, int beta, int ply, int half) 
     unsigned int m;
     int best = -INF, legal = 0;
 
+    PCOUNT(c_anodes);
     nodes_search++;
     if ((nodes_search & 0x3FF) == 0 && deadline > 0 && (long)clock() >= deadline)
         stop_now = 1;
@@ -119,6 +125,7 @@ static int qsearch(Pos *p, int alpha, int beta, int ply, int half, int qd) {
     unsigned int m;
     int in_check, stand, legal = 0;
 
+    PCOUNT(c_qnodes);
     nodes_search++;
     if ((nodes_search & 0x3FF) == 0 && deadline > 0 && (long)clock() >= deadline)
         stop_now = 1;
@@ -350,3 +357,79 @@ int bench(int depth) {
     printf("NPS: %ld\n", (long)(total_nodes / (bsecs > 0.0 ? bsecs : 1.0)));
     return 0;
 }
+
+#ifdef PROFILE
+/* ------------------------------------------------------------------ */
+/* profile: same 8-position suite as bench(), but resets the call/     */
+/* feature counters first and reports a cost breakdown after. Depth    */
+/* defaults to 4; identical search semantics to bench() so node counts */
+/* stay the same (1,582,816 at depth 4). Builds need -DPROFILE.        */
+/* ------------------------------------------------------------------ */
+int profile(int depth) {
+    int i, d, k;
+    long total_nodes = 0;
+    clock_t b0, b1;
+    double bsecs;
+
+    if (depth < 1) depth = BENCH_DEPTH;
+    if (depth > 20) depth = 20;
+    deadline = 0;                                /* keep the search timing-independent */
+    stop_now = 0;
+
+    c_anodes = c_qnodes = c_nextmove = 0;
+    c_make = c_undo = c_gen_moves = c_gen_caps = c_gen_quiets = 0;
+    c_nn_make = c_nn_undo = c_nn_eval = c_refresh = c_flip = 0;
+
+    b0 = clock();
+    for (i = 0; i < BENCH_N; i++) {
+        Pos p;
+        long pos_nodes = 0;
+
+        parse_fen(&p, bench_fens[i]);
+        g_sigs_n = 0;                            /* no game-history repetitions */
+        memset(killers, 0, sizeof killers);
+        root_n = gen_moves(&p, root_m);
+        for (k = 0; k < root_n; k++) root_score[k] = 0;
+        if (nnue_enabled) { nnue_reset(&p); nnue_active = 1; }
+
+        for (d = 1; d <= depth; d++) {
+            int alpha = -INF, beta = INF;
+            nodes_search = 0;
+            rep_n = 0;
+            stop_now = 0;
+            sort_root();
+            for (k = 0; k < root_n; k++) {
+                Undo u; int us, score;
+                do_make(&p, root_m[k], &u);
+                us = p.side ^ 1;
+                if (!is_attacked(&p, p.ks[us], p.side)) {
+                    int pc = p.board[mfrom(root_m[k])];
+                    int is_cap = (u.cap != EMPTY) || (mfl(root_m[k]) == MF_EP);
+                    int child_half = (TY(pc) == 1 || is_cap) ? 0 : g_half + 1;
+                    score = -alphabeta(&p, d - 1, -beta, -alpha, 1, child_half);
+                    root_score[k] = score;
+                    if (score > alpha) alpha = score;
+                    undo_move(&p, root_m[k], &u);
+                    if (alpha >= beta) break;
+                } else undo_move(&p, root_m[k], &u);
+            }
+            pos_nodes += nodes_search;
+        }
+        nnue_active = 0;
+        total_nodes += pos_nodes;
+    }
+    b1 = clock();
+    bsecs = (double)(b1 - b0) / (double)CLOCKS_PER_SEC;
+
+    printf("profile depth=%d nodes=%ld time=%.2fs nps=%ld\n",
+           depth, total_nodes, bsecs,
+           (long)(total_nodes / (bsecs > 0.0 ? bsecs : 1.0)));
+    printf("profile alphabeta=%ld qsearch=%ld next_move=%ld\n",
+           c_anodes, c_qnodes, c_nextmove);
+    printf("profile make=%ld undo=%ld gen_moves=%ld gen_caps=%ld gen_quiets=%ld\n",
+           c_make, c_undo, c_gen_moves, c_gen_caps, c_gen_quiets);
+    printf("profile nn_make=%ld nn_undo=%ld nn_eval=%ld refresh_rows=%ld flips=%ld\n",
+           c_nn_make, c_nn_undo, c_nn_eval, c_refresh, c_flip);
+    return 0;
+}
+#endif /* PROFILE */

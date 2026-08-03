@@ -39,6 +39,14 @@
 int nnue_enabled = 0;
 int nnue_active = 0;
 
+#ifdef PROFILE
+long c_nn_make = 0;              /* nnue_make entries */
+long c_nn_undo = 0;              /* nnue_undo entries */
+long c_nn_eval = 0;              /* nnue_eval entries */
+long c_refresh = 0;              /* feature-row deltas applied (nn_delta_apply) */
+long c_flip = 0;                 /* mirror-flip recompute paths (nnue_make) */
+#endif
+
 #if defined(__WATCOMC__) && !defined(__386__)
 /* 45 KB won't fit the ~23 KB of free near data; put it in a far data segment. */
 signed char _far nn_w1[NNUE_W1_SIZE];
@@ -119,6 +127,7 @@ static int nn_row(int persp, int pc, int sq88, int mirror) {
 static void nn_delta_apply(int persp, int row, int sign) {
     int j;
     if (row < 0) return;
+    PCOUNT(c_refresh);
     {
         long base = (long)row * NNUE_N;
         for (j = 0; j < NNUE_N; j++)
@@ -172,6 +181,7 @@ void nnue_make(Pos *p, unsigned int m, Undo *u) {
     int newp = mover;
     int persp, mpost[2], mpre[2], flip[2];
 
+    PCOUNT(c_nn_make);
     if (ispromo(m)) mover = (mover_col == 0) ? WP : BP;   /* it was a pawn */
 
     /* mirror flags before/after this move (only a king move can change them) */
@@ -185,6 +195,7 @@ void nnue_make(Pos *p, unsigned int m, Undo *u) {
 
     for (persp = 0; persp < 2; persp++) {
         if (flip[persp]) {
+            PCOUNT(c_flip);
             nn_dn[nn_ply][persp] = -1;   /* every piece re-indexed: undo recomputes */
         } else {
             nn_delta_apply(persp, nn_row(persp, mover, from, mpost[persp]), -1);
@@ -215,6 +226,7 @@ void nnue_make(Pos *p, unsigned int m, Undo *u) {
 
 void nnue_undo(Pos *p) {
     int persp;
+    PCOUNT(c_nn_undo);
     if (nn_ply > 0) nn_ply--;
     for (persp = 0; persp < 2; persp++) {
         int i, j;
@@ -239,6 +251,7 @@ void nnue_undo(Pos *p) {
 int nnue_eval(Pos *p) {
     long out = nn_bias;
     int j;
+    PCOUNT(c_nn_eval);
     for (j = 0; j < NNUE_N; j++) {
         /* clamp(pre,-1,1) at accumulator quantization 128: the extremes +/-128
            are powers of two, so their terms are shift-only (128*w = w<<7) */

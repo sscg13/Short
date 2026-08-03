@@ -80,6 +80,30 @@ typedef struct {
                                            (~15.6 ms) + output overhead or we lose on
                                            time at tight clocks. */
 
+/* ---- profiling call counters (`chess profile`) ----
+   Compiled in ONLY with -DPROFILE (`make profile`, build.ps1 -Profile); normal
+   builds expand PCOUNT to nothing, so the counters cost zero cycles in the
+   shipped engine. */
+#ifdef PROFILE
+#define PCOUNT(c) (c)++
+extern long c_anodes;        /* alphabeta entry */
+extern long c_qnodes;        /* qsearch entry */
+extern long c_nextmove;      /* next_move entry */
+extern long c_make;          /* do_make entry */
+extern long c_undo;          /* undo_move entry */
+extern long c_gen_moves;     /* gen_moves entry */
+extern long c_gen_caps;      /* gen_caps entry */
+extern long c_gen_quiets;    /* gen_quiets entry */
+extern long c_nn_make;       /* nnue_make entry */
+extern long c_nn_undo;       /* nnue_undo entry */
+extern long c_nn_eval;       /* nnue_eval entry */
+extern long c_refresh;       /* feature-row deltas applied (nn_delta_apply) */
+extern long c_flip;          /* mirror-flip recompute paths (nnue_make) */
+int profile(int depth);
+#else
+#define PCOUNT(c) ((void)0)
+#endif
+
 /* ---- shared globals ---- */
 extern int g_half, g_full;              /* halfmove clock, fullmove number */
 extern unsigned long g_sigs[1024];      /* position signatures for repetition */
@@ -99,6 +123,7 @@ unsigned long pos_sig(Pos *p);
 void search_root(Pos *p, int maxdepth);
 unsigned int think(Pos *p, int maxdepth);
 int bench(int depth);
+int profile(int depth);
 
 /* ---- xboard.c ---- */
 void dbgf(const char *fmt, ...);

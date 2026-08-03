@@ -13,6 +13,15 @@ static const int mval[8] = { 0, 100, 320, 330, 500, 900, 0 };
 
 unsigned int movebuf[32][256];
 
+#ifdef PROFILE
+long c_make = 0;                 /* do_make entries */
+long c_undo = 0;                 /* undo_move entries */
+long c_gen_moves = 0;            /* gen_moves entries */
+long c_gen_caps = 0;             /* gen_caps entries */
+long c_gen_quiets = 0;           /* gen_quiets entries */
+long c_nextmove = 0;             /* next_move entries */
+#endif
+
 /* ------------------------------------------------------------------ */
 /* make / unmake                                                      */
 /* ------------------------------------------------------------------ */
@@ -22,6 +31,8 @@ void do_make(Pos *p, unsigned int m, Undo *u) {
     int fl = mfl(m);
     int piece = p->board[from];
     int promo = ispromo(m) ? (CO(piece) | (fl + 1)) : 0;
+
+    PCOUNT(c_make);
 
     u->cap = p->board[to];
     u->castle = p->castle;
@@ -64,6 +75,8 @@ void undo_move(Pos *p, unsigned int m, Undo *u) {
     int from = mfrom(m), to = mto(m);
     int fl = mfl(m);
     int piece = p->board[to];
+
+    PCOUNT(c_undo);
 
     p->side ^= 1;
 
@@ -148,6 +161,8 @@ int gen_caps(Pos *p, unsigned int *list) {
     int n = 0, from, to, pc, pt, us = p->side, them = us ^ 1;
     int i, d, fwd, r;
 
+    PCOUNT(c_gen_caps);
+
     for (from = 0; from < 128; from++) {
         pc = p->board[from];
         if (!pc) continue;
@@ -227,6 +242,8 @@ int gen_caps(Pos *p, unsigned int *list) {
 int gen_quiets(Pos *p, unsigned int *list) {
     int n = 0, from, to, to2, pc, pt, us = p->side;
     int i, d, fwd, r;
+
+    PCOUNT(c_gen_quiets);
 
     for (from = 0; from < 128; from++) {
         pc = p->board[from];
@@ -314,6 +331,8 @@ int gen_quiets(Pos *p, unsigned int *list) {
 /* full pseudo-legal list = captures + quiets (perft/protocol still use this) */
 int gen_moves(Pos *p, unsigned int *list) {
     int n = gen_caps(p, list);
+
+    PCOUNT(c_gen_moves);
     return n + gen_quiets(p, list + n);
 }
 
@@ -415,6 +434,8 @@ void mgen_init_q(Pos *p, MGen *g, int ply) {
 unsigned int next_move(Pos *p, MGen *g) {
     unsigned int m;
     int i, best, bscore;
+
+    PCOUNT(c_nextmove);
 
 again:
     switch (g->stage) {
@@ -664,6 +685,11 @@ int main(int argc, char **argv) {
         if (argc > 2) bd = atoi(argv[2]);
         return bench(bd);
     }
+
+#ifdef PROFILE
+    if (argc > 1 && strcmp(argv[1], "profile") == 0)
+        return profile((argc > 2) ? atoi(argv[2]) : 4);
+#endif
 
     if (argc > 1 && argv[1][0] == 'm') {
         Pos q;

@@ -1,5 +1,6 @@
 param(
-    [string]$Model = "large"
+    [string]$Model = "large",
+    [switch]$Profile   # -Profile: build with -DPROFILE so `chess profile` works
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,7 +23,9 @@ $modelFlag = switch ($Model) {
 $sources = @("chess.c", "search.c", "xboard.c", "nnue.c")
 $objs = @()
 foreach ($s in $sources) {
-    & "$ow\binnt\wcc.exe" "-bt=dos" "-0" $modelFlag "-ox" "-d0" $s
+    $flags = @("-bt=dos", "-0", $modelFlag, "-ox", "-d0")
+    if ($Profile) { $flags += "-DPROFILE" }
+    & "$ow\binnt\wcc.exe" @flags $s
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $objs += [System.IO.Path]::GetFileNameWithoutExtension($s) + ".obj"
 }
