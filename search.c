@@ -167,6 +167,7 @@ void search_root(Pos *p, int maxdepth) {
     int d, i;
     root_n = gen_moves(p, root_m);
     for (i = 0; i < root_n; i++) root_score[i] = 0;
+    if (nnue_enabled) { nnue_reset(p); nnue_active = 1; }
     for (d = 1; d <= maxdepth; d++) {
         int alpha = -INF, beta = INF;
         int bestscore = -INF, bf = 0, bt = 0;
@@ -201,6 +202,7 @@ void search_root(Pos *p, int maxdepth) {
         printf("depth %2d  score %5d  move %02X%02X  %8ld nodes  %7.2fs\n",
                d, bestscore, bf, bt, nodes_search, secs);
     }
+    nnue_active = 0;
 }
 
 /* iterative deepening root search; returns best move (0 if aborted before any depth) */
@@ -211,6 +213,7 @@ unsigned int think(Pos *p, int maxdepth) {
     dbgf("think begin maxdepth=%d deadline=%ld\n", maxdepth, deadline);
     root_n = gen_moves(p, root_m);
     for (i = 0; i < root_n; i++) root_score[i] = 0;
+    if (nnue_enabled) { nnue_reset(p); nnue_active = 1; }
     for (d = 1; d <= maxdepth; d++) {
         int alpha = -INF, beta = INF, bsc = -INF;
         unsigned int bm = 0;
@@ -244,6 +247,7 @@ unsigned int think(Pos *p, int maxdepth) {
         }
     }
     dbgf("think end bestm=%04X stop=%d d=%d\n", (unsigned)bestm, (int)stop_now, d - 1);
+    nnue_active = 0;
     return bestm;
 }
 
@@ -301,6 +305,7 @@ int bench(int depth) {
         memset(killers, 0, sizeof killers);
         root_n = gen_moves(&p, root_m);
         for (k = 0; k < root_n; k++) root_score[k] = 0;
+        if (nnue_enabled) { nnue_reset(&p); nnue_active = 1; }
 
         t0 = clock();
         for (d = 1; d <= depth; d++) {
@@ -329,6 +334,7 @@ int bench(int depth) {
             pos_nodes += nodes_search;
             if (d == depth) { bestscore = bsc; bf = mfrom(bm); bt = mto(bm); }
         }
+        nnue_active = 0;
         t1 = clock();
         secs = (double)(t1 - t0) / (double)CLOCKS_PER_SEC;
         total_nodes += pos_nodes;

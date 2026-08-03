@@ -10,7 +10,7 @@
 
 CC      ?= gcc
 CFLAGS  ?= -O2 -Wall -Wextra -Werror
-SRCS    := chess.c search.c xboard.c
+SRCS    := chess.c search.c xboard.c nnue.c
 HDRS    := engine.h
 OBJS    := $(SRCS:.c=.o)
 

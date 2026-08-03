@@ -5,3 +5,5 @@
 *.txt
 run.bat
 *.md
+*.map
+__pycache__/

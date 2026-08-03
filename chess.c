@@ -56,6 +56,8 @@ void do_make(Pos *p, unsigned int m, Undo *u) {
     if (TY(piece) == 6) p->ks[p->side] = to;
 
     p->side ^= 1;
+
+    if (nnue_active) nnue_make(p, m, u);
 }
 
 void undo_move(Pos *p, unsigned int m, Undo *u) {
@@ -82,6 +84,10 @@ void undo_move(Pos *p, unsigned int m, Undo *u) {
     p->castle = u->castle;
     p->ep = u->ep;
     if (TY(piece) == 6) p->ks[p->side] = from;
+
+    /* NNUE undo must run after the board (and kings) are restored: a mirror-flag
+       flip requires recomputing the accumulator from the pre-make position. */
+    if (nnue_active) nnue_undo(p);
 }
 
 /* ------------------------------------------------------------------ */
@@ -511,11 +517,12 @@ long perft(Pos *p, int depth) {
 }
 
 /* ------------------------------------------------------------------ */
-/* evaluation (material only)                                         */
+/* evaluation (NNUE when a net is loaded, else material)              */
 /* ------------------------------------------------------------------ */
 
 int evaluate(Pos *p) {
     int score = 0, sq;
+    if (nnue_enabled && nnue_active) return nnue_eval(p);
     for (sq = 0; sq < 128; sq++) {
         int pc = p->board[sq];
         if (!pc) continue;
@@ -627,10 +634,26 @@ static const unsigned long expv[6][6] = {
 
 int main(int argc, char **argv) {
     int maxd = 5, test = 0, i, splitsel = 0;
+    int j, nn_log = 1;
     Pos pos;
     long nodes;
     clock_t t0, t1;
     double secs;
+
+    /* NNUE net: `chess --nnue file ...` or auto-load chess.net from CWD */
+    if (argc > 2 && strcmp(argv[1], "--nnue") == 0) {
+        if (!nnue_load(argv[2])) printf("NNUE: load failed: %s\n", argv[2]);
+        for (j = 2; j < argc; j++) argv[j - 2] = argv[j];
+        argc -= 2;
+    } else {
+        nnue_load("chess.net");
+    }
+    if (argc == 1 || (argc > 1 && strcmp(argv[1], "xboard") == 0)) nn_log = 0;
+    if (nn_log && nnue_enabled)
+        printf("NNUE: net loaded (features=%d N=%d)\n", NNUE_FEATURES, NNUE_N);
+
+    if (argc > 1 && strcmp(argv[1], "nn") == 0)
+        return nnue_selftest((argc > 2) ? argv[2] : NULL);
 
     if (argc == 1 || (argc > 1 && strcmp(argv[1], "xboard") == 0))
         return xboard_main();

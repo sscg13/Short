@@ -105,6 +105,24 @@ void dbgf(const char *fmt, ...);
 void xb_outf(const char *fmt, ...);
 int xboard_main(void);
 
+/* ---- NNUE eval (nnue.c) ----
+   One-hot 704-feature net (12 piece types, king file folded to a-d, pawns on
+   48 squares), 704 -> 2N -> 1 with the two perspectives sharing one weight
+   matrix. Weights are i8 and live far on the 16-bit target (see NNUE.md). */
+#define NNUE_FEATURES    704
+#define NNUE_N           64
+#define NNUE_SCALE_SHIFT 7    /* output >> 7 = centipawns (trainer targets ~12800/pawn) */
+#define NNUE_W1_SIZE     45056L  /* NNUE_FEATURES * NNUE_N, long so 16-bit ints don't wrap */
+#define NNUE_W2_SIZE     128     /* 2 * NNUE_N */
+extern int nnue_enabled;    /* a net is loaded */
+extern int nnue_active;     /* incremental accumulators are live (during search) */
+void nnue_reset(Pos *p);
+void nnue_make(Pos *p, unsigned int m, Undo *u);
+void nnue_undo(Pos *p);
+int nnue_eval(Pos *p);
+int nnue_load(const char *path);
+int nnue_selftest(const char *fen);
+
 /* ---- chess.c (board, movegen, eval, perft, FEN) ---- */
 void parse_fen(Pos *p, const char *s);
 int evaluate(Pos *p);

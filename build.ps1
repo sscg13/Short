@@ -19,7 +19,7 @@ $modelFlag = switch ($Model) {
     default  { "-ml" }
 }
 
-$sources = @("chess.c", "search.c", "xboard.c")
+$sources = @("chess.c", "search.c", "xboard.c", "nnue.c")
 $objs = @()
 foreach ($s in $sources) {
     & "$ow\binnt\wcc.exe" "-bt=dos" "-0" $modelFlag "-ox" "-d0" $s
