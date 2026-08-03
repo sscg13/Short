@@ -484,22 +484,37 @@ nn_apply_sub_ ENDP
 ; =====================================================================
 ; nn_fwd_eval_ - NNUE forward pass via per-slot product tables.
 ; int nn_fwd_eval(int side);  ax = side (0 white, 1 black); returns eval in ax.
-; Reads ss:_nn_acc (2x64 i16), ss:_nn_w2 (128 i8), ss:_nn_bias (i16), and the
-; far product tables _nn_fwd0/_nn_fwd1 ([64][256] i16; entry [j][a+128] =
-; w2[p*64+j]*a). IMPORTANT: Watcom places both _far arrays in ONE far segment
-; (nnue13_DATA, 64 KB), _nn_fwd0 at offset 0 and _nn_fwd1 at offset 32768, so
-; persp1 offsets carry +32768 and only one segment register is needed.
-; Fast path: |a|<128 -> index=2*a, load the i16 product directly. The +/-128
-; clamp extremes take the (rare) shift handlers w2[bx]<<7. SI:CX is the i32
-; accumulator; result is (acc >> NNUE_SCALE_SHIFT) and negated when the side to
-; move is black. Preserves bx,si,di,bp,ds; clobbers ax,dx,cx,es.
+; stm/nstm handling (see NNUE.md): the net is SIDE-TO-MOVE-aware - acc[0] is the
+; white POV, acc[1] the black POV, and the side to move is "white" in feature
+; space. So BX points at the STM accumulator (_nn_acc + side*128) and BP at the
+; NSTM one (_nn_acc + (1-side)*128); w2[0..63] is the STM weight row, w2[64..127]
+; the NSTM row, and _nn_fwd0/_nn_fwd1 hold those products ([64][256] i16; entry
+; [j][a+128] = w2* a). NO final negate: the score is already from the side to
+; move's perspective. IMPORTANT: Watcom packs both _far arrays in ONE far segment
+; (nnue13_DATA, 64 KB), _nn_fwd0 at 0 and _nn_fwd1 at 32768, so the NSTM loads
+; carry +32768. Fast path: |a|<128 -> index=2*a, load the i16 product. The +/-128
+; clamp extremes take the (rare) shift handlers w2[di]<<7 (di = slot, or 64+slot
+; for the NSTM row). SI:CX is the i32 accumulator; result is (acc >> NNUE_SCALE_SHIFT).
+; Preserves bx,si,di,bp,ds; clobbers ax,dx,cx,es.
 nn_fwd_eval_ PROC FAR
         push    bp
         push    bx
         push    si
         push    di
         push    ds
-        mov     bp, ax                  ; bp = side
+        mov     bx, OFFSET _nn_acc
+        mov     dx, ax                  ; dx = side
+        shl     dx, 1
+        shl     dx, 1
+        shl     dx, 1
+        shl     dx, 1
+        shl     dx, 1
+        shl     dx, 1
+        shl     dx, 1                   ; dx = side*128
+        mov     bp, bx
+        add     bp, 128                 ; bp = _nn_acc + 128
+        sub     bp, dx                  ; bp = _nn_acc + (1-side)*128 (NSTM)
+        add     bx, dx                  ; bx = _nn_acc + side*128 (STM)
         mov     ax, SEG _nn_fwd0
         mov     ds, ax                  ; ds = shared fwd0/fwd1 segment
         mov     ax, ss:_nn_bias
@@ -507,7 +522,7 @@ nn_fwd_eval_ PROC FAR
         mov     si, ax                  ; si = bias low
         mov     cx, dx                  ; cx = bias high (sign-extended)
 ; ---- slot 0 ----
-        mov     ax, ss:_nn_acc+0
+        mov     ax, ss:[bx+0]
         cmp     ax, 0x0080
         jge     P0S_0
         cmp     ax, 0xFF80
@@ -520,14 +535,14 @@ nn_fwd_eval_ PROC FAR
         adc     cx, dx
         jmp     P1E_0
 P0S_0:
-        mov     bx, 0
+        mov     di, 0
         call    FWD_SHIFT_ADD
         jmp     P1E_0
 N0S_0:
-        mov     bx, 0
+        mov     di, 0
         call    FWD_SHIFT_SUB
 P1E_0:
-        mov     ax, ss:_nn_acc+128
+        mov     ax, ss:[bp+0]
         cmp     ax, 0x0080
         jge     P1S_0
         cmp     ax, 0xFF80
@@ -540,15 +555,15 @@ P1E_0:
         adc     cx, dx
         jmp     NXT_0
 P1S_0:
-        mov     bx, 64
+        mov     di, 64
         call    FWD_SHIFT_ADD
         jmp     NXT_0
 N1S_0:
-        mov     bx, 64
+        mov     di, 64
         call    FWD_SHIFT_SUB
 NXT_0:
 ; ---- slot 1 ----
-        mov     ax, ss:_nn_acc+2
+        mov     ax, ss:[bx+2]
         cmp     ax, 0x0080
         jge     P0S_1
         cmp     ax, 0xFF80
@@ -561,14 +576,14 @@ NXT_0:
         adc     cx, dx
         jmp     P1E_1
 P0S_1:
-        mov     bx, 1
+        mov     di, 1
         call    FWD_SHIFT_ADD
         jmp     P1E_1
 N0S_1:
-        mov     bx, 1
+        mov     di, 1
         call    FWD_SHIFT_SUB
 P1E_1:
-        mov     ax, ss:_nn_acc+130
+        mov     ax, ss:[bp+2]
         cmp     ax, 0x0080
         jge     P1S_1
         cmp     ax, 0xFF80
@@ -581,15 +596,15 @@ P1E_1:
         adc     cx, dx
         jmp     NXT_1
 P1S_1:
-        mov     bx, 65
+        mov     di, 65
         call    FWD_SHIFT_ADD
         jmp     NXT_1
 N1S_1:
-        mov     bx, 65
+        mov     di, 65
         call    FWD_SHIFT_SUB
 NXT_1:
 ; ---- slot 2 ----
-        mov     ax, ss:_nn_acc+4
+        mov     ax, ss:[bx+4]
         cmp     ax, 0x0080
         jge     P0S_2
         cmp     ax, 0xFF80
@@ -602,14 +617,14 @@ NXT_1:
         adc     cx, dx
         jmp     P1E_2
 P0S_2:
-        mov     bx, 2
+        mov     di, 2
         call    FWD_SHIFT_ADD
         jmp     P1E_2
 N0S_2:
-        mov     bx, 2
+        mov     di, 2
         call    FWD_SHIFT_SUB
 P1E_2:
-        mov     ax, ss:_nn_acc+132
+        mov     ax, ss:[bp+4]
         cmp     ax, 0x0080
         jge     P1S_2
         cmp     ax, 0xFF80
@@ -622,15 +637,15 @@ P1E_2:
         adc     cx, dx
         jmp     NXT_2
 P1S_2:
-        mov     bx, 66
+        mov     di, 66
         call    FWD_SHIFT_ADD
         jmp     NXT_2
 N1S_2:
-        mov     bx, 66
+        mov     di, 66
         call    FWD_SHIFT_SUB
 NXT_2:
 ; ---- slot 3 ----
-        mov     ax, ss:_nn_acc+6
+        mov     ax, ss:[bx+6]
         cmp     ax, 0x0080
         jge     P0S_3
         cmp     ax, 0xFF80
@@ -643,14 +658,14 @@ NXT_2:
         adc     cx, dx
         jmp     P1E_3
 P0S_3:
-        mov     bx, 3
+        mov     di, 3
         call    FWD_SHIFT_ADD
         jmp     P1E_3
 N0S_3:
-        mov     bx, 3
+        mov     di, 3
         call    FWD_SHIFT_SUB
 P1E_3:
-        mov     ax, ss:_nn_acc+134
+        mov     ax, ss:[bp+6]
         cmp     ax, 0x0080
         jge     P1S_3
         cmp     ax, 0xFF80
@@ -663,15 +678,15 @@ P1E_3:
         adc     cx, dx
         jmp     NXT_3
 P1S_3:
-        mov     bx, 67
+        mov     di, 67
         call    FWD_SHIFT_ADD
         jmp     NXT_3
 N1S_3:
-        mov     bx, 67
+        mov     di, 67
         call    FWD_SHIFT_SUB
 NXT_3:
 ; ---- slot 4 ----
-        mov     ax, ss:_nn_acc+8
+        mov     ax, ss:[bx+8]
         cmp     ax, 0x0080
         jge     P0S_4
         cmp     ax, 0xFF80
@@ -684,14 +699,14 @@ NXT_3:
         adc     cx, dx
         jmp     P1E_4
 P0S_4:
-        mov     bx, 4
+        mov     di, 4
         call    FWD_SHIFT_ADD
         jmp     P1E_4
 N0S_4:
-        mov     bx, 4
+        mov     di, 4
         call    FWD_SHIFT_SUB
 P1E_4:
-        mov     ax, ss:_nn_acc+136
+        mov     ax, ss:[bp+8]
         cmp     ax, 0x0080
         jge     P1S_4
         cmp     ax, 0xFF80
@@ -704,15 +719,15 @@ P1E_4:
         adc     cx, dx
         jmp     NXT_4
 P1S_4:
-        mov     bx, 68
+        mov     di, 68
         call    FWD_SHIFT_ADD
         jmp     NXT_4
 N1S_4:
-        mov     bx, 68
+        mov     di, 68
         call    FWD_SHIFT_SUB
 NXT_4:
 ; ---- slot 5 ----
-        mov     ax, ss:_nn_acc+10
+        mov     ax, ss:[bx+10]
         cmp     ax, 0x0080
         jge     P0S_5
         cmp     ax, 0xFF80
@@ -725,14 +740,14 @@ NXT_4:
         adc     cx, dx
         jmp     P1E_5
 P0S_5:
-        mov     bx, 5
+        mov     di, 5
         call    FWD_SHIFT_ADD
         jmp     P1E_5
 N0S_5:
-        mov     bx, 5
+        mov     di, 5
         call    FWD_SHIFT_SUB
 P1E_5:
-        mov     ax, ss:_nn_acc+138
+        mov     ax, ss:[bp+10]
         cmp     ax, 0x0080
         jge     P1S_5
         cmp     ax, 0xFF80
@@ -745,15 +760,15 @@ P1E_5:
         adc     cx, dx
         jmp     NXT_5
 P1S_5:
-        mov     bx, 69
+        mov     di, 69
         call    FWD_SHIFT_ADD
         jmp     NXT_5
 N1S_5:
-        mov     bx, 69
+        mov     di, 69
         call    FWD_SHIFT_SUB
 NXT_5:
 ; ---- slot 6 ----
-        mov     ax, ss:_nn_acc+12
+        mov     ax, ss:[bx+12]
         cmp     ax, 0x0080
         jge     P0S_6
         cmp     ax, 0xFF80
@@ -766,14 +781,14 @@ NXT_5:
         adc     cx, dx
         jmp     P1E_6
 P0S_6:
-        mov     bx, 6
+        mov     di, 6
         call    FWD_SHIFT_ADD
         jmp     P1E_6
 N0S_6:
-        mov     bx, 6
+        mov     di, 6
         call    FWD_SHIFT_SUB
 P1E_6:
-        mov     ax, ss:_nn_acc+140
+        mov     ax, ss:[bp+12]
         cmp     ax, 0x0080
         jge     P1S_6
         cmp     ax, 0xFF80
@@ -786,15 +801,15 @@ P1E_6:
         adc     cx, dx
         jmp     NXT_6
 P1S_6:
-        mov     bx, 70
+        mov     di, 70
         call    FWD_SHIFT_ADD
         jmp     NXT_6
 N1S_6:
-        mov     bx, 70
+        mov     di, 70
         call    FWD_SHIFT_SUB
 NXT_6:
 ; ---- slot 7 ----
-        mov     ax, ss:_nn_acc+14
+        mov     ax, ss:[bx+14]
         cmp     ax, 0x0080
         jge     P0S_7
         cmp     ax, 0xFF80
@@ -807,14 +822,14 @@ NXT_6:
         adc     cx, dx
         jmp     P1E_7
 P0S_7:
-        mov     bx, 7
+        mov     di, 7
         call    FWD_SHIFT_ADD
         jmp     P1E_7
 N0S_7:
-        mov     bx, 7
+        mov     di, 7
         call    FWD_SHIFT_SUB
 P1E_7:
-        mov     ax, ss:_nn_acc+142
+        mov     ax, ss:[bp+14]
         cmp     ax, 0x0080
         jge     P1S_7
         cmp     ax, 0xFF80
@@ -827,15 +842,15 @@ P1E_7:
         adc     cx, dx
         jmp     NXT_7
 P1S_7:
-        mov     bx, 71
+        mov     di, 71
         call    FWD_SHIFT_ADD
         jmp     NXT_7
 N1S_7:
-        mov     bx, 71
+        mov     di, 71
         call    FWD_SHIFT_SUB
 NXT_7:
 ; ---- slot 8 ----
-        mov     ax, ss:_nn_acc+16
+        mov     ax, ss:[bx+16]
         cmp     ax, 0x0080
         jge     P0S_8
         cmp     ax, 0xFF80
@@ -848,14 +863,14 @@ NXT_7:
         adc     cx, dx
         jmp     P1E_8
 P0S_8:
-        mov     bx, 8
+        mov     di, 8
         call    FWD_SHIFT_ADD
         jmp     P1E_8
 N0S_8:
-        mov     bx, 8
+        mov     di, 8
         call    FWD_SHIFT_SUB
 P1E_8:
-        mov     ax, ss:_nn_acc+144
+        mov     ax, ss:[bp+16]
         cmp     ax, 0x0080
         jge     P1S_8
         cmp     ax, 0xFF80
@@ -868,15 +883,15 @@ P1E_8:
         adc     cx, dx
         jmp     NXT_8
 P1S_8:
-        mov     bx, 72
+        mov     di, 72
         call    FWD_SHIFT_ADD
         jmp     NXT_8
 N1S_8:
-        mov     bx, 72
+        mov     di, 72
         call    FWD_SHIFT_SUB
 NXT_8:
 ; ---- slot 9 ----
-        mov     ax, ss:_nn_acc+18
+        mov     ax, ss:[bx+18]
         cmp     ax, 0x0080
         jge     P0S_9
         cmp     ax, 0xFF80
@@ -889,14 +904,14 @@ NXT_8:
         adc     cx, dx
         jmp     P1E_9
 P0S_9:
-        mov     bx, 9
+        mov     di, 9
         call    FWD_SHIFT_ADD
         jmp     P1E_9
 N0S_9:
-        mov     bx, 9
+        mov     di, 9
         call    FWD_SHIFT_SUB
 P1E_9:
-        mov     ax, ss:_nn_acc+146
+        mov     ax, ss:[bp+18]
         cmp     ax, 0x0080
         jge     P1S_9
         cmp     ax, 0xFF80
@@ -909,15 +924,15 @@ P1E_9:
         adc     cx, dx
         jmp     NXT_9
 P1S_9:
-        mov     bx, 73
+        mov     di, 73
         call    FWD_SHIFT_ADD
         jmp     NXT_9
 N1S_9:
-        mov     bx, 73
+        mov     di, 73
         call    FWD_SHIFT_SUB
 NXT_9:
 ; ---- slot 10 ----
-        mov     ax, ss:_nn_acc+20
+        mov     ax, ss:[bx+20]
         cmp     ax, 0x0080
         jge     P0S_10
         cmp     ax, 0xFF80
@@ -930,14 +945,14 @@ NXT_9:
         adc     cx, dx
         jmp     P1E_10
 P0S_10:
-        mov     bx, 10
+        mov     di, 10
         call    FWD_SHIFT_ADD
         jmp     P1E_10
 N0S_10:
-        mov     bx, 10
+        mov     di, 10
         call    FWD_SHIFT_SUB
 P1E_10:
-        mov     ax, ss:_nn_acc+148
+        mov     ax, ss:[bp+20]
         cmp     ax, 0x0080
         jge     P1S_10
         cmp     ax, 0xFF80
@@ -950,15 +965,15 @@ P1E_10:
         adc     cx, dx
         jmp     NXT_10
 P1S_10:
-        mov     bx, 74
+        mov     di, 74
         call    FWD_SHIFT_ADD
         jmp     NXT_10
 N1S_10:
-        mov     bx, 74
+        mov     di, 74
         call    FWD_SHIFT_SUB
 NXT_10:
 ; ---- slot 11 ----
-        mov     ax, ss:_nn_acc+22
+        mov     ax, ss:[bx+22]
         cmp     ax, 0x0080
         jge     P0S_11
         cmp     ax, 0xFF80
@@ -971,14 +986,14 @@ NXT_10:
         adc     cx, dx
         jmp     P1E_11
 P0S_11:
-        mov     bx, 11
+        mov     di, 11
         call    FWD_SHIFT_ADD
         jmp     P1E_11
 N0S_11:
-        mov     bx, 11
+        mov     di, 11
         call    FWD_SHIFT_SUB
 P1E_11:
-        mov     ax, ss:_nn_acc+150
+        mov     ax, ss:[bp+22]
         cmp     ax, 0x0080
         jge     P1S_11
         cmp     ax, 0xFF80
@@ -991,15 +1006,15 @@ P1E_11:
         adc     cx, dx
         jmp     NXT_11
 P1S_11:
-        mov     bx, 75
+        mov     di, 75
         call    FWD_SHIFT_ADD
         jmp     NXT_11
 N1S_11:
-        mov     bx, 75
+        mov     di, 75
         call    FWD_SHIFT_SUB
 NXT_11:
 ; ---- slot 12 ----
-        mov     ax, ss:_nn_acc+24
+        mov     ax, ss:[bx+24]
         cmp     ax, 0x0080
         jge     P0S_12
         cmp     ax, 0xFF80
@@ -1012,14 +1027,14 @@ NXT_11:
         adc     cx, dx
         jmp     P1E_12
 P0S_12:
-        mov     bx, 12
+        mov     di, 12
         call    FWD_SHIFT_ADD
         jmp     P1E_12
 N0S_12:
-        mov     bx, 12
+        mov     di, 12
         call    FWD_SHIFT_SUB
 P1E_12:
-        mov     ax, ss:_nn_acc+152
+        mov     ax, ss:[bp+24]
         cmp     ax, 0x0080
         jge     P1S_12
         cmp     ax, 0xFF80
@@ -1032,15 +1047,15 @@ P1E_12:
         adc     cx, dx
         jmp     NXT_12
 P1S_12:
-        mov     bx, 76
+        mov     di, 76
         call    FWD_SHIFT_ADD
         jmp     NXT_12
 N1S_12:
-        mov     bx, 76
+        mov     di, 76
         call    FWD_SHIFT_SUB
 NXT_12:
 ; ---- slot 13 ----
-        mov     ax, ss:_nn_acc+26
+        mov     ax, ss:[bx+26]
         cmp     ax, 0x0080
         jge     P0S_13
         cmp     ax, 0xFF80
@@ -1053,14 +1068,14 @@ NXT_12:
         adc     cx, dx
         jmp     P1E_13
 P0S_13:
-        mov     bx, 13
+        mov     di, 13
         call    FWD_SHIFT_ADD
         jmp     P1E_13
 N0S_13:
-        mov     bx, 13
+        mov     di, 13
         call    FWD_SHIFT_SUB
 P1E_13:
-        mov     ax, ss:_nn_acc+154
+        mov     ax, ss:[bp+26]
         cmp     ax, 0x0080
         jge     P1S_13
         cmp     ax, 0xFF80
@@ -1073,15 +1088,15 @@ P1E_13:
         adc     cx, dx
         jmp     NXT_13
 P1S_13:
-        mov     bx, 77
+        mov     di, 77
         call    FWD_SHIFT_ADD
         jmp     NXT_13
 N1S_13:
-        mov     bx, 77
+        mov     di, 77
         call    FWD_SHIFT_SUB
 NXT_13:
 ; ---- slot 14 ----
-        mov     ax, ss:_nn_acc+28
+        mov     ax, ss:[bx+28]
         cmp     ax, 0x0080
         jge     P0S_14
         cmp     ax, 0xFF80
@@ -1094,14 +1109,14 @@ NXT_13:
         adc     cx, dx
         jmp     P1E_14
 P0S_14:
-        mov     bx, 14
+        mov     di, 14
         call    FWD_SHIFT_ADD
         jmp     P1E_14
 N0S_14:
-        mov     bx, 14
+        mov     di, 14
         call    FWD_SHIFT_SUB
 P1E_14:
-        mov     ax, ss:_nn_acc+156
+        mov     ax, ss:[bp+28]
         cmp     ax, 0x0080
         jge     P1S_14
         cmp     ax, 0xFF80
@@ -1114,15 +1129,15 @@ P1E_14:
         adc     cx, dx
         jmp     NXT_14
 P1S_14:
-        mov     bx, 78
+        mov     di, 78
         call    FWD_SHIFT_ADD
         jmp     NXT_14
 N1S_14:
-        mov     bx, 78
+        mov     di, 78
         call    FWD_SHIFT_SUB
 NXT_14:
 ; ---- slot 15 ----
-        mov     ax, ss:_nn_acc+30
+        mov     ax, ss:[bx+30]
         cmp     ax, 0x0080
         jge     P0S_15
         cmp     ax, 0xFF80
@@ -1135,14 +1150,14 @@ NXT_14:
         adc     cx, dx
         jmp     P1E_15
 P0S_15:
-        mov     bx, 15
+        mov     di, 15
         call    FWD_SHIFT_ADD
         jmp     P1E_15
 N0S_15:
-        mov     bx, 15
+        mov     di, 15
         call    FWD_SHIFT_SUB
 P1E_15:
-        mov     ax, ss:_nn_acc+158
+        mov     ax, ss:[bp+30]
         cmp     ax, 0x0080
         jge     P1S_15
         cmp     ax, 0xFF80
@@ -1155,15 +1170,15 @@ P1E_15:
         adc     cx, dx
         jmp     NXT_15
 P1S_15:
-        mov     bx, 79
+        mov     di, 79
         call    FWD_SHIFT_ADD
         jmp     NXT_15
 N1S_15:
-        mov     bx, 79
+        mov     di, 79
         call    FWD_SHIFT_SUB
 NXT_15:
 ; ---- slot 16 ----
-        mov     ax, ss:_nn_acc+32
+        mov     ax, ss:[bx+32]
         cmp     ax, 0x0080
         jge     P0S_16
         cmp     ax, 0xFF80
@@ -1176,14 +1191,14 @@ NXT_15:
         adc     cx, dx
         jmp     P1E_16
 P0S_16:
-        mov     bx, 16
+        mov     di, 16
         call    FWD_SHIFT_ADD
         jmp     P1E_16
 N0S_16:
-        mov     bx, 16
+        mov     di, 16
         call    FWD_SHIFT_SUB
 P1E_16:
-        mov     ax, ss:_nn_acc+160
+        mov     ax, ss:[bp+32]
         cmp     ax, 0x0080
         jge     P1S_16
         cmp     ax, 0xFF80
@@ -1196,15 +1211,15 @@ P1E_16:
         adc     cx, dx
         jmp     NXT_16
 P1S_16:
-        mov     bx, 80
+        mov     di, 80
         call    FWD_SHIFT_ADD
         jmp     NXT_16
 N1S_16:
-        mov     bx, 80
+        mov     di, 80
         call    FWD_SHIFT_SUB
 NXT_16:
 ; ---- slot 17 ----
-        mov     ax, ss:_nn_acc+34
+        mov     ax, ss:[bx+34]
         cmp     ax, 0x0080
         jge     P0S_17
         cmp     ax, 0xFF80
@@ -1217,14 +1232,14 @@ NXT_16:
         adc     cx, dx
         jmp     P1E_17
 P0S_17:
-        mov     bx, 17
+        mov     di, 17
         call    FWD_SHIFT_ADD
         jmp     P1E_17
 N0S_17:
-        mov     bx, 17
+        mov     di, 17
         call    FWD_SHIFT_SUB
 P1E_17:
-        mov     ax, ss:_nn_acc+162
+        mov     ax, ss:[bp+34]
         cmp     ax, 0x0080
         jge     P1S_17
         cmp     ax, 0xFF80
@@ -1237,15 +1252,15 @@ P1E_17:
         adc     cx, dx
         jmp     NXT_17
 P1S_17:
-        mov     bx, 81
+        mov     di, 81
         call    FWD_SHIFT_ADD
         jmp     NXT_17
 N1S_17:
-        mov     bx, 81
+        mov     di, 81
         call    FWD_SHIFT_SUB
 NXT_17:
 ; ---- slot 18 ----
-        mov     ax, ss:_nn_acc+36
+        mov     ax, ss:[bx+36]
         cmp     ax, 0x0080
         jge     P0S_18
         cmp     ax, 0xFF80
@@ -1258,14 +1273,14 @@ NXT_17:
         adc     cx, dx
         jmp     P1E_18
 P0S_18:
-        mov     bx, 18
+        mov     di, 18
         call    FWD_SHIFT_ADD
         jmp     P1E_18
 N0S_18:
-        mov     bx, 18
+        mov     di, 18
         call    FWD_SHIFT_SUB
 P1E_18:
-        mov     ax, ss:_nn_acc+164
+        mov     ax, ss:[bp+36]
         cmp     ax, 0x0080
         jge     P1S_18
         cmp     ax, 0xFF80
@@ -1278,15 +1293,15 @@ P1E_18:
         adc     cx, dx
         jmp     NXT_18
 P1S_18:
-        mov     bx, 82
+        mov     di, 82
         call    FWD_SHIFT_ADD
         jmp     NXT_18
 N1S_18:
-        mov     bx, 82
+        mov     di, 82
         call    FWD_SHIFT_SUB
 NXT_18:
 ; ---- slot 19 ----
-        mov     ax, ss:_nn_acc+38
+        mov     ax, ss:[bx+38]
         cmp     ax, 0x0080
         jge     P0S_19
         cmp     ax, 0xFF80
@@ -1299,14 +1314,14 @@ NXT_18:
         adc     cx, dx
         jmp     P1E_19
 P0S_19:
-        mov     bx, 19
+        mov     di, 19
         call    FWD_SHIFT_ADD
         jmp     P1E_19
 N0S_19:
-        mov     bx, 19
+        mov     di, 19
         call    FWD_SHIFT_SUB
 P1E_19:
-        mov     ax, ss:_nn_acc+166
+        mov     ax, ss:[bp+38]
         cmp     ax, 0x0080
         jge     P1S_19
         cmp     ax, 0xFF80
@@ -1319,15 +1334,15 @@ P1E_19:
         adc     cx, dx
         jmp     NXT_19
 P1S_19:
-        mov     bx, 83
+        mov     di, 83
         call    FWD_SHIFT_ADD
         jmp     NXT_19
 N1S_19:
-        mov     bx, 83
+        mov     di, 83
         call    FWD_SHIFT_SUB
 NXT_19:
 ; ---- slot 20 ----
-        mov     ax, ss:_nn_acc+40
+        mov     ax, ss:[bx+40]
         cmp     ax, 0x0080
         jge     P0S_20
         cmp     ax, 0xFF80
@@ -1340,14 +1355,14 @@ NXT_19:
         adc     cx, dx
         jmp     P1E_20
 P0S_20:
-        mov     bx, 20
+        mov     di, 20
         call    FWD_SHIFT_ADD
         jmp     P1E_20
 N0S_20:
-        mov     bx, 20
+        mov     di, 20
         call    FWD_SHIFT_SUB
 P1E_20:
-        mov     ax, ss:_nn_acc+168
+        mov     ax, ss:[bp+40]
         cmp     ax, 0x0080
         jge     P1S_20
         cmp     ax, 0xFF80
@@ -1360,15 +1375,15 @@ P1E_20:
         adc     cx, dx
         jmp     NXT_20
 P1S_20:
-        mov     bx, 84
+        mov     di, 84
         call    FWD_SHIFT_ADD
         jmp     NXT_20
 N1S_20:
-        mov     bx, 84
+        mov     di, 84
         call    FWD_SHIFT_SUB
 NXT_20:
 ; ---- slot 21 ----
-        mov     ax, ss:_nn_acc+42
+        mov     ax, ss:[bx+42]
         cmp     ax, 0x0080
         jge     P0S_21
         cmp     ax, 0xFF80
@@ -1381,14 +1396,14 @@ NXT_20:
         adc     cx, dx
         jmp     P1E_21
 P0S_21:
-        mov     bx, 21
+        mov     di, 21
         call    FWD_SHIFT_ADD
         jmp     P1E_21
 N0S_21:
-        mov     bx, 21
+        mov     di, 21
         call    FWD_SHIFT_SUB
 P1E_21:
-        mov     ax, ss:_nn_acc+170
+        mov     ax, ss:[bp+42]
         cmp     ax, 0x0080
         jge     P1S_21
         cmp     ax, 0xFF80
@@ -1401,15 +1416,15 @@ P1E_21:
         adc     cx, dx
         jmp     NXT_21
 P1S_21:
-        mov     bx, 85
+        mov     di, 85
         call    FWD_SHIFT_ADD
         jmp     NXT_21
 N1S_21:
-        mov     bx, 85
+        mov     di, 85
         call    FWD_SHIFT_SUB
 NXT_21:
 ; ---- slot 22 ----
-        mov     ax, ss:_nn_acc+44
+        mov     ax, ss:[bx+44]
         cmp     ax, 0x0080
         jge     P0S_22
         cmp     ax, 0xFF80
@@ -1422,14 +1437,14 @@ NXT_21:
         adc     cx, dx
         jmp     P1E_22
 P0S_22:
-        mov     bx, 22
+        mov     di, 22
         call    FWD_SHIFT_ADD
         jmp     P1E_22
 N0S_22:
-        mov     bx, 22
+        mov     di, 22
         call    FWD_SHIFT_SUB
 P1E_22:
-        mov     ax, ss:_nn_acc+172
+        mov     ax, ss:[bp+44]
         cmp     ax, 0x0080
         jge     P1S_22
         cmp     ax, 0xFF80
@@ -1442,15 +1457,15 @@ P1E_22:
         adc     cx, dx
         jmp     NXT_22
 P1S_22:
-        mov     bx, 86
+        mov     di, 86
         call    FWD_SHIFT_ADD
         jmp     NXT_22
 N1S_22:
-        mov     bx, 86
+        mov     di, 86
         call    FWD_SHIFT_SUB
 NXT_22:
 ; ---- slot 23 ----
-        mov     ax, ss:_nn_acc+46
+        mov     ax, ss:[bx+46]
         cmp     ax, 0x0080
         jge     P0S_23
         cmp     ax, 0xFF80
@@ -1463,14 +1478,14 @@ NXT_22:
         adc     cx, dx
         jmp     P1E_23
 P0S_23:
-        mov     bx, 23
+        mov     di, 23
         call    FWD_SHIFT_ADD
         jmp     P1E_23
 N0S_23:
-        mov     bx, 23
+        mov     di, 23
         call    FWD_SHIFT_SUB
 P1E_23:
-        mov     ax, ss:_nn_acc+174
+        mov     ax, ss:[bp+46]
         cmp     ax, 0x0080
         jge     P1S_23
         cmp     ax, 0xFF80
@@ -1483,15 +1498,15 @@ P1E_23:
         adc     cx, dx
         jmp     NXT_23
 P1S_23:
-        mov     bx, 87
+        mov     di, 87
         call    FWD_SHIFT_ADD
         jmp     NXT_23
 N1S_23:
-        mov     bx, 87
+        mov     di, 87
         call    FWD_SHIFT_SUB
 NXT_23:
 ; ---- slot 24 ----
-        mov     ax, ss:_nn_acc+48
+        mov     ax, ss:[bx+48]
         cmp     ax, 0x0080
         jge     P0S_24
         cmp     ax, 0xFF80
@@ -1504,14 +1519,14 @@ NXT_23:
         adc     cx, dx
         jmp     P1E_24
 P0S_24:
-        mov     bx, 24
+        mov     di, 24
         call    FWD_SHIFT_ADD
         jmp     P1E_24
 N0S_24:
-        mov     bx, 24
+        mov     di, 24
         call    FWD_SHIFT_SUB
 P1E_24:
-        mov     ax, ss:_nn_acc+176
+        mov     ax, ss:[bp+48]
         cmp     ax, 0x0080
         jge     P1S_24
         cmp     ax, 0xFF80
@@ -1524,15 +1539,15 @@ P1E_24:
         adc     cx, dx
         jmp     NXT_24
 P1S_24:
-        mov     bx, 88
+        mov     di, 88
         call    FWD_SHIFT_ADD
         jmp     NXT_24
 N1S_24:
-        mov     bx, 88
+        mov     di, 88
         call    FWD_SHIFT_SUB
 NXT_24:
 ; ---- slot 25 ----
-        mov     ax, ss:_nn_acc+50
+        mov     ax, ss:[bx+50]
         cmp     ax, 0x0080
         jge     P0S_25
         cmp     ax, 0xFF80
@@ -1545,14 +1560,14 @@ NXT_24:
         adc     cx, dx
         jmp     P1E_25
 P0S_25:
-        mov     bx, 25
+        mov     di, 25
         call    FWD_SHIFT_ADD
         jmp     P1E_25
 N0S_25:
-        mov     bx, 25
+        mov     di, 25
         call    FWD_SHIFT_SUB
 P1E_25:
-        mov     ax, ss:_nn_acc+178
+        mov     ax, ss:[bp+50]
         cmp     ax, 0x0080
         jge     P1S_25
         cmp     ax, 0xFF80
@@ -1565,15 +1580,15 @@ P1E_25:
         adc     cx, dx
         jmp     NXT_25
 P1S_25:
-        mov     bx, 89
+        mov     di, 89
         call    FWD_SHIFT_ADD
         jmp     NXT_25
 N1S_25:
-        mov     bx, 89
+        mov     di, 89
         call    FWD_SHIFT_SUB
 NXT_25:
 ; ---- slot 26 ----
-        mov     ax, ss:_nn_acc+52
+        mov     ax, ss:[bx+52]
         cmp     ax, 0x0080
         jge     P0S_26
         cmp     ax, 0xFF80
@@ -1586,14 +1601,14 @@ NXT_25:
         adc     cx, dx
         jmp     P1E_26
 P0S_26:
-        mov     bx, 26
+        mov     di, 26
         call    FWD_SHIFT_ADD
         jmp     P1E_26
 N0S_26:
-        mov     bx, 26
+        mov     di, 26
         call    FWD_SHIFT_SUB
 P1E_26:
-        mov     ax, ss:_nn_acc+180
+        mov     ax, ss:[bp+52]
         cmp     ax, 0x0080
         jge     P1S_26
         cmp     ax, 0xFF80
@@ -1606,15 +1621,15 @@ P1E_26:
         adc     cx, dx
         jmp     NXT_26
 P1S_26:
-        mov     bx, 90
+        mov     di, 90
         call    FWD_SHIFT_ADD
         jmp     NXT_26
 N1S_26:
-        mov     bx, 90
+        mov     di, 90
         call    FWD_SHIFT_SUB
 NXT_26:
 ; ---- slot 27 ----
-        mov     ax, ss:_nn_acc+54
+        mov     ax, ss:[bx+54]
         cmp     ax, 0x0080
         jge     P0S_27
         cmp     ax, 0xFF80
@@ -1627,14 +1642,14 @@ NXT_26:
         adc     cx, dx
         jmp     P1E_27
 P0S_27:
-        mov     bx, 27
+        mov     di, 27
         call    FWD_SHIFT_ADD
         jmp     P1E_27
 N0S_27:
-        mov     bx, 27
+        mov     di, 27
         call    FWD_SHIFT_SUB
 P1E_27:
-        mov     ax, ss:_nn_acc+182
+        mov     ax, ss:[bp+54]
         cmp     ax, 0x0080
         jge     P1S_27
         cmp     ax, 0xFF80
@@ -1647,15 +1662,15 @@ P1E_27:
         adc     cx, dx
         jmp     NXT_27
 P1S_27:
-        mov     bx, 91
+        mov     di, 91
         call    FWD_SHIFT_ADD
         jmp     NXT_27
 N1S_27:
-        mov     bx, 91
+        mov     di, 91
         call    FWD_SHIFT_SUB
 NXT_27:
 ; ---- slot 28 ----
-        mov     ax, ss:_nn_acc+56
+        mov     ax, ss:[bx+56]
         cmp     ax, 0x0080
         jge     P0S_28
         cmp     ax, 0xFF80
@@ -1668,14 +1683,14 @@ NXT_27:
         adc     cx, dx
         jmp     P1E_28
 P0S_28:
-        mov     bx, 28
+        mov     di, 28
         call    FWD_SHIFT_ADD
         jmp     P1E_28
 N0S_28:
-        mov     bx, 28
+        mov     di, 28
         call    FWD_SHIFT_SUB
 P1E_28:
-        mov     ax, ss:_nn_acc+184
+        mov     ax, ss:[bp+56]
         cmp     ax, 0x0080
         jge     P1S_28
         cmp     ax, 0xFF80
@@ -1688,15 +1703,15 @@ P1E_28:
         adc     cx, dx
         jmp     NXT_28
 P1S_28:
-        mov     bx, 92
+        mov     di, 92
         call    FWD_SHIFT_ADD
         jmp     NXT_28
 N1S_28:
-        mov     bx, 92
+        mov     di, 92
         call    FWD_SHIFT_SUB
 NXT_28:
 ; ---- slot 29 ----
-        mov     ax, ss:_nn_acc+58
+        mov     ax, ss:[bx+58]
         cmp     ax, 0x0080
         jge     P0S_29
         cmp     ax, 0xFF80
@@ -1709,14 +1724,14 @@ NXT_28:
         adc     cx, dx
         jmp     P1E_29
 P0S_29:
-        mov     bx, 29
+        mov     di, 29
         call    FWD_SHIFT_ADD
         jmp     P1E_29
 N0S_29:
-        mov     bx, 29
+        mov     di, 29
         call    FWD_SHIFT_SUB
 P1E_29:
-        mov     ax, ss:_nn_acc+186
+        mov     ax, ss:[bp+58]
         cmp     ax, 0x0080
         jge     P1S_29
         cmp     ax, 0xFF80
@@ -1729,15 +1744,15 @@ P1E_29:
         adc     cx, dx
         jmp     NXT_29
 P1S_29:
-        mov     bx, 93
+        mov     di, 93
         call    FWD_SHIFT_ADD
         jmp     NXT_29
 N1S_29:
-        mov     bx, 93
+        mov     di, 93
         call    FWD_SHIFT_SUB
 NXT_29:
 ; ---- slot 30 ----
-        mov     ax, ss:_nn_acc+60
+        mov     ax, ss:[bx+60]
         cmp     ax, 0x0080
         jge     P0S_30
         cmp     ax, 0xFF80
@@ -1750,14 +1765,14 @@ NXT_29:
         adc     cx, dx
         jmp     P1E_30
 P0S_30:
-        mov     bx, 30
+        mov     di, 30
         call    FWD_SHIFT_ADD
         jmp     P1E_30
 N0S_30:
-        mov     bx, 30
+        mov     di, 30
         call    FWD_SHIFT_SUB
 P1E_30:
-        mov     ax, ss:_nn_acc+188
+        mov     ax, ss:[bp+60]
         cmp     ax, 0x0080
         jge     P1S_30
         cmp     ax, 0xFF80
@@ -1770,15 +1785,15 @@ P1E_30:
         adc     cx, dx
         jmp     NXT_30
 P1S_30:
-        mov     bx, 94
+        mov     di, 94
         call    FWD_SHIFT_ADD
         jmp     NXT_30
 N1S_30:
-        mov     bx, 94
+        mov     di, 94
         call    FWD_SHIFT_SUB
 NXT_30:
 ; ---- slot 31 ----
-        mov     ax, ss:_nn_acc+62
+        mov     ax, ss:[bx+62]
         cmp     ax, 0x0080
         jge     P0S_31
         cmp     ax, 0xFF80
@@ -1791,14 +1806,14 @@ NXT_30:
         adc     cx, dx
         jmp     P1E_31
 P0S_31:
-        mov     bx, 31
+        mov     di, 31
         call    FWD_SHIFT_ADD
         jmp     P1E_31
 N0S_31:
-        mov     bx, 31
+        mov     di, 31
         call    FWD_SHIFT_SUB
 P1E_31:
-        mov     ax, ss:_nn_acc+190
+        mov     ax, ss:[bp+62]
         cmp     ax, 0x0080
         jge     P1S_31
         cmp     ax, 0xFF80
@@ -1811,15 +1826,15 @@ P1E_31:
         adc     cx, dx
         jmp     NXT_31
 P1S_31:
-        mov     bx, 95
+        mov     di, 95
         call    FWD_SHIFT_ADD
         jmp     NXT_31
 N1S_31:
-        mov     bx, 95
+        mov     di, 95
         call    FWD_SHIFT_SUB
 NXT_31:
 ; ---- slot 32 ----
-        mov     ax, ss:_nn_acc+64
+        mov     ax, ss:[bx+64]
         cmp     ax, 0x0080
         jge     P0S_32
         cmp     ax, 0xFF80
@@ -1832,14 +1847,14 @@ NXT_31:
         adc     cx, dx
         jmp     P1E_32
 P0S_32:
-        mov     bx, 32
+        mov     di, 32
         call    FWD_SHIFT_ADD
         jmp     P1E_32
 N0S_32:
-        mov     bx, 32
+        mov     di, 32
         call    FWD_SHIFT_SUB
 P1E_32:
-        mov     ax, ss:_nn_acc+192
+        mov     ax, ss:[bp+64]
         cmp     ax, 0x0080
         jge     P1S_32
         cmp     ax, 0xFF80
@@ -1852,15 +1867,15 @@ P1E_32:
         adc     cx, dx
         jmp     NXT_32
 P1S_32:
-        mov     bx, 96
+        mov     di, 96
         call    FWD_SHIFT_ADD
         jmp     NXT_32
 N1S_32:
-        mov     bx, 96
+        mov     di, 96
         call    FWD_SHIFT_SUB
 NXT_32:
 ; ---- slot 33 ----
-        mov     ax, ss:_nn_acc+66
+        mov     ax, ss:[bx+66]
         cmp     ax, 0x0080
         jge     P0S_33
         cmp     ax, 0xFF80
@@ -1873,14 +1888,14 @@ NXT_32:
         adc     cx, dx
         jmp     P1E_33
 P0S_33:
-        mov     bx, 33
+        mov     di, 33
         call    FWD_SHIFT_ADD
         jmp     P1E_33
 N0S_33:
-        mov     bx, 33
+        mov     di, 33
         call    FWD_SHIFT_SUB
 P1E_33:
-        mov     ax, ss:_nn_acc+194
+        mov     ax, ss:[bp+66]
         cmp     ax, 0x0080
         jge     P1S_33
         cmp     ax, 0xFF80
@@ -1893,15 +1908,15 @@ P1E_33:
         adc     cx, dx
         jmp     NXT_33
 P1S_33:
-        mov     bx, 97
+        mov     di, 97
         call    FWD_SHIFT_ADD
         jmp     NXT_33
 N1S_33:
-        mov     bx, 97
+        mov     di, 97
         call    FWD_SHIFT_SUB
 NXT_33:
 ; ---- slot 34 ----
-        mov     ax, ss:_nn_acc+68
+        mov     ax, ss:[bx+68]
         cmp     ax, 0x0080
         jge     P0S_34
         cmp     ax, 0xFF80
@@ -1914,14 +1929,14 @@ NXT_33:
         adc     cx, dx
         jmp     P1E_34
 P0S_34:
-        mov     bx, 34
+        mov     di, 34
         call    FWD_SHIFT_ADD
         jmp     P1E_34
 N0S_34:
-        mov     bx, 34
+        mov     di, 34
         call    FWD_SHIFT_SUB
 P1E_34:
-        mov     ax, ss:_nn_acc+196
+        mov     ax, ss:[bp+68]
         cmp     ax, 0x0080
         jge     P1S_34
         cmp     ax, 0xFF80
@@ -1934,15 +1949,15 @@ P1E_34:
         adc     cx, dx
         jmp     NXT_34
 P1S_34:
-        mov     bx, 98
+        mov     di, 98
         call    FWD_SHIFT_ADD
         jmp     NXT_34
 N1S_34:
-        mov     bx, 98
+        mov     di, 98
         call    FWD_SHIFT_SUB
 NXT_34:
 ; ---- slot 35 ----
-        mov     ax, ss:_nn_acc+70
+        mov     ax, ss:[bx+70]
         cmp     ax, 0x0080
         jge     P0S_35
         cmp     ax, 0xFF80
@@ -1955,14 +1970,14 @@ NXT_34:
         adc     cx, dx
         jmp     P1E_35
 P0S_35:
-        mov     bx, 35
+        mov     di, 35
         call    FWD_SHIFT_ADD
         jmp     P1E_35
 N0S_35:
-        mov     bx, 35
+        mov     di, 35
         call    FWD_SHIFT_SUB
 P1E_35:
-        mov     ax, ss:_nn_acc+198
+        mov     ax, ss:[bp+70]
         cmp     ax, 0x0080
         jge     P1S_35
         cmp     ax, 0xFF80
@@ -1975,15 +1990,15 @@ P1E_35:
         adc     cx, dx
         jmp     NXT_35
 P1S_35:
-        mov     bx, 99
+        mov     di, 99
         call    FWD_SHIFT_ADD
         jmp     NXT_35
 N1S_35:
-        mov     bx, 99
+        mov     di, 99
         call    FWD_SHIFT_SUB
 NXT_35:
 ; ---- slot 36 ----
-        mov     ax, ss:_nn_acc+72
+        mov     ax, ss:[bx+72]
         cmp     ax, 0x0080
         jge     P0S_36
         cmp     ax, 0xFF80
@@ -1996,14 +2011,14 @@ NXT_35:
         adc     cx, dx
         jmp     P1E_36
 P0S_36:
-        mov     bx, 36
+        mov     di, 36
         call    FWD_SHIFT_ADD
         jmp     P1E_36
 N0S_36:
-        mov     bx, 36
+        mov     di, 36
         call    FWD_SHIFT_SUB
 P1E_36:
-        mov     ax, ss:_nn_acc+200
+        mov     ax, ss:[bp+72]
         cmp     ax, 0x0080
         jge     P1S_36
         cmp     ax, 0xFF80
@@ -2016,15 +2031,15 @@ P1E_36:
         adc     cx, dx
         jmp     NXT_36
 P1S_36:
-        mov     bx, 100
+        mov     di, 100
         call    FWD_SHIFT_ADD
         jmp     NXT_36
 N1S_36:
-        mov     bx, 100
+        mov     di, 100
         call    FWD_SHIFT_SUB
 NXT_36:
 ; ---- slot 37 ----
-        mov     ax, ss:_nn_acc+74
+        mov     ax, ss:[bx+74]
         cmp     ax, 0x0080
         jge     P0S_37
         cmp     ax, 0xFF80
@@ -2037,14 +2052,14 @@ NXT_36:
         adc     cx, dx
         jmp     P1E_37
 P0S_37:
-        mov     bx, 37
+        mov     di, 37
         call    FWD_SHIFT_ADD
         jmp     P1E_37
 N0S_37:
-        mov     bx, 37
+        mov     di, 37
         call    FWD_SHIFT_SUB
 P1E_37:
-        mov     ax, ss:_nn_acc+202
+        mov     ax, ss:[bp+74]
         cmp     ax, 0x0080
         jge     P1S_37
         cmp     ax, 0xFF80
@@ -2057,15 +2072,15 @@ P1E_37:
         adc     cx, dx
         jmp     NXT_37
 P1S_37:
-        mov     bx, 101
+        mov     di, 101
         call    FWD_SHIFT_ADD
         jmp     NXT_37
 N1S_37:
-        mov     bx, 101
+        mov     di, 101
         call    FWD_SHIFT_SUB
 NXT_37:
 ; ---- slot 38 ----
-        mov     ax, ss:_nn_acc+76
+        mov     ax, ss:[bx+76]
         cmp     ax, 0x0080
         jge     P0S_38
         cmp     ax, 0xFF80
@@ -2078,14 +2093,14 @@ NXT_37:
         adc     cx, dx
         jmp     P1E_38
 P0S_38:
-        mov     bx, 38
+        mov     di, 38
         call    FWD_SHIFT_ADD
         jmp     P1E_38
 N0S_38:
-        mov     bx, 38
+        mov     di, 38
         call    FWD_SHIFT_SUB
 P1E_38:
-        mov     ax, ss:_nn_acc+204
+        mov     ax, ss:[bp+76]
         cmp     ax, 0x0080
         jge     P1S_38
         cmp     ax, 0xFF80
@@ -2098,15 +2113,15 @@ P1E_38:
         adc     cx, dx
         jmp     NXT_38
 P1S_38:
-        mov     bx, 102
+        mov     di, 102
         call    FWD_SHIFT_ADD
         jmp     NXT_38
 N1S_38:
-        mov     bx, 102
+        mov     di, 102
         call    FWD_SHIFT_SUB
 NXT_38:
 ; ---- slot 39 ----
-        mov     ax, ss:_nn_acc+78
+        mov     ax, ss:[bx+78]
         cmp     ax, 0x0080
         jge     P0S_39
         cmp     ax, 0xFF80
@@ -2119,14 +2134,14 @@ NXT_38:
         adc     cx, dx
         jmp     P1E_39
 P0S_39:
-        mov     bx, 39
+        mov     di, 39
         call    FWD_SHIFT_ADD
         jmp     P1E_39
 N0S_39:
-        mov     bx, 39
+        mov     di, 39
         call    FWD_SHIFT_SUB
 P1E_39:
-        mov     ax, ss:_nn_acc+206
+        mov     ax, ss:[bp+78]
         cmp     ax, 0x0080
         jge     P1S_39
         cmp     ax, 0xFF80
@@ -2139,15 +2154,15 @@ P1E_39:
         adc     cx, dx
         jmp     NXT_39
 P1S_39:
-        mov     bx, 103
+        mov     di, 103
         call    FWD_SHIFT_ADD
         jmp     NXT_39
 N1S_39:
-        mov     bx, 103
+        mov     di, 103
         call    FWD_SHIFT_SUB
 NXT_39:
 ; ---- slot 40 ----
-        mov     ax, ss:_nn_acc+80
+        mov     ax, ss:[bx+80]
         cmp     ax, 0x0080
         jge     P0S_40
         cmp     ax, 0xFF80
@@ -2160,14 +2175,14 @@ NXT_39:
         adc     cx, dx
         jmp     P1E_40
 P0S_40:
-        mov     bx, 40
+        mov     di, 40
         call    FWD_SHIFT_ADD
         jmp     P1E_40
 N0S_40:
-        mov     bx, 40
+        mov     di, 40
         call    FWD_SHIFT_SUB
 P1E_40:
-        mov     ax, ss:_nn_acc+208
+        mov     ax, ss:[bp+80]
         cmp     ax, 0x0080
         jge     P1S_40
         cmp     ax, 0xFF80
@@ -2180,15 +2195,15 @@ P1E_40:
         adc     cx, dx
         jmp     NXT_40
 P1S_40:
-        mov     bx, 104
+        mov     di, 104
         call    FWD_SHIFT_ADD
         jmp     NXT_40
 N1S_40:
-        mov     bx, 104
+        mov     di, 104
         call    FWD_SHIFT_SUB
 NXT_40:
 ; ---- slot 41 ----
-        mov     ax, ss:_nn_acc+82
+        mov     ax, ss:[bx+82]
         cmp     ax, 0x0080
         jge     P0S_41
         cmp     ax, 0xFF80
@@ -2201,14 +2216,14 @@ NXT_40:
         adc     cx, dx
         jmp     P1E_41
 P0S_41:
-        mov     bx, 41
+        mov     di, 41
         call    FWD_SHIFT_ADD
         jmp     P1E_41
 N0S_41:
-        mov     bx, 41
+        mov     di, 41
         call    FWD_SHIFT_SUB
 P1E_41:
-        mov     ax, ss:_nn_acc+210
+        mov     ax, ss:[bp+82]
         cmp     ax, 0x0080
         jge     P1S_41
         cmp     ax, 0xFF80
@@ -2221,15 +2236,15 @@ P1E_41:
         adc     cx, dx
         jmp     NXT_41
 P1S_41:
-        mov     bx, 105
+        mov     di, 105
         call    FWD_SHIFT_ADD
         jmp     NXT_41
 N1S_41:
-        mov     bx, 105
+        mov     di, 105
         call    FWD_SHIFT_SUB
 NXT_41:
 ; ---- slot 42 ----
-        mov     ax, ss:_nn_acc+84
+        mov     ax, ss:[bx+84]
         cmp     ax, 0x0080
         jge     P0S_42
         cmp     ax, 0xFF80
@@ -2242,14 +2257,14 @@ NXT_41:
         adc     cx, dx
         jmp     P1E_42
 P0S_42:
-        mov     bx, 42
+        mov     di, 42
         call    FWD_SHIFT_ADD
         jmp     P1E_42
 N0S_42:
-        mov     bx, 42
+        mov     di, 42
         call    FWD_SHIFT_SUB
 P1E_42:
-        mov     ax, ss:_nn_acc+212
+        mov     ax, ss:[bp+84]
         cmp     ax, 0x0080
         jge     P1S_42
         cmp     ax, 0xFF80
@@ -2262,15 +2277,15 @@ P1E_42:
         adc     cx, dx
         jmp     NXT_42
 P1S_42:
-        mov     bx, 106
+        mov     di, 106
         call    FWD_SHIFT_ADD
         jmp     NXT_42
 N1S_42:
-        mov     bx, 106
+        mov     di, 106
         call    FWD_SHIFT_SUB
 NXT_42:
 ; ---- slot 43 ----
-        mov     ax, ss:_nn_acc+86
+        mov     ax, ss:[bx+86]
         cmp     ax, 0x0080
         jge     P0S_43
         cmp     ax, 0xFF80
@@ -2283,14 +2298,14 @@ NXT_42:
         adc     cx, dx
         jmp     P1E_43
 P0S_43:
-        mov     bx, 43
+        mov     di, 43
         call    FWD_SHIFT_ADD
         jmp     P1E_43
 N0S_43:
-        mov     bx, 43
+        mov     di, 43
         call    FWD_SHIFT_SUB
 P1E_43:
-        mov     ax, ss:_nn_acc+214
+        mov     ax, ss:[bp+86]
         cmp     ax, 0x0080
         jge     P1S_43
         cmp     ax, 0xFF80
@@ -2303,15 +2318,15 @@ P1E_43:
         adc     cx, dx
         jmp     NXT_43
 P1S_43:
-        mov     bx, 107
+        mov     di, 107
         call    FWD_SHIFT_ADD
         jmp     NXT_43
 N1S_43:
-        mov     bx, 107
+        mov     di, 107
         call    FWD_SHIFT_SUB
 NXT_43:
 ; ---- slot 44 ----
-        mov     ax, ss:_nn_acc+88
+        mov     ax, ss:[bx+88]
         cmp     ax, 0x0080
         jge     P0S_44
         cmp     ax, 0xFF80
@@ -2324,14 +2339,14 @@ NXT_43:
         adc     cx, dx
         jmp     P1E_44
 P0S_44:
-        mov     bx, 44
+        mov     di, 44
         call    FWD_SHIFT_ADD
         jmp     P1E_44
 N0S_44:
-        mov     bx, 44
+        mov     di, 44
         call    FWD_SHIFT_SUB
 P1E_44:
-        mov     ax, ss:_nn_acc+216
+        mov     ax, ss:[bp+88]
         cmp     ax, 0x0080
         jge     P1S_44
         cmp     ax, 0xFF80
@@ -2344,15 +2359,15 @@ P1E_44:
         adc     cx, dx
         jmp     NXT_44
 P1S_44:
-        mov     bx, 108
+        mov     di, 108
         call    FWD_SHIFT_ADD
         jmp     NXT_44
 N1S_44:
-        mov     bx, 108
+        mov     di, 108
         call    FWD_SHIFT_SUB
 NXT_44:
 ; ---- slot 45 ----
-        mov     ax, ss:_nn_acc+90
+        mov     ax, ss:[bx+90]
         cmp     ax, 0x0080
         jge     P0S_45
         cmp     ax, 0xFF80
@@ -2365,14 +2380,14 @@ NXT_44:
         adc     cx, dx
         jmp     P1E_45
 P0S_45:
-        mov     bx, 45
+        mov     di, 45
         call    FWD_SHIFT_ADD
         jmp     P1E_45
 N0S_45:
-        mov     bx, 45
+        mov     di, 45
         call    FWD_SHIFT_SUB
 P1E_45:
-        mov     ax, ss:_nn_acc+218
+        mov     ax, ss:[bp+90]
         cmp     ax, 0x0080
         jge     P1S_45
         cmp     ax, 0xFF80
@@ -2385,15 +2400,15 @@ P1E_45:
         adc     cx, dx
         jmp     NXT_45
 P1S_45:
-        mov     bx, 109
+        mov     di, 109
         call    FWD_SHIFT_ADD
         jmp     NXT_45
 N1S_45:
-        mov     bx, 109
+        mov     di, 109
         call    FWD_SHIFT_SUB
 NXT_45:
 ; ---- slot 46 ----
-        mov     ax, ss:_nn_acc+92
+        mov     ax, ss:[bx+92]
         cmp     ax, 0x0080
         jge     P0S_46
         cmp     ax, 0xFF80
@@ -2406,14 +2421,14 @@ NXT_45:
         adc     cx, dx
         jmp     P1E_46
 P0S_46:
-        mov     bx, 46
+        mov     di, 46
         call    FWD_SHIFT_ADD
         jmp     P1E_46
 N0S_46:
-        mov     bx, 46
+        mov     di, 46
         call    FWD_SHIFT_SUB
 P1E_46:
-        mov     ax, ss:_nn_acc+220
+        mov     ax, ss:[bp+92]
         cmp     ax, 0x0080
         jge     P1S_46
         cmp     ax, 0xFF80
@@ -2426,15 +2441,15 @@ P1E_46:
         adc     cx, dx
         jmp     NXT_46
 P1S_46:
-        mov     bx, 110
+        mov     di, 110
         call    FWD_SHIFT_ADD
         jmp     NXT_46
 N1S_46:
-        mov     bx, 110
+        mov     di, 110
         call    FWD_SHIFT_SUB
 NXT_46:
 ; ---- slot 47 ----
-        mov     ax, ss:_nn_acc+94
+        mov     ax, ss:[bx+94]
         cmp     ax, 0x0080
         jge     P0S_47
         cmp     ax, 0xFF80
@@ -2447,14 +2462,14 @@ NXT_46:
         adc     cx, dx
         jmp     P1E_47
 P0S_47:
-        mov     bx, 47
+        mov     di, 47
         call    FWD_SHIFT_ADD
         jmp     P1E_47
 N0S_47:
-        mov     bx, 47
+        mov     di, 47
         call    FWD_SHIFT_SUB
 P1E_47:
-        mov     ax, ss:_nn_acc+222
+        mov     ax, ss:[bp+94]
         cmp     ax, 0x0080
         jge     P1S_47
         cmp     ax, 0xFF80
@@ -2467,15 +2482,15 @@ P1E_47:
         adc     cx, dx
         jmp     NXT_47
 P1S_47:
-        mov     bx, 111
+        mov     di, 111
         call    FWD_SHIFT_ADD
         jmp     NXT_47
 N1S_47:
-        mov     bx, 111
+        mov     di, 111
         call    FWD_SHIFT_SUB
 NXT_47:
 ; ---- slot 48 ----
-        mov     ax, ss:_nn_acc+96
+        mov     ax, ss:[bx+96]
         cmp     ax, 0x0080
         jge     P0S_48
         cmp     ax, 0xFF80
@@ -2488,14 +2503,14 @@ NXT_47:
         adc     cx, dx
         jmp     P1E_48
 P0S_48:
-        mov     bx, 48
+        mov     di, 48
         call    FWD_SHIFT_ADD
         jmp     P1E_48
 N0S_48:
-        mov     bx, 48
+        mov     di, 48
         call    FWD_SHIFT_SUB
 P1E_48:
-        mov     ax, ss:_nn_acc+224
+        mov     ax, ss:[bp+96]
         cmp     ax, 0x0080
         jge     P1S_48
         cmp     ax, 0xFF80
@@ -2508,15 +2523,15 @@ P1E_48:
         adc     cx, dx
         jmp     NXT_48
 P1S_48:
-        mov     bx, 112
+        mov     di, 112
         call    FWD_SHIFT_ADD
         jmp     NXT_48
 N1S_48:
-        mov     bx, 112
+        mov     di, 112
         call    FWD_SHIFT_SUB
 NXT_48:
 ; ---- slot 49 ----
-        mov     ax, ss:_nn_acc+98
+        mov     ax, ss:[bx+98]
         cmp     ax, 0x0080
         jge     P0S_49
         cmp     ax, 0xFF80
@@ -2529,14 +2544,14 @@ NXT_48:
         adc     cx, dx
         jmp     P1E_49
 P0S_49:
-        mov     bx, 49
+        mov     di, 49
         call    FWD_SHIFT_ADD
         jmp     P1E_49
 N0S_49:
-        mov     bx, 49
+        mov     di, 49
         call    FWD_SHIFT_SUB
 P1E_49:
-        mov     ax, ss:_nn_acc+226
+        mov     ax, ss:[bp+98]
         cmp     ax, 0x0080
         jge     P1S_49
         cmp     ax, 0xFF80
@@ -2549,15 +2564,15 @@ P1E_49:
         adc     cx, dx
         jmp     NXT_49
 P1S_49:
-        mov     bx, 113
+        mov     di, 113
         call    FWD_SHIFT_ADD
         jmp     NXT_49
 N1S_49:
-        mov     bx, 113
+        mov     di, 113
         call    FWD_SHIFT_SUB
 NXT_49:
 ; ---- slot 50 ----
-        mov     ax, ss:_nn_acc+100
+        mov     ax, ss:[bx+100]
         cmp     ax, 0x0080
         jge     P0S_50
         cmp     ax, 0xFF80
@@ -2570,14 +2585,14 @@ NXT_49:
         adc     cx, dx
         jmp     P1E_50
 P0S_50:
-        mov     bx, 50
+        mov     di, 50
         call    FWD_SHIFT_ADD
         jmp     P1E_50
 N0S_50:
-        mov     bx, 50
+        mov     di, 50
         call    FWD_SHIFT_SUB
 P1E_50:
-        mov     ax, ss:_nn_acc+228
+        mov     ax, ss:[bp+100]
         cmp     ax, 0x0080
         jge     P1S_50
         cmp     ax, 0xFF80
@@ -2590,15 +2605,15 @@ P1E_50:
         adc     cx, dx
         jmp     NXT_50
 P1S_50:
-        mov     bx, 114
+        mov     di, 114
         call    FWD_SHIFT_ADD
         jmp     NXT_50
 N1S_50:
-        mov     bx, 114
+        mov     di, 114
         call    FWD_SHIFT_SUB
 NXT_50:
 ; ---- slot 51 ----
-        mov     ax, ss:_nn_acc+102
+        mov     ax, ss:[bx+102]
         cmp     ax, 0x0080
         jge     P0S_51
         cmp     ax, 0xFF80
@@ -2611,14 +2626,14 @@ NXT_50:
         adc     cx, dx
         jmp     P1E_51
 P0S_51:
-        mov     bx, 51
+        mov     di, 51
         call    FWD_SHIFT_ADD
         jmp     P1E_51
 N0S_51:
-        mov     bx, 51
+        mov     di, 51
         call    FWD_SHIFT_SUB
 P1E_51:
-        mov     ax, ss:_nn_acc+230
+        mov     ax, ss:[bp+102]
         cmp     ax, 0x0080
         jge     P1S_51
         cmp     ax, 0xFF80
@@ -2631,15 +2646,15 @@ P1E_51:
         adc     cx, dx
         jmp     NXT_51
 P1S_51:
-        mov     bx, 115
+        mov     di, 115
         call    FWD_SHIFT_ADD
         jmp     NXT_51
 N1S_51:
-        mov     bx, 115
+        mov     di, 115
         call    FWD_SHIFT_SUB
 NXT_51:
 ; ---- slot 52 ----
-        mov     ax, ss:_nn_acc+104
+        mov     ax, ss:[bx+104]
         cmp     ax, 0x0080
         jge     P0S_52
         cmp     ax, 0xFF80
@@ -2652,14 +2667,14 @@ NXT_51:
         adc     cx, dx
         jmp     P1E_52
 P0S_52:
-        mov     bx, 52
+        mov     di, 52
         call    FWD_SHIFT_ADD
         jmp     P1E_52
 N0S_52:
-        mov     bx, 52
+        mov     di, 52
         call    FWD_SHIFT_SUB
 P1E_52:
-        mov     ax, ss:_nn_acc+232
+        mov     ax, ss:[bp+104]
         cmp     ax, 0x0080
         jge     P1S_52
         cmp     ax, 0xFF80
@@ -2672,15 +2687,15 @@ P1E_52:
         adc     cx, dx
         jmp     NXT_52
 P1S_52:
-        mov     bx, 116
+        mov     di, 116
         call    FWD_SHIFT_ADD
         jmp     NXT_52
 N1S_52:
-        mov     bx, 116
+        mov     di, 116
         call    FWD_SHIFT_SUB
 NXT_52:
 ; ---- slot 53 ----
-        mov     ax, ss:_nn_acc+106
+        mov     ax, ss:[bx+106]
         cmp     ax, 0x0080
         jge     P0S_53
         cmp     ax, 0xFF80
@@ -2693,14 +2708,14 @@ NXT_52:
         adc     cx, dx
         jmp     P1E_53
 P0S_53:
-        mov     bx, 53
+        mov     di, 53
         call    FWD_SHIFT_ADD
         jmp     P1E_53
 N0S_53:
-        mov     bx, 53
+        mov     di, 53
         call    FWD_SHIFT_SUB
 P1E_53:
-        mov     ax, ss:_nn_acc+234
+        mov     ax, ss:[bp+106]
         cmp     ax, 0x0080
         jge     P1S_53
         cmp     ax, 0xFF80
@@ -2713,15 +2728,15 @@ P1E_53:
         adc     cx, dx
         jmp     NXT_53
 P1S_53:
-        mov     bx, 117
+        mov     di, 117
         call    FWD_SHIFT_ADD
         jmp     NXT_53
 N1S_53:
-        mov     bx, 117
+        mov     di, 117
         call    FWD_SHIFT_SUB
 NXT_53:
 ; ---- slot 54 ----
-        mov     ax, ss:_nn_acc+108
+        mov     ax, ss:[bx+108]
         cmp     ax, 0x0080
         jge     P0S_54
         cmp     ax, 0xFF80
@@ -2734,14 +2749,14 @@ NXT_53:
         adc     cx, dx
         jmp     P1E_54
 P0S_54:
-        mov     bx, 54
+        mov     di, 54
         call    FWD_SHIFT_ADD
         jmp     P1E_54
 N0S_54:
-        mov     bx, 54
+        mov     di, 54
         call    FWD_SHIFT_SUB
 P1E_54:
-        mov     ax, ss:_nn_acc+236
+        mov     ax, ss:[bp+108]
         cmp     ax, 0x0080
         jge     P1S_54
         cmp     ax, 0xFF80
@@ -2754,15 +2769,15 @@ P1E_54:
         adc     cx, dx
         jmp     NXT_54
 P1S_54:
-        mov     bx, 118
+        mov     di, 118
         call    FWD_SHIFT_ADD
         jmp     NXT_54
 N1S_54:
-        mov     bx, 118
+        mov     di, 118
         call    FWD_SHIFT_SUB
 NXT_54:
 ; ---- slot 55 ----
-        mov     ax, ss:_nn_acc+110
+        mov     ax, ss:[bx+110]
         cmp     ax, 0x0080
         jge     P0S_55
         cmp     ax, 0xFF80
@@ -2775,14 +2790,14 @@ NXT_54:
         adc     cx, dx
         jmp     P1E_55
 P0S_55:
-        mov     bx, 55
+        mov     di, 55
         call    FWD_SHIFT_ADD
         jmp     P1E_55
 N0S_55:
-        mov     bx, 55
+        mov     di, 55
         call    FWD_SHIFT_SUB
 P1E_55:
-        mov     ax, ss:_nn_acc+238
+        mov     ax, ss:[bp+110]
         cmp     ax, 0x0080
         jge     P1S_55
         cmp     ax, 0xFF80
@@ -2795,15 +2810,15 @@ P1E_55:
         adc     cx, dx
         jmp     NXT_55
 P1S_55:
-        mov     bx, 119
+        mov     di, 119
         call    FWD_SHIFT_ADD
         jmp     NXT_55
 N1S_55:
-        mov     bx, 119
+        mov     di, 119
         call    FWD_SHIFT_SUB
 NXT_55:
 ; ---- slot 56 ----
-        mov     ax, ss:_nn_acc+112
+        mov     ax, ss:[bx+112]
         cmp     ax, 0x0080
         jge     P0S_56
         cmp     ax, 0xFF80
@@ -2816,14 +2831,14 @@ NXT_55:
         adc     cx, dx
         jmp     P1E_56
 P0S_56:
-        mov     bx, 56
+        mov     di, 56
         call    FWD_SHIFT_ADD
         jmp     P1E_56
 N0S_56:
-        mov     bx, 56
+        mov     di, 56
         call    FWD_SHIFT_SUB
 P1E_56:
-        mov     ax, ss:_nn_acc+240
+        mov     ax, ss:[bp+112]
         cmp     ax, 0x0080
         jge     P1S_56
         cmp     ax, 0xFF80
@@ -2836,15 +2851,15 @@ P1E_56:
         adc     cx, dx
         jmp     NXT_56
 P1S_56:
-        mov     bx, 120
+        mov     di, 120
         call    FWD_SHIFT_ADD
         jmp     NXT_56
 N1S_56:
-        mov     bx, 120
+        mov     di, 120
         call    FWD_SHIFT_SUB
 NXT_56:
 ; ---- slot 57 ----
-        mov     ax, ss:_nn_acc+114
+        mov     ax, ss:[bx+114]
         cmp     ax, 0x0080
         jge     P0S_57
         cmp     ax, 0xFF80
@@ -2857,14 +2872,14 @@ NXT_56:
         adc     cx, dx
         jmp     P1E_57
 P0S_57:
-        mov     bx, 57
+        mov     di, 57
         call    FWD_SHIFT_ADD
         jmp     P1E_57
 N0S_57:
-        mov     bx, 57
+        mov     di, 57
         call    FWD_SHIFT_SUB
 P1E_57:
-        mov     ax, ss:_nn_acc+242
+        mov     ax, ss:[bp+114]
         cmp     ax, 0x0080
         jge     P1S_57
         cmp     ax, 0xFF80
@@ -2877,15 +2892,15 @@ P1E_57:
         adc     cx, dx
         jmp     NXT_57
 P1S_57:
-        mov     bx, 121
+        mov     di, 121
         call    FWD_SHIFT_ADD
         jmp     NXT_57
 N1S_57:
-        mov     bx, 121
+        mov     di, 121
         call    FWD_SHIFT_SUB
 NXT_57:
 ; ---- slot 58 ----
-        mov     ax, ss:_nn_acc+116
+        mov     ax, ss:[bx+116]
         cmp     ax, 0x0080
         jge     P0S_58
         cmp     ax, 0xFF80
@@ -2898,14 +2913,14 @@ NXT_57:
         adc     cx, dx
         jmp     P1E_58
 P0S_58:
-        mov     bx, 58
+        mov     di, 58
         call    FWD_SHIFT_ADD
         jmp     P1E_58
 N0S_58:
-        mov     bx, 58
+        mov     di, 58
         call    FWD_SHIFT_SUB
 P1E_58:
-        mov     ax, ss:_nn_acc+244
+        mov     ax, ss:[bp+116]
         cmp     ax, 0x0080
         jge     P1S_58
         cmp     ax, 0xFF80
@@ -2918,15 +2933,15 @@ P1E_58:
         adc     cx, dx
         jmp     NXT_58
 P1S_58:
-        mov     bx, 122
+        mov     di, 122
         call    FWD_SHIFT_ADD
         jmp     NXT_58
 N1S_58:
-        mov     bx, 122
+        mov     di, 122
         call    FWD_SHIFT_SUB
 NXT_58:
 ; ---- slot 59 ----
-        mov     ax, ss:_nn_acc+118
+        mov     ax, ss:[bx+118]
         cmp     ax, 0x0080
         jge     P0S_59
         cmp     ax, 0xFF80
@@ -2939,14 +2954,14 @@ NXT_58:
         adc     cx, dx
         jmp     P1E_59
 P0S_59:
-        mov     bx, 59
+        mov     di, 59
         call    FWD_SHIFT_ADD
         jmp     P1E_59
 N0S_59:
-        mov     bx, 59
+        mov     di, 59
         call    FWD_SHIFT_SUB
 P1E_59:
-        mov     ax, ss:_nn_acc+246
+        mov     ax, ss:[bp+118]
         cmp     ax, 0x0080
         jge     P1S_59
         cmp     ax, 0xFF80
@@ -2959,15 +2974,15 @@ P1E_59:
         adc     cx, dx
         jmp     NXT_59
 P1S_59:
-        mov     bx, 123
+        mov     di, 123
         call    FWD_SHIFT_ADD
         jmp     NXT_59
 N1S_59:
-        mov     bx, 123
+        mov     di, 123
         call    FWD_SHIFT_SUB
 NXT_59:
 ; ---- slot 60 ----
-        mov     ax, ss:_nn_acc+120
+        mov     ax, ss:[bx+120]
         cmp     ax, 0x0080
         jge     P0S_60
         cmp     ax, 0xFF80
@@ -2980,14 +2995,14 @@ NXT_59:
         adc     cx, dx
         jmp     P1E_60
 P0S_60:
-        mov     bx, 60
+        mov     di, 60
         call    FWD_SHIFT_ADD
         jmp     P1E_60
 N0S_60:
-        mov     bx, 60
+        mov     di, 60
         call    FWD_SHIFT_SUB
 P1E_60:
-        mov     ax, ss:_nn_acc+248
+        mov     ax, ss:[bp+120]
         cmp     ax, 0x0080
         jge     P1S_60
         cmp     ax, 0xFF80
@@ -3000,15 +3015,15 @@ P1E_60:
         adc     cx, dx
         jmp     NXT_60
 P1S_60:
-        mov     bx, 124
+        mov     di, 124
         call    FWD_SHIFT_ADD
         jmp     NXT_60
 N1S_60:
-        mov     bx, 124
+        mov     di, 124
         call    FWD_SHIFT_SUB
 NXT_60:
 ; ---- slot 61 ----
-        mov     ax, ss:_nn_acc+122
+        mov     ax, ss:[bx+122]
         cmp     ax, 0x0080
         jge     P0S_61
         cmp     ax, 0xFF80
@@ -3021,14 +3036,14 @@ NXT_60:
         adc     cx, dx
         jmp     P1E_61
 P0S_61:
-        mov     bx, 61
+        mov     di, 61
         call    FWD_SHIFT_ADD
         jmp     P1E_61
 N0S_61:
-        mov     bx, 61
+        mov     di, 61
         call    FWD_SHIFT_SUB
 P1E_61:
-        mov     ax, ss:_nn_acc+250
+        mov     ax, ss:[bp+122]
         cmp     ax, 0x0080
         jge     P1S_61
         cmp     ax, 0xFF80
@@ -3041,15 +3056,15 @@ P1E_61:
         adc     cx, dx
         jmp     NXT_61
 P1S_61:
-        mov     bx, 125
+        mov     di, 125
         call    FWD_SHIFT_ADD
         jmp     NXT_61
 N1S_61:
-        mov     bx, 125
+        mov     di, 125
         call    FWD_SHIFT_SUB
 NXT_61:
 ; ---- slot 62 ----
-        mov     ax, ss:_nn_acc+124
+        mov     ax, ss:[bx+124]
         cmp     ax, 0x0080
         jge     P0S_62
         cmp     ax, 0xFF80
@@ -3062,14 +3077,14 @@ NXT_61:
         adc     cx, dx
         jmp     P1E_62
 P0S_62:
-        mov     bx, 62
+        mov     di, 62
         call    FWD_SHIFT_ADD
         jmp     P1E_62
 N0S_62:
-        mov     bx, 62
+        mov     di, 62
         call    FWD_SHIFT_SUB
 P1E_62:
-        mov     ax, ss:_nn_acc+252
+        mov     ax, ss:[bp+124]
         cmp     ax, 0x0080
         jge     P1S_62
         cmp     ax, 0xFF80
@@ -3082,15 +3097,15 @@ P1E_62:
         adc     cx, dx
         jmp     NXT_62
 P1S_62:
-        mov     bx, 126
+        mov     di, 126
         call    FWD_SHIFT_ADD
         jmp     NXT_62
 N1S_62:
-        mov     bx, 126
+        mov     di, 126
         call    FWD_SHIFT_SUB
 NXT_62:
 ; ---- slot 63 ----
-        mov     ax, ss:_nn_acc+126
+        mov     ax, ss:[bx+126]
         cmp     ax, 0x0080
         jge     P0S_63
         cmp     ax, 0xFF80
@@ -3103,14 +3118,14 @@ NXT_62:
         adc     cx, dx
         jmp     P1E_63
 P0S_63:
-        mov     bx, 63
+        mov     di, 63
         call    FWD_SHIFT_ADD
         jmp     P1E_63
 N0S_63:
-        mov     bx, 63
+        mov     di, 63
         call    FWD_SHIFT_SUB
 P1E_63:
-        mov     ax, ss:_nn_acc+254
+        mov     ax, ss:[bp+126]
         cmp     ax, 0x0080
         jge     P1S_63
         cmp     ax, 0xFF80
@@ -3123,14 +3138,14 @@ P1E_63:
         adc     cx, dx
         jmp     NXT_63
 P1S_63:
-        mov     bx, 127
+        mov     di, 127
         call    FWD_SHIFT_ADD
         jmp     NXT_63
 N1S_63:
-        mov     bx, 127
+        mov     di, 127
         call    FWD_SHIFT_SUB
 NXT_63:
-; --- finish: (si:cx >> NNUE_SCALE_SHIFT) low word, negate for black ---
+; --- finish: (si:cx >> NNUE_SCALE_SHIFT) low word (score from stm's POV) ---
         mov     ax, cx
         shl     ax, 1
         shl     ax, 1
@@ -3150,10 +3165,6 @@ NXT_63:
         shr     dx, 1
         shr     dx, 1
         or      ax, dx
-        test    bp, bp
-        jz      FWD_RET
-        neg     ax
-FWD_RET:
         pop     ds
         pop     di
         pop     si
@@ -3162,9 +3173,9 @@ FWD_RET:
         retf
 nn_fwd_eval_ ENDP
 
-; shared shift handlers: si:cx += w2[bx]<<7   (bx = slot, or 64+slot for POV 1)
+; shared shift handlers: si:cx += w2[di]<<7   (di = slot, or 64+slot for NSTM)
 FWD_SHIFT_ADD:
-        mov     al, ss:_nn_w2[bx]
+        mov     al, ss:_nn_w2[di]
         cbw
         shl     ax, 1
         shl     ax, 1
@@ -3178,7 +3189,7 @@ FWD_SHIFT_ADD:
         adc     cx, dx
         ret
 FWD_SHIFT_SUB:
-        mov     al, ss:_nn_w2[bx]
+        mov     al, ss:_nn_w2[di]
         cbw
         shl     ax, 1
         shl     ax, 1

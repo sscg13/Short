@@ -90,7 +90,9 @@ void nn_apply_sub(int persp, int row);
 short _far nn_fwd0[NNUE_N][256];
 short _far nn_fwd1[NNUE_N][256];
 int nn_fwd_eval(int side);          /* hand-asm forward pass */
+#ifndef NNUE_DISABLE_ASM_FWD
 #define NNUE_ASM_FWD 1
+#endif
 #endif
 
 /* per-ply record of which (row, sign) deltas were applied, so undo reverses them */
@@ -319,26 +321,27 @@ int nnue_eval(Pos *p) {
     {
         long out = nn_bias;
         int j;
+        /* stm/nstm: acc[0] is the white POV, acc[1] the black POV. The net is
+           side-to-move-aware (the trainer always treats the side to move as
+           "white" in feature space), so when black is to move the weight roles
+           SWAP (acc[1] is the stm POV) and there is NO final negate - the score
+           is already from the side to move's perspective. */
         for (j = 0; j < NNUE_N; j++) {
-            /* clamp(pre,-1,1) at accumulator quantization 128: the extremes +/-128
-               are powers of two, so their terms are shift-only (128*w = w<<7) */
-            int a0 = nn_acc[0][j];
-            int a1 = nn_acc[1][j];
-            int w0 = nn_w2[j];
-            int w1_ = nn_w2[NNUE_N + j];
+            int a0 = nn_acc[0][j], a1 = nn_acc[1][j];
+            int ws = nn_w2[j];                  /* stm weight */
+            int wn = nn_w2[NNUE_N + j];         /* nstm weight */
+            int as = (p->side == 0) ? a0 : a1;  /* stm activation */
+            int an = (p->side == 0) ? a1 : a0;  /* nstm activation */
 
-            if (a0 >= 128)       out += (long)(w0 << 7);
-            else if (a0 <= -128) out -= (long)(w0 << 7);
-            else                 out += (long)(a0 * w0);
+            if (as >= 128)       out += (long)(ws << 7);
+            else if (as <= -128) out -= (long)(ws << 7);
+            else                 out += (long)(as * ws);
 
-            if (a1 >= 128)       out += (long)(w1_ << 7);
-            else if (a1 <= -128) out -= (long)(w1_ << 7);
-            else                 out += (long)(a1 * w1_);
+            if (an >= 128)       out += (long)(wn << 7);
+            else if (an <= -128) out -= (long)(wn << 7);
+            else                 out += (long)(an * wn);
         }
-        {
-            int s = (int)(out >> NNUE_SCALE_SHIFT);
-            return (p->side == 0) ? s : -s;   /* negamax: side to move */
-        }
+        return (int)(out >> NNUE_SCALE_SHIFT);
     }
 #endif
 }
@@ -509,15 +512,38 @@ int nnue_selftest(const char *fen) {
     nnue_reset(&pos);
     n = gen_moves(&pos, list);
     nnue_active = 1;
-    for (i = 0; i < n; i++) {
-        Undo u;
-        memcpy(before, nn_acc, sizeof before);
-        do_make(&pos, list[i], &u);
-        memcpy(incr, nn_acc, sizeof incr);
-        nn_compute(&pos, fresh);
-        if (memcmp(incr, fresh, sizeof incr) != 0) fail++;
-        undo_move(&pos, list[i], &u);
-        if (memcmp(before, nn_acc, sizeof before) != 0) fail++;
+    {
+        int rt = 0;   /* first-failure diagnostic flag */
+        for (i = 0; i < n; i++) {
+            Undo u;
+            memcpy(before, nn_acc, sizeof before);
+            do_make(&pos, list[i], &u);
+            memcpy(incr, nn_acc, sizeof incr);
+            nn_compute(&pos, fresh);
+            if (memcmp(incr, fresh, sizeof incr) != 0) {
+                if (!rt) {
+                    int jj;
+                    for (jj = 0; jj < 2 * NNUE_N; jj++)
+                        if (((short *)incr)[jj] != ((short *)fresh)[jj]) break;
+                    printf("nn rt incr-vs-fresh fail move %d (mv=%04x): acc[%d/%d] incr=%d fresh=%d\n",
+                           i, list[i], jj >> 6, jj & 63, ((short *)incr)[jj], ((short *)fresh)[jj]);
+                    rt = 1;
+                }
+                fail++;
+            }
+            undo_move(&pos, list[i], &u);
+            if (memcmp(before, nn_acc, sizeof before) != 0) {
+                if (!rt) {
+                    int jj;
+                    for (jj = 0; jj < 2 * NNUE_N; jj++)
+                        if (((short *)before)[jj] != nn_acc[jj >> 6][jj & 63]) break;
+                    printf("nn rt undo-fail move %d (mv=%04x): acc[%d/%d] before=%d after=%d\n",
+                           i, list[i], jj >> 6, jj & 63, ((short *)before)[jj], nn_acc[jj >> 6][jj & 63]);
+                    rt = 1;
+                }
+                fail++;
+            }
+        }
     }
     nnue_active = 0;
 
