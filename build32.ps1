@@ -10,7 +10,10 @@ $env:LIB     = "$ow\lib386\nt"
 $sources = @("chess.c", "search.c", "xboard.c")
 $objs = @()
 foreach ($s in $sources) {
-    & "$ow\binnt\wcc386.exe" "-bt=nt" "-ox" "-d0" $s
+    # -3 = 386 target (oldest 32-bit CPU): simplest, most sequential codegen, closest
+    # in character to the 16-bit build's -0 (8086) code. Keeps -ox parity so the
+    # relative cost profile tracks the 16-bit build (see NOTES.md "Speed fidelity").
+    & "$ow\binnt\wcc386.exe" "-bt=nt" "-3" "-ox" "-d0" $s
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $objs += [System.IO.Path]::GetFileNameWithoutExtension($s) + ".obj"
 }

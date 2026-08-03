@@ -256,8 +256,13 @@ unsigned int think(Pos *p, int maxdepth) {
    time-based cutoffs (deadline stays 0). Run "chess bench [depth]"
    locally to tune BENCH_DEPTH so the whole run lands in ~1-5 seconds. */
 
+#if defined(__WATCOMC__) && !defined(__386__)
+#define BENCH_DEPTH 4   /* 16-bit DOS build: a manual DOSBox bench stays ~40s
+                           (depth 5 = 8M nodes ~= 4 min there; native builds are ~110x faster) */
+#else
 #define BENCH_DEPTH 5   /* calibrated: 8 positions at depth 5 ~= 2s on this machine
                            (depth 6 ~= 8s; qsearch makes search nodes cheap per-node) */
+#endif
 
 static const char *bench_fens[] = {
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
