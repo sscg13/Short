@@ -2,9 +2,10 @@
  *
  * Architecture (see NNUE.md):
  *   704 one-hot inputs -> two N-wide i16 accumulators (white POV, black POV)
- *   sharing ONE weight matrix -> symmetric-clamp activation clamp(pre,-1,1)
- *   (quantized to i8 in [-128,127]) -> 2N i8 output weights -> i32 bias ->
- *   raw score (>> NNUE_SCALE_SHIFT = cp).
+ *   sharing ONE weight matrix, plus a shared N-wide layer-1 bias ->
+ *   symmetric clamp clamp(pre,-1,1) at accumulator quantization 128 (the
+ *   +/-128 extremes are shift-only: 128*w = w<<7) -> 2N i8 output weights
+ *   (x64) -> i16 output bias (x8192) -> raw score (>> NNUE_SCALE_SHIFT = cp).
  *
  * The black POV is the white POV of the position rotated 180 degrees with
  * colors swapped, so the net is color-symmetric by construction. Both POVs
@@ -44,8 +45,9 @@ signed char _far nn_w1[NNUE_W1_SIZE];
 #else
 signed char nn_w1[NNUE_W1_SIZE];
 #endif
+signed char nn_b1[NNUE_N];   /* layer-1 bias (per hidden neuron, shared by both POVs) */
 signed char nn_w2[NNUE_W2_SIZE];
-long nn_bias;
+int nn_bias;                 /* output bias, i16, quantized at 128*64 */
 
 static short nn_acc[2][NNUE_N];   /* current pre-activations, white POV / black POV */
 
@@ -113,11 +115,11 @@ static void nn_delta_apply(int persp, int row, int sign) {
     nn_dn[nn_ply][persp]++;
 }
 
-/* compute one perspective's accumulator from scratch */
+/* compute one perspective's accumulator from scratch (init with the layer-1 bias) */
 static void nn_compute_persp(Pos *p, int persp, short *out) {
     int m[2], sq, k;
     nn_mirrors(p, m);
-    memset(out, 0, NNUE_N * sizeof(short));
+    for (k = 0; k < NNUE_N; k++) out[k] = nn_b1[k];
     for (sq = 0; sq < 128; sq++) {
         int pc = p->board[sq];
         int row;
@@ -222,18 +224,20 @@ int nnue_eval(Pos *p) {
     long out = nn_bias;
     int j;
     for (j = 0; j < NNUE_N; j++) {
-        /* symmetric clamp activation clamp(pre,-1,1), quantized to i8 in
-           [-128,127]; the trainer trains exactly this, so no CReLU offset */
+        /* clamp(pre,-1,1) at accumulator quantization 128: the extremes +/-128
+           are powers of two, so their terms are shift-only (128*w = w<<7) */
         int a0 = nn_acc[0][j];
         int a1 = nn_acc[1][j];
         int w0 = nn_w2[j];
         int w1_ = nn_w2[NNUE_N + j];
 
-        if (a0 < -128) a0 = -128; else if (a0 > 127) a0 = 127;
-        if (a1 < -128) a1 = -128; else if (a1 > 127) a1 = 127;
+        if (a0 >= 128)       out += (long)(w0 << 7);
+        else if (a0 <= -128) out -= (long)(w0 << 7);
+        else                 out += (long)(a0 * w0);
 
-        /* product stays i16 (i8 x i8); only the accumulator is long */
-        out += (long)(a0 * w0) + (long)(a1 * w1_);
+        if (a1 >= 128)       out += (long)(w1_ << 7);
+        else if (a1 <= -128) out -= (long)(w1_ << 7);
+        else                 out += (long)(a1 * w1_);
     }
     {
         int s = (int)(out >> NNUE_SCALE_SHIFT);
@@ -247,7 +251,7 @@ int nnue_eval(Pos *p) {
 
 int nnue_load(const char *path) {
     FILE *f = fopen(path, "rb");
-    unsigned char hdr[12], b[4];
+    unsigned char hdr[12], b[2];
     unsigned int feats, hN;
     if (!f) return 0;
     if (fread(hdr, 1, 12, f) != 12) goto bad;
@@ -257,9 +261,11 @@ int nnue_load(const char *path) {
     hN    = (unsigned int)hdr[8] | ((unsigned int)hdr[9] << 8);
     if (feats != NNUE_FEATURES || hN != NNUE_N) goto bad;
     if (fread(nn_w1, 1, (size_t)NNUE_W1_SIZE, f) != (size_t)NNUE_W1_SIZE) goto bad;
+    if (fread(nn_b1, 1, (size_t)NNUE_N, f) != (size_t)NNUE_N) goto bad;
     if (fread(nn_w2, 1, (size_t)NNUE_W2_SIZE, f) != (size_t)NNUE_W2_SIZE) goto bad;
-    if (fread(b, 1, 4, f) != 4) goto bad;
-    nn_bias = (long)b[0] | ((long)b[1] << 8) | ((long)b[2] << 16) | ((long)b[3] << 24);
+    if (fread(b, 1, 2, f) != 2) goto bad;
+    nn_bias = (int)(unsigned char)b[0] | ((int)(unsigned char)b[1] << 8);
+    if (nn_bias >= 32768) nn_bias -= 65536;               /* sign-extend the i16 */
     fclose(f);
     nnue_enabled = 1;
     return 1;
@@ -324,6 +330,8 @@ int nnue_selftest(const char *fen) {
         long z;
         for (z = 0; z < (long)NNUE_FEATURES * NNUE_N; z++)
             nn_w1[z] = (signed char)((((long)z * 7 + 13) & 255) - 128);
+        for (z = 0; z < (long)NNUE_N; z++)
+            nn_b1[z] = (signed char)((((long)z * 17 + 3) & 255) - 128);
         for (z = 0; z < (long)NNUE_W2_SIZE; z++)
             nn_w2[z] = (signed char)((((long)z * 11 + 5) & 255) - 128);
         nn_bias = 1000;

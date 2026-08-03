@@ -16,18 +16,26 @@ Converting is a fixed gather permutation (a subset of the 768 rows reordered
 to the engine layout). The king's files e-h fold into the a-d buckets (the
 documented 704 compression); those 768 rows are simply unused.
 
-Blob format (both 768 trainer output and 704 engine net):
+RAW TRAINER FILE (no header, little-endian; trailing bytes such as the
+trainer's "bullet" padding are ignored):
+    w1:   [768][N]  signed bytes, feature-major (w1[type*64+sq][j])
+    b1:   [N]       signed bytes, layer-1 bias (shared by both perspectives)
+    w2:   [2N]      signed bytes (white POV first, then black POV)
+    bias: [1] i16   output bias (quantized at 128*64)
+
+ENGINE BLOB (what the engine loads, little-endian):
     bytes  0..3   magic "NNUE"
           4..5   version u16 = 1
-          6..7   features u16 (768 here, 704 in the engine blob)
-          8..9   N u16            (hidden size per perspective)
+          6..7   features u16 = 704
+          8..9   N u16
          10..11  reserved u16 = 0
-        12..     w1:  features*N signed bytes, feature-major (w1[f][j])
-                 w2:  2*N signed bytes (white POV first, then black POV)
-                 bias: int32 little-endian
+         12..     w1:  704*N signed bytes, feature-major
+                  b1:  N signed bytes
+                  w2:  2N signed bytes
+                  bias: i16
 
 Usage:
-    python nnue_convert.py trainer768.bin engine.net
+    python nnue_convert.py short-hl64.nnue chess.net
 """
 
 import struct
@@ -55,58 +63,48 @@ def engine_to_768(row):
     return 7 + (off >> 6), off & 63
 
 
-def read_net(path):
+def read_trainer(path):
     with open(path, "rb") as f:
         data = f.read()
-    if len(data) < 12 or data[:4] != MAGIC:
-        sys.exit(f"{path}: bad magic or too short")
-    ver, feats, n, _res = struct.unpack_from("<HHHH", data, 4)
-    if ver != 1:
-        sys.exit(f"{path}: unsupported version {ver}")
-    w1_sz = feats * n
-    w2_sz = 2 * n
-    if len(data) != 12 + w1_sz + w2_sz + 4:
-        sys.exit(f"{path}: bad size {len(data)} (expected {12 + w1_sz + w2_sz + 4})")
-    w1 = data[12:12 + w1_sz]
-    w2 = data[12 + w1_sz:12 + w1_sz + w2_sz]
-    (bias,) = struct.unpack_from("<i", data, 12 + w1_sz + w2_sz)
-    return feats, n, w1, w2, bias
+    # size must be at least w1 + b1 + w2 + bias; extra trailing bytes ignored
+    w1_sz = 768 * 64
+    b1_sz = 64
+    w2_sz = 128
+    need = w1_sz + b1_sz + w2_sz + 2
+    if len(data) < need:
+        sys.exit(f"{path}: too short ({len(data)} < {need})")
+    w1 = data[0:w1_sz]
+    b1 = data[w1_sz:w1_sz + b1_sz]
+    w2 = data[w1_sz + b1_sz:w1_sz + b1_sz + w2_sz]
+    bias = struct.unpack_from("<h", data, w1_sz + b1_sz + w2_sz)[0]
+    return w1, b1, w2, bias
 
 
-def write_net(path, feats, n, w1, w2, bias):
+def write_net(path, w1, b1, w2, bias):
     with open(path, "wb") as f:
         f.write(MAGIC)
-        f.write(struct.pack("<HHHH", 1, feats, n, 0))
+        f.write(struct.pack("<HHHH", 1, 704, 64, 0))
         f.write(w1)
+        f.write(b1)
         f.write(w2)
-        f.write(struct.pack("<i", bias))
+        f.write(struct.pack("<h", bias))
 
 
 def main():
     if len(sys.argv) != 3:
         sys.exit(__doc__)
     src, dst = sys.argv[1], sys.argv[2]
-    feats, n, w1, w2, bias = read_net(src)
-
-    if feats == 704:
-        print(f"{src}: already 704 features, copying verbatim")
-        write_net(dst, 704, n, w1, w2, bias)
-        print(f"wrote {dst} (704x{n}, {len(w1) + len(w2) + 4 + 12} bytes)")
-        return
-    if feats != 768:
-        sys.exit(f"{src}: features={feats}, expected 768 (or already-converted 704)")
+    w1, b1, w2, bias = read_trainer(src)
 
     rows = [None] * 704
     for r in range(704):
         t, sq = engine_to_768(r)
         rows[r] = t * 64 + sq
-    w1_out = b"".join(w1[r * n:(r + 1) * n] for r in rows)
+    w1_out = b"".join(w1[r * 64:(r + 1) * 64] for r in rows)
 
-    write_net(dst, 704, n, w1_out, w2, bias)
-    print(f"{src}: folded 768 -> 704, wrote {dst} (704x{n}, "
-          f"{len(w1_out) + len(w2) + 4 + 12} bytes)")
-    if n != 64:
-        print(f"note: N={n}; the engine expects NNUE_N=64, rebuild with NNUE_N={n}")
+    write_net(dst, w1_out, b1, w2, bias)
+    print(f"{src}: folded 768 -> 704, wrote {dst} "
+          f"({len(w1_out)} + {len(b1)} + {len(w2)} + 2 + 12 bytes, bias={bias})")
 
 
 if __name__ == "__main__":
