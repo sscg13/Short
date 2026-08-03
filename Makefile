@@ -13,7 +13,7 @@
 # auto-vectorizes at -O2 (GCC >= 14 enables tree-loop/slp-vectorize), which would
 # inflate nps ~4x and break the speed-fidelity story, so keep it strictly scalar.
 CC      ?= gcc
-CFLAGS  ?= -O2 -Wall -Wextra -Werror -fno-tree-vectorize -fno-tree-slp-vectorize
+CFLAGS  ?= -O2 -Wall -Wextra -Werror
 SRCS    := chess.c search.c xboard.c nnue.c
 HDRS    := engine.h
 OBJS    := $(SRCS:.c=.o)
