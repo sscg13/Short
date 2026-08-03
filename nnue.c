@@ -73,7 +73,25 @@ extern const unsigned char nn_embedded_net_start[];
 extern const unsigned char nn_embedded_net_end[];
 #endif
 
-static short nn_acc[2][NNUE_N];   /* current pre-activations, white POV / black POV */
+short nn_acc[2][NNUE_N];   /* current pre-activations, white POV / black POV
+                              (non-static so nnue_opt.asm can reference it) */
+
+#if defined(__WATCOMC__) && !defined(__386__)
+/* hand-unrolled 64-element apply loops (nnue_opt.asm) for the 16-bit build:
+   acc[persp][j] += (short)w1[row*64+j]  /  -=  for j in 0..63 */
+void nn_apply_add(int persp, int row);
+void nn_apply_sub(int persp, int row);
+#define NNUE_ASM_APPLY 1
+
+/* per-slot forward product tables (nnue_opt.asm, NNUE_OPTIMIZATION.md §5):
+   fwd[p][j][a+128] = w2[p*64+j] * a  for a in [-128,127]. Built at net load so
+   the forward multiply becomes one word load + one shl. Two 32 KB far arrays
+   (one per perspective) stay clear of the 64 KB segment boundary. */
+short _far nn_fwd0[NNUE_N][256];
+short _far nn_fwd1[NNUE_N][256];
+int nn_fwd_eval(int side);          /* hand-asm forward pass */
+#define NNUE_ASM_FWD 1
+#endif
 
 /* per-ply record of which (row, sign) deltas were applied, so undo reverses them */
 typedef struct { unsigned int row; signed char s; } NnD;
@@ -127,13 +145,18 @@ static int nn_row(int persp, int pc, int sq88, int mirror) {
    The loop is inline (no separate call) and pure add/sub (no sign multiply),
    and base is a 16-bit shift instead of a 32-bit multiply (row<=703 -> <<6 fits). */
 static void nn_delta_add(int persp, int row) {
-    unsigned int base;
-    int j;
     if (row < 0) return;
     PCOUNT(c_refresh);
-    base = (unsigned)row << 6;
-    for (j = 0; j < NNUE_N; j++)
-        nn_acc[persp][j] += (short)nn_w1[base + j];
+#ifdef NNUE_ASM_APPLY
+    nn_apply_add(persp, row);
+#else
+    {
+        unsigned int base = (unsigned)row << 6;
+        int j;
+        for (j = 0; j < NNUE_N; j++)
+            nn_acc[persp][j] += (short)nn_w1[base + j];
+    }
+#endif
     if (nn_dn[nn_ply][persp] >= 0 && nn_dn[nn_ply][persp] < 4) {
         nn_delta[nn_ply][persp][nn_dn[nn_ply][persp]].row = (unsigned int)row;
         nn_delta[nn_ply][persp][nn_dn[nn_ply][persp]].s = 1;
@@ -142,13 +165,18 @@ static void nn_delta_add(int persp, int row) {
 }
 
 static void nn_delta_sub(int persp, int row) {
-    unsigned int base;
-    int j;
     if (row < 0) return;
     PCOUNT(c_refresh);
-    base = (unsigned)row << 6;
-    for (j = 0; j < NNUE_N; j++)
-        nn_acc[persp][j] -= (short)nn_w1[base + j];
+#ifdef NNUE_ASM_APPLY
+    nn_apply_sub(persp, row);
+#else
+    {
+        unsigned int base = (unsigned)row << 6;
+        int j;
+        for (j = 0; j < NNUE_N; j++)
+            nn_acc[persp][j] -= (short)nn_w1[base + j];
+    }
+#endif
     if (nn_dn[nn_ply][persp] >= 0 && nn_dn[nn_ply][persp] < 4) {
         nn_delta[nn_ply][persp][nn_dn[nn_ply][persp]].row = (unsigned int)row;
         nn_delta[nn_ply][persp][nn_dn[nn_ply][persp]].s = -1;
@@ -245,20 +273,35 @@ void nnue_undo(Pos *p) {
     PCOUNT(c_nn_undo);
     if (nn_ply > 0) nn_ply--;
     for (persp = 0; persp < 2; persp++) {
-        int i, j;
+        int i;
         if (nn_dn[nn_ply][persp] < 0) {
             nn_compute_persp(p, persp, nn_acc[persp]);   /* board is pre-make again */
             continue;
         }
         for (i = 0; i < nn_dn[nn_ply][persp]; i++) {
             unsigned int row = nn_delta[nn_ply][persp][i].row;
-            unsigned int base = row << 6;
             if (nn_delta[nn_ply][persp][i].s > 0) {
-                for (j = 0; j < NNUE_N; j++)          /* reverse a recorded add */
-                    nn_acc[persp][j] -= (short)nn_w1[base + j];
+#ifdef NNUE_ASM_APPLY
+                nn_apply_sub(persp, (int)row);   /* reverse a recorded add */
+#else
+                {
+                    unsigned int base = row << 6;
+                    int j;
+                    for (j = 0; j < NNUE_N; j++)          /* reverse a recorded add */
+                        nn_acc[persp][j] -= (short)nn_w1[base + j];
+                }
+#endif
             } else {
-                for (j = 0; j < NNUE_N; j++)          /* reverse a recorded sub */
-                    nn_acc[persp][j] += (short)nn_w1[base + j];
+#ifdef NNUE_ASM_APPLY
+                nn_apply_add(persp, (int)row);   /* reverse a recorded sub */
+#else
+                {
+                    unsigned int base = row << 6;
+                    int j;
+                    for (j = 0; j < NNUE_N; j++)          /* reverse a recorded sub */
+                        nn_acc[persp][j] += (short)nn_w1[base + j];
+                }
+#endif
             }
         }
     }
@@ -269,34 +312,60 @@ void nnue_undo(Pos *p) {
 /* ------------------------------------------------------------------ */
 
 int nnue_eval(Pos *p) {
-    long out = nn_bias;
-    int j;
     PCOUNT(c_nn_eval);
-    for (j = 0; j < NNUE_N; j++) {
-        /* clamp(pre,-1,1) at accumulator quantization 128: the extremes +/-128
-           are powers of two, so their terms are shift-only (128*w = w<<7) */
-        int a0 = nn_acc[0][j];
-        int a1 = nn_acc[1][j];
-        int w0 = nn_w2[j];
-        int w1_ = nn_w2[NNUE_N + j];
-
-        if (a0 >= 128)       out += (long)(w0 << 7);
-        else if (a0 <= -128) out -= (long)(w0 << 7);
-        else                 out += (long)(a0 * w0);
-
-        if (a1 >= 128)       out += (long)(w1_ << 7);
-        else if (a1 <= -128) out -= (long)(w1_ << 7);
-        else                 out += (long)(a1 * w1_);
-    }
+#ifdef NNUE_ASM_FWD
+    return nn_fwd_eval(p->side);
+#else
     {
-        int s = (int)(out >> NNUE_SCALE_SHIFT);
-        return (p->side == 0) ? s : -s;   /* negamax: side to move */
+        long out = nn_bias;
+        int j;
+        for (j = 0; j < NNUE_N; j++) {
+            /* clamp(pre,-1,1) at accumulator quantization 128: the extremes +/-128
+               are powers of two, so their terms are shift-only (128*w = w<<7) */
+            int a0 = nn_acc[0][j];
+            int a1 = nn_acc[1][j];
+            int w0 = nn_w2[j];
+            int w1_ = nn_w2[NNUE_N + j];
+
+            if (a0 >= 128)       out += (long)(w0 << 7);
+            else if (a0 <= -128) out -= (long)(w0 << 7);
+            else                 out += (long)(a0 * w0);
+
+            if (a1 >= 128)       out += (long)(w1_ << 7);
+            else if (a1 <= -128) out -= (long)(w1_ << 7);
+            else                 out += (long)(a1 * w1_);
+        }
+        {
+            int s = (int)(out >> NNUE_SCALE_SHIFT);
+            return (p->side == 0) ? s : -s;   /* negamax: side to move */
+        }
     }
+#endif
 }
 
 /* ------------------------------------------------------------------ */
 /* weight loading                                                      */
 /* ------------------------------------------------------------------ */
+
+#ifdef NNUE_ASM_FWD
+/* fill fwd[p][j][a+128] = w2[p*64+j] * a (a=-128..127) from the current nn_w2.
+   Entries are consecutive +w, so this is 32k far word stores, one-time. */
+static void nn_fwd_build(void) {
+    int j, a;
+    for (j = 0; j < NNUE_N; j++) {
+        int w0 = nn_w2[j];
+        int w1 = nn_w2[NNUE_N + j];
+        short v0 = (short)(-128 * w0);
+        short v1 = (short)(-128 * w1);
+        for (a = 0; a < 256; a++) {
+            nn_fwd0[j][a] = v0;
+            nn_fwd1[j][a] = v1;
+            v0 = (short)(v0 + w0);
+            v1 = (short)(v1 + w1);
+        }
+    }
+}
+#endif
 
 /* parse a net blob (engine format, see NNUE.md) from memory */
 static int nnue_parse_blob(const unsigned char *p, long len) {
@@ -316,6 +385,9 @@ static int nnue_parse_blob(const unsigned char *p, long len) {
             | ((int)(unsigned char)p[13 + w1sz + NNUE_N + NNUE_W2_SIZE] << 8);
     if ((unsigned)nn_bias > 32767) nn_bias -= 65536;            /* sign-extend i16 */
     nnue_enabled = 1;
+#ifdef NNUE_ASM_FWD
+    nn_fwd_build();
+#endif
     return 1;
 }
 
@@ -412,6 +484,9 @@ int nnue_selftest(const char *fen) {
             nn_w2[z] = (signed char)((((long)z * 11 + 5) & 255) - 128);
         nn_bias = 1000;
         nnue_enabled = 1;
+#ifdef NNUE_ASM_FWD
+        nn_fwd_build();
+#endif
     }
 
     /* color symmetry: acc_black(x) must equal acc_white(rot180 + colorflip x) */

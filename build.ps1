@@ -30,6 +30,11 @@ foreach ($s in $sources) {
     $objs += [System.IO.Path]::GetFileNameWithoutExtension($s) + ".obj"
 }
 
+# hand-unrolled NNUE apply loops (only used by the 16-bit build)
+& "$ow\binnt\wasm.exe" "nnue_opt.asm"
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$objs += "nnue_opt.obj"
+
 $linkArgs = @("system", "dos", "name", "chess.exe")
 foreach ($o in $objs) { $linkArgs += "file"; $linkArgs += $o }
 & "$ow\binnt\wlink.exe" @linkArgs
