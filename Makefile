@@ -6,11 +6,17 @@
 #   make                -> chess_gcc   (Linux) / chess_gcc.exe   (Windows)
 #   make EXE=foo        -> foo         (Linux) / foo.exe         (Windows)
 #   make CFLAGS='...'   -> override compile flags
+#   make EVALFILE=<net> -> embed <net> instead of chess.net (OpenBench)
 #   make clean          -> remove objects and the binary
 
+# The gcc build is a fast SCALAR oracle for the 16-bit target: OpenBench measures
+# its nps to scale time controls, and NOTES.md requires node-count fidelity. GCC
+# auto-vectorizes at -O2 (GCC >= 14 enables tree-loop/slp-vectorize), which would
+# inflate nps ~4x and break the speed-fidelity story, so keep it strictly scalar.
 CC      ?= gcc
-CFLAGS  ?= -O2 -Wall -Wextra -Werror
-SRCS    := chess.c search.c xboard.c
+EVALFILE ?= chess.net
+CFLAGS  ?= -O2 -Wall -Wextra -Werror -DNN_EMBED_FILE=$(EVALFILE)
+SRCS    := chess.c search.c xboard.c nnue.c
 HDRS    := engine.h
 OBJS    := $(SRCS:.c=.o)
 
@@ -25,6 +31,23 @@ endif
 
 all: $(TARGET)
 
+# Build a profiling binary (`chess profile [depth]`) with the call counters on.
+# Uses its own *_prof.o objects so the normal build's objects stay flag-free.
+PROF_OBJS := chess_prof.o search_prof.o xboard_prof.o nnue_prof.o
+profile: chess_prof.exe
+
+chess_prof.exe: $(PROF_OBJS)
+	$(CC) $(CFLAGS) -DPROFILE -o $@ $(PROF_OBJS)
+
+chess_prof.o: chess.c $(HDRS)
+	$(CC) $(CFLAGS) -DPROFILE -c -o $@ $<
+search_prof.o: search.c $(HDRS)
+	$(CC) $(CFLAGS) -DPROFILE -c -o $@ $<
+xboard_prof.o: xboard.c $(HDRS)
+	$(CC) $(CFLAGS) -DPROFILE -c -o $@ $<
+nnue_prof.o: nnue.c $(HDRS)
+	$(CC) $(CFLAGS) -DPROFILE -c -o $@ $<
+
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $(OBJS)
 
@@ -32,6 +55,6 @@ $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(OBJS) $(TARGET) chess_gcc.exe chess_gcc
+	rm -f $(OBJS) $(PROF_OBJS) $(TARGET) chess_gcc.exe chess_gcc chess_prof.exe
 
-.PHONY: all clean
+.PHONY: all clean profile
