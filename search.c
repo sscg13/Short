@@ -433,3 +433,75 @@ int profile(int depth) {
     return 0;
 }
 #endif /* PROFILE */
+
+/* ------------------------------------------------------------------ */
+/* search cost accounting (`chess sbench`): times the search's hot     */
+/* primitives in isolation so the profile call counters can be charged. */
+/* Averages over all 8 bench positions (they vary in density 5-48      */
+/* moves). NNUE off. Prints ms/1000 calls; cycles/call = ms*clock_MHz.  */
+/* ------------------------------------------------------------------ */
+int sbench(void) {
+    static Pos pos;
+    static unsigned int list[256];
+    MGen mg;
+    Undo u;
+    unsigned int m;
+    int i, iters, p;
+    clock_t t0, t1;
+    long att = 0, caps = 0, quiets = 0, drain = 0, make10k = 0, sig = 0;
+
+    nnue_active = 0;                                /* board-only make/undo */
+    for (p = 0; p < BENCH_N; p++) {
+        parse_fen(&pos, bench_fens[p]);
+        gen_moves(&pos, list);
+
+        iters = 1500;
+        t0 = clock();
+        for (i = 0; i < iters; i++) {
+            is_attacked(&pos, pos.ks[0], 1);
+            is_attacked(&pos, pos.ks[1], 0);
+        }
+        t1 = clock();
+        att += (long)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
+
+        iters = 300;
+        t0 = clock();
+        for (i = 0; i < iters; i++) gen_caps(&pos, list);
+        t1 = clock();
+        caps += (long)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
+
+        t0 = clock();
+        for (i = 0; i < iters; i++) gen_quiets(&pos, list);
+        t1 = clock();
+        quiets += (long)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
+
+        t0 = clock();
+        for (i = 0; i < iters; i++) {
+            mgen_init(&pos, &mg, 0, 0, 0, 0);
+            while ((m = next_move(&pos, &mg)) != 0) ;
+        }
+        t1 = clock();
+        drain += (long)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
+
+        iters = 2000;
+        t0 = clock();
+        for (i = 0; i < iters; i++) {
+            do_make(&pos, list[0], &u);
+            undo_move(&pos, list[0], &u);
+        }
+        t1 = clock();
+        make10k += (long)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
+
+        iters = 400;
+        t0 = clock();
+        for (i = 0; i < iters; i++) pos_sig(&pos);
+        t1 = clock();
+        sig += (long)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
+    }
+
+    printf("sbench att=%ld caps=%ld quiets=%ld drain=%ld make10k=%ld sig=%ld\n",
+           att * 1000 / (1500 * 2 * BENCH_N), caps * 1000 / (300 * BENCH_N),
+           quiets * 1000 / (300 * BENCH_N), drain * 1000 / (300 * BENCH_N),
+           make10k * 1000 / (2000 * BENCH_N), sig * 1000 / (400 * BENCH_N));
+    return 0;
+}

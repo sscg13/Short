@@ -124,6 +124,7 @@ void search_root(Pos *p, int maxdepth);
 unsigned int think(Pos *p, int maxdepth);
 int bench(int depth);
 int profile(int depth);
+int sbench(void);
 
 /* ---- xboard.c ---- */
 void dbgf(const char *fmt, ...);

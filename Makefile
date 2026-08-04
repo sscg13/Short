@@ -6,6 +6,7 @@
 #   make                -> chess_gcc   (Linux) / chess_gcc.exe   (Windows)
 #   make EXE=foo        -> foo         (Linux) / foo.exe         (Windows)
 #   make CFLAGS='...'   -> override compile flags
+#   make EVALFILE=<net> -> embed <net> instead of chess.net (OpenBench)
 #   make clean          -> remove objects and the binary
 
 # The gcc build is a fast SCALAR oracle for the 16-bit target: OpenBench measures
@@ -13,7 +14,8 @@
 # auto-vectorizes at -O2 (GCC >= 14 enables tree-loop/slp-vectorize), which would
 # inflate nps ~4x and break the speed-fidelity story, so keep it strictly scalar.
 CC      ?= gcc
-CFLAGS  ?= -O2 -Wall -Wextra -Werror
+EVALFILE ?= chess.net
+CFLAGS  ?= -O2 -Wall -Wextra -Werror -DNN_EMBED_FILE=$(EVALFILE)
 SRCS    := chess.c search.c xboard.c nnue.c
 HDRS    := engine.h
 OBJS    := $(SRCS:.c=.o)

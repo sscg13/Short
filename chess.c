@@ -680,6 +680,9 @@ int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "nbench") == 0)
         return nnue_bench();
 
+    if (argc > 1 && strcmp(argv[1], "sbench") == 0)
+        return sbench();
+
     if (argc == 1 || (argc > 1 && strcmp(argv[1], "xboard") == 0))
         return xboard_main();
 

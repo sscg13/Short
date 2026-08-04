@@ -58,13 +58,21 @@ signed char nn_w2[NNUE_W2_SIZE];
 int nn_bias;                 /* output bias, i16, quantized at 128*64 */
 
 #if !defined(__WATCOMC__)
-/* Embed chess.net into the binary (gcc build: OpenBench runs the bare binary, so
-   there is no runtime file dependency). Rebuild after re-converting a net. */
+/* Embed the net into the binary (gcc build: OpenBench runs the bare binary, so
+   there is no runtime file dependency). The path defaults to chess.net and is
+   overridable at build time: OpenBench passes EVALFILE=<net> to make, which
+   defines NN_EMBED_FILE=<path>; NN_STR stringifies it for the .incbin directive.
+   Rebuild after re-converting a net. */
+#ifndef NN_EMBED_FILE
+#define NN_EMBED_FILE chess.net
+#endif
+#define NN_STR_(x) #x
+#define NN_STR(x) NN_STR_(x)
 __asm__(
     ".section .rodata\n"
     ".global nn_embedded_net_start\n"
     "nn_embedded_net_start:\n"
-    ".incbin \"chess.net\"\n"
+    ".incbin \"" NN_STR(NN_EMBED_FILE) "\"\n"
     ".global nn_embedded_net_end\n"
     "nn_embedded_net_end:\n"
     ".text\n"
