@@ -13,6 +13,15 @@ static const int mval[8] = { 0, 100, 320, 330, 500, 900, 0 };
 
 unsigned int movebuf[32][256];
 
+#ifdef PROFILE
+long c_make = 0;                 /* do_make entries */
+long c_undo = 0;                 /* undo_move entries */
+long c_gen_moves = 0;            /* gen_moves entries */
+long c_gen_caps = 0;             /* gen_caps entries */
+long c_gen_quiets = 0;           /* gen_quiets entries */
+long c_nextmove = 0;             /* next_move entries */
+#endif
+
 /* ------------------------------------------------------------------ */
 /* make / unmake                                                      */
 /* ------------------------------------------------------------------ */
@@ -22,6 +31,8 @@ void do_make(Pos *p, unsigned int m, Undo *u) {
     int fl = mfl(m);
     int piece = p->board[from];
     int promo = ispromo(m) ? (CO(piece) | (fl + 1)) : 0;
+
+    PCOUNT(c_make);
 
     u->cap = p->board[to];
     u->castle = p->castle;
@@ -56,12 +67,16 @@ void do_make(Pos *p, unsigned int m, Undo *u) {
     if (TY(piece) == 6) p->ks[p->side] = to;
 
     p->side ^= 1;
+
+    if (nnue_active) nnue_make(p, m, u);
 }
 
 void undo_move(Pos *p, unsigned int m, Undo *u) {
     int from = mfrom(m), to = mto(m);
     int fl = mfl(m);
     int piece = p->board[to];
+
+    PCOUNT(c_undo);
 
     p->side ^= 1;
 
@@ -82,6 +97,10 @@ void undo_move(Pos *p, unsigned int m, Undo *u) {
     p->castle = u->castle;
     p->ep = u->ep;
     if (TY(piece) == 6) p->ks[p->side] = from;
+
+    /* NNUE undo must run after the board (and kings) are restored: a mirror-flag
+       flip requires recomputing the accumulator from the pre-make position. */
+    if (nnue_active) nnue_undo(p);
 }
 
 /* ------------------------------------------------------------------ */
@@ -141,6 +160,8 @@ int is_attacked(Pos *p, int sq, int by) {
 int gen_caps(Pos *p, unsigned int *list) {
     int n = 0, from, to, pc, pt, us = p->side, them = us ^ 1;
     int i, d, fwd, r;
+
+    PCOUNT(c_gen_caps);
 
     for (from = 0; from < 128; from++) {
         pc = p->board[from];
@@ -221,6 +242,8 @@ int gen_caps(Pos *p, unsigned int *list) {
 int gen_quiets(Pos *p, unsigned int *list) {
     int n = 0, from, to, to2, pc, pt, us = p->side;
     int i, d, fwd, r;
+
+    PCOUNT(c_gen_quiets);
 
     for (from = 0; from < 128; from++) {
         pc = p->board[from];
@@ -308,6 +331,8 @@ int gen_quiets(Pos *p, unsigned int *list) {
 /* full pseudo-legal list = captures + quiets (perft/protocol still use this) */
 int gen_moves(Pos *p, unsigned int *list) {
     int n = gen_caps(p, list);
+
+    PCOUNT(c_gen_moves);
     return n + gen_quiets(p, list + n);
 }
 
@@ -410,6 +435,8 @@ unsigned int next_move(Pos *p, MGen *g) {
     unsigned int m;
     int i, best, bscore;
 
+    PCOUNT(c_nextmove);
+
 again:
     switch (g->stage) {
     case MG_TT:
@@ -511,11 +538,12 @@ long perft(Pos *p, int depth) {
 }
 
 /* ------------------------------------------------------------------ */
-/* evaluation (material only)                                         */
+/* evaluation (NNUE when a net is loaded, else material)              */
 /* ------------------------------------------------------------------ */
 
 int evaluate(Pos *p) {
     int score = 0, sq;
+    if (nnue_enabled && nnue_active) return nnue_eval(p);
     for (sq = 0; sq < 128; sq++) {
         int pc = p->board[sq];
         if (!pc) continue;
@@ -627,10 +655,37 @@ static const unsigned long expv[6][6] = {
 
 int main(int argc, char **argv) {
     int maxd = 5, test = 0, i, splitsel = 0;
+    int j, nn_log = 1;
     Pos pos;
     long nodes;
     clock_t t0, t1;
     double secs;
+
+    /* NNUE net: `chess --nnue file ...` overrides the default net. The default is
+       the EMBEDDED net on the gcc build (OpenBench embeds the trained net via
+       EVALFILE); on the 16-bit build it is the chess.net file. NNUE is the
+       default; a load failure is loud, not a silent material-eval fallback. */
+    if (argc > 2 && strcmp(argv[1], "--nnue") == 0) {
+        if (!nnue_load(argv[2])) printf("NNUE: load failed: %s\n", argv[2]);
+        for (j = 2; j < argc; j++) argv[j - 2] = argv[j];
+        argc -= 2;
+    } else {
+        if (!nnue_ensure_default())
+            printf("NNUE: net load failed - running material eval "
+                   "(no embedded net on this build / no chess.net)\n");
+    }
+    if (argc == 1 || (argc > 1 && strcmp(argv[1], "xboard") == 0)) nn_log = 0;
+    if (nn_log && nnue_enabled)
+        printf("NNUE: net loaded (features=%d N=%d)\n", NNUE_FEATURES, NNUE_N);
+
+    if (argc > 1 && strcmp(argv[1], "nn") == 0)
+        return nnue_selftest((argc > 2) ? argv[2] : NULL);
+
+    if (argc > 1 && strcmp(argv[1], "nbench") == 0)
+        return nnue_bench();
+
+    if (argc > 1 && strcmp(argv[1], "sbench") == 0)
+        return sbench();
 
     if (argc == 1 || (argc > 1 && strcmp(argv[1], "xboard") == 0))
         return xboard_main();
@@ -640,6 +695,11 @@ int main(int argc, char **argv) {
         if (argc > 2) bd = atoi(argv[2]);
         return bench(bd);
     }
+
+#ifdef PROFILE
+    if (argc > 1 && strcmp(argv[1], "profile") == 0)
+        return profile((argc > 2) ? atoi(argv[2]) : 4);
+#endif
 
     if (argc > 1 && argv[1][0] == 'm') {
         Pos q;
