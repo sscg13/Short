@@ -2,7 +2,8 @@ param(
     [string]$Model = "large",
     [string]$CmdArgs = "",
     [string]$Cycles = "max",
-    [string]$Fen = ""
+    [string]$Fen = "",
+    [switch]$Profile   # -Profile: build with -DPROFILE so `chess profile` works
 )
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -11,7 +12,11 @@ $dosbox = "C:\Users\ckbao\AppData\Local\Programs\DOSBox Staging\dosbox.exe"
 
 # 1. Build
 pushd $root
-& powershell -NoProfile -ExecutionPolicy Bypass -File "$root\build.ps1" -Model $Model
+if ($Profile) {
+    & powershell -NoProfile -ExecutionPolicy Bypass -File "$root\build.ps1" -Model $Model -Profile
+} else {
+    & powershell -NoProfile -ExecutionPolicy Bypass -File "$root\build.ps1" -Model $Model
+}
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 popd
 
