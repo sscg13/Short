@@ -151,6 +151,7 @@ int nnue_eval(Pos *p);
 int nnue_load(const char *path);
 int nnue_ensure_loaded(const char *path);
 int nnue_selftest(const char *fen);
+int nnue_bench(void);
 
 /* ---- chess.c (board, movegen, eval, perft, FEN) ---- */
 void parse_fen(Pos *p, const char *s);

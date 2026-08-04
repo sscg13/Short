@@ -415,6 +415,11 @@ int nnue_load(const char *path) {
 
 /* try the file first (lets --nnue override the bundled net), then the
    embedded copy on the gcc build (OpenBench runs the bare binary) */
+#ifdef NO_NNUE
+/* measurement build: net stays disabled (material eval, no accumulator work) so
+   the profile total is pure search + movegen + make/undo */
+int nnue_ensure_loaded(const char *path) { (void)path; return 0; }
+#else
 int nnue_ensure_loaded(const char *path) {
     if (nnue_load(path)) return 1;
 #if !defined(__WATCOMC__)
@@ -424,6 +429,7 @@ int nnue_ensure_loaded(const char *path) {
     return 0;
 #endif
 }
+#endif
 
 /* ------------------------------------------------------------------ */
 /* self-test: `chess nn [fen]`                                        */
@@ -465,6 +471,58 @@ static void hmirror_pos(Pos *dst, const Pos *src) {
         if (pc == WK) dst->ks[0] = c2sq(c);
         else if (pc == BK) dst->ks[1] = c2sq(c);
     }
+}
+
+/* direct per-call cost measurement (`chess nbench`): times nnue_eval and a
+   make/undo pair in loops, prints ms per 1000 calls. Convert to cycles with the
+   host clock (8088 16 MHz: cyc = ms*16 per call; 286 6 MHz: cyc = ms*6). */
+int nnue_bench(void) {
+    static Pos pos;
+    static unsigned int list[256];
+    Undo u;
+    int i, n, iters;
+    clock_t t0, t1;
+    long eval_ms, delta_ms;
+
+    parse_fen(&pos, "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
+    nnue_reset(&pos);
+    nnue_active = 1;
+    n = gen_moves(&pos, list);
+    if (n <= 0) return 1;
+
+    iters = 4000;
+    t0 = clock();
+    for (i = 0; i < iters; i++) nnue_eval(&pos);
+    t1 = clock();
+    eval_ms = ((long)(t1 - t0)) * 1000 / CLOCKS_PER_SEC;
+
+    iters = 10000;
+    {
+        unsigned int qm = 0;
+        for (i = 0; i < n; i++)
+            if (mfl(list[i]) == 0) { qm = list[i]; break; }
+        if (!qm) return 1;
+        t0 = clock();
+#ifdef PROFILE
+        {
+            long r0 = c_refresh, f0 = c_flip;
+#endif
+        for (i = 0; i < iters; i++) {
+            do_make(&pos, qm, &u);
+            undo_move(&pos, qm, &u);
+        }
+#ifdef PROFILE
+            printf("nbench applies=%ld flips=%ld\n", c_refresh - r0, c_flip - f0);
+        }
+#endif
+        t1 = clock();
+        delta_ms = ((long)(t1 - t0)) * 1000 / CLOCKS_PER_SEC;
+    }
+
+    printf("nbench eval1000=%ld delta1000=%ld\n",
+           eval_ms * 1000 / 4000, delta_ms * 1000 / 10000);
+    nnue_active = 0;
+    return 0;
 }
 
 int nnue_selftest(const char *fen) {

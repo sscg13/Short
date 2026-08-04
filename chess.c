@@ -677,6 +677,9 @@ int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "nn") == 0)
         return nnue_selftest((argc > 2) ? argv[2] : NULL);
 
+    if (argc > 1 && strcmp(argv[1], "nbench") == 0)
+        return nnue_bench();
+
     if (argc == 1 || (argc > 1 && strcmp(argv[1], "xboard") == 0))
         return xboard_main();
 
