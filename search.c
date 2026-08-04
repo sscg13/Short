@@ -174,7 +174,7 @@ void search_root(Pos *p, int maxdepth) {
     int d, i;
     root_n = gen_moves(p, root_m);
     for (i = 0; i < root_n; i++) root_score[i] = 0;
-    if (nnue_enabled) { nnue_reset(p); nnue_active = 1; }
+    if (nnue_ensure_default()) { nnue_reset(p); nnue_active = 1; }
     for (d = 1; d <= maxdepth; d++) {
         int alpha = -INF, beta = INF;
         int bestscore = -INF, bf = 0, bt = 0;
@@ -220,7 +220,7 @@ unsigned int think(Pos *p, int maxdepth) {
     dbgf("think begin maxdepth=%d deadline=%ld\n", maxdepth, deadline);
     root_n = gen_moves(p, root_m);
     for (i = 0; i < root_n; i++) root_score[i] = 0;
-    if (nnue_enabled) { nnue_reset(p); nnue_active = 1; }
+    if (nnue_ensure_default()) { nnue_reset(p); nnue_active = 1; }
     for (d = 1; d <= maxdepth; d++) {
         int alpha = -INF, beta = INF, bsc = -INF;
         unsigned int bm = 0;
@@ -312,7 +312,7 @@ int bench(int depth) {
         memset(killers, 0, sizeof killers);
         root_n = gen_moves(&p, root_m);
         for (k = 0; k < root_n; k++) root_score[k] = 0;
-        if (nnue_enabled) { nnue_reset(&p); nnue_active = 1; }
+        if (nnue_ensure_default()) { nnue_reset(&p); nnue_active = 1; }
 
         t0 = clock();
         for (d = 1; d <= depth; d++) {
@@ -390,7 +390,7 @@ int profile(int depth) {
         memset(killers, 0, sizeof killers);
         root_n = gen_moves(&p, root_m);
         for (k = 0; k < root_n; k++) root_score[k] = 0;
-        if (nnue_enabled) { nnue_reset(&p); nnue_active = 1; }
+        if (nnue_ensure_default()) { nnue_reset(&p); nnue_active = 1; }
 
         for (d = 1; d <= depth; d++) {
             int alpha = -INF, beta = INF;

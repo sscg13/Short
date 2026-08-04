@@ -429,15 +429,27 @@ int nnue_load(const char *path) {
 int nnue_ensure_loaded(const char *path) { (void)path; return 0; }
 #else
 int nnue_ensure_loaded(const char *path) {
-    if (nnue_load(path)) return 1;
-#if !defined(__WATCOMC__)
+    if (nnue_enabled) return 1;
+#if defined(__WATCOMC__)
+    /* 16-bit build: no embedded net; the default net is the chess.net file. */
+    return nnue_load(path);
+#else
+    /* gcc build: the EMBEDDED net is the default (OpenBench embeds the trained
+       net via EVALFILE). The file is only used via --nnue (main calls nnue_load
+       directly), so a stale chess.net in the CWD cannot shadow the embedded net
+       and the default is always NNUE. */
+    (void)path;
     return nnue_parse_blob(nn_embedded_net_start,
                            (long)(nn_embedded_net_end - nn_embedded_net_start));
-#else
-    return 0;
 #endif
 }
 #endif
+
+/* ensure the default net is loaded; idempotent, so it is safe to call at every
+   search entry point (bench/think/search_root/profile) to make NNUE the default */
+int nnue_ensure_default(void) {
+    return nnue_ensure_loaded("chess.net");
+}
 
 /* ------------------------------------------------------------------ */
 /* self-test: `chess nn [fen]`                                        */
