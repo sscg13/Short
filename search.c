@@ -5,7 +5,7 @@
 volatile int stop_now = 0;
 long deadline = 0;                   /* ms deadline, 0 = no limit */
 
-#ifdef PROFILE
+#if defined(PROFILE) || defined(VCLOCK)
 long c_anodes = 0;                   /* alphabeta entries */
 long c_qnodes = 0;                   /* qsearch entries */
 #endif
@@ -52,7 +52,10 @@ static int alphabeta(Pos *p, int depth, int alpha, int beta, int ply, int half) 
 
     PCOUNT(c_anodes);
     nodes_search++;
+    vtotal_nodes++;
     if ((nodes_search & 0x3FF) == 0 && deadline > 0 && (long)clock() >= deadline)
+        stop_now = 1;
+    if (vtime_mode && vclock_budget_hit())
         stop_now = 1;
     if (stop_now) return best;
 
@@ -127,7 +130,10 @@ static int qsearch(Pos *p, int alpha, int beta, int ply, int half, int qd) {
 
     PCOUNT(c_qnodes);
     nodes_search++;
+    vtotal_nodes++;
     if ((nodes_search & 0x3FF) == 0 && deadline > 0 && (long)clock() >= deadline)
+        stop_now = 1;
+    if (vtime_mode && vclock_budget_hit())
         stop_now = 1;
     if (stop_now) return evaluate(p);
     if (qd <= 0) return evaluate(p);             /* ply budget spent: static eval */
@@ -225,6 +231,7 @@ unsigned int think(Pos *p, int maxdepth) {
         int alpha = -INF, beta = INF, bsc = -INF;
         unsigned int bm = 0;
         if (deadline > 0 && (long)clock() >= deadline) break;
+        if (vtime_mode && vclock_budget_hit()) break;
         nodes_search = 0;
         stop_now = 0;
         rep_n = 0;
@@ -379,11 +386,17 @@ int profile(int depth) {
     c_anodes = c_qnodes = c_nextmove = 0;
     c_make = c_undo = c_gen_moves = c_gen_caps = c_gen_quiets = 0;
     c_nn_make = c_nn_undo = c_nn_eval = c_refresh = c_flip = 0;
+    c_isattacked = 0;
+    c_possig = 0;
 
     b0 = clock();
     for (i = 0; i < BENCH_N; i++) {
         Pos p;
         long pos_nodes = 0;
+        long s_an = c_anodes, s_qn = c_qnodes, s_nm = c_nextmove;
+        long s_mk = c_make, s_uc = c_undo, s_gm = c_gen_moves, s_gc = c_gen_caps, s_gq = c_gen_quiets;
+        long s_nn = c_nn_make, s_nu = c_nn_undo, s_ev = c_nn_eval, s_rf = c_refresh;
+        long s_at = c_isattacked, s_ps = c_possig;
 
         parse_fen(&p, bench_fens[i]);
         g_sigs_n = 0;                            /* no game-history repetitions */
@@ -417,6 +430,12 @@ int profile(int depth) {
         }
         nnue_active = 0;
         total_nodes += pos_nodes;
+        printf("pos %d: nodes=%ld an=%ld qn=%ld nx=%ld mk=%ld uc=%ld gm=%ld gc=%ld gq=%ld "
+               "nm=%ld nu=%ld ev=%ld rf=%ld at=%ld ps=%ld\n",
+               i + 1, pos_nodes, c_anodes - s_an, c_qnodes - s_qn, c_nextmove - s_nm,
+               c_make - s_mk, c_undo - s_uc, c_gen_moves - s_gm, c_gen_caps - s_gc,
+               c_gen_quiets - s_gq, c_nn_make - s_nn, c_nn_undo - s_nu, c_nn_eval - s_ev,
+               c_refresh - s_rf, c_isattacked - s_at, c_possig - s_ps);
     }
     b1 = clock();
     bsecs = (double)(b1 - b0) / (double)CLOCKS_PER_SEC;
@@ -430,6 +449,7 @@ int profile(int depth) {
            c_make, c_undo, c_gen_moves, c_gen_caps, c_gen_quiets);
     printf("profile nn_make=%ld nn_undo=%ld nn_eval=%ld refresh_rows=%ld flips=%ld\n",
            c_nn_make, c_nn_undo, c_nn_eval, c_refresh, c_flip);
+    printf("profile is_attacked=%ld pos_sig=%ld\n", c_isattacked, c_possig);
     return 0;
 }
 #endif /* PROFILE */

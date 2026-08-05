@@ -39,7 +39,7 @@
 int nnue_enabled = 0;
 int nnue_active = 0;
 
-#ifdef PROFILE
+#if defined(PROFILE) || defined(VCLOCK)
 long c_nn_make = 0;              /* nnue_make entries */
 long c_nn_undo = 0;              /* nnue_undo entries */
 long c_nn_eval = 0;              /* nnue_eval entries */
