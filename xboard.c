@@ -185,7 +185,16 @@ static void xb_go(void) {
         game_over = 1;
         return;
     }
-    {
+    if (vtime_mode) {
+        /* virtual clock: ignore the GUI entirely; the budget is the 40/2h+
+           20/1h control at CPU_model/CPU_KHz speed (see vclock.c) */
+        long bms = vclock_budget_ms();
+        vclock_reset();
+        vclock_set_budget(bms);
+        deadline = 0;
+        dbgf("go(virtual): model=%d khz=%ld budget_ms=%ld\n",
+             vcpu_model, vcpu_khz, bms);
+    } else {
         long budget = 3000;
         long remaining_ms = (long)xb_time_cs * 10;
         if (xb_st > 0) {
@@ -209,6 +218,11 @@ static void xb_go(void) {
              budget, deadline);
     }
     m = think(&gpos, 10);
+    if (vtime_mode) {
+        long cn = vtotal_nodes;
+        long cms = vclock_charge();
+        dbgf("vclock nodes=%ld consumed=%ldms\n", cn, cms);
+    }
     deadline = 0;
     stop_now = 0;
     if (m == 0) m = first;
@@ -224,9 +238,34 @@ static void xb_reset(void) {
     force_mode = 1; game_over = 0;
     stop_now = 0; deadline = 0;          /* keep xb_time_cs/xb_st/post_on: WinBoard
                                             re-sends them at each new game anyway */
+    vclock_newgame();
 }
 
 static char *skipsp(char *s) { while (*s == ' ') s++; return s; }
+
+/* CECP `option name=value` / UCI-ish `setoption name X value Y` handler. */
+static void xb_option(const char *nm, const char *val) {
+    char lo[40];
+    int i;
+    for (i = 0; nm[i] && i < 39; i++) {
+        char c = nm[i];
+        lo[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+    }
+    lo[i] = 0;
+    if (strcmp(lo, "threads") == 0) {
+        /* single-threaded by design; accepted for OpenBench, ignored */
+    } else if (strcmp(lo, "hash") == 0) {
+        /* no transposition table yet; accepted and ignored */
+    } else if (strcmp(lo, "cpu_model") == 0) {
+        vclock_set_model(val);
+    } else if (strcmp(lo, "cpu_khz") == 0) {
+        vclock_set_khz(atol(val));
+    } else if (strcmp(lo, "virtualtime") == 0) {
+        vclock_set_enabled(val);
+    }
+    /* unknown options are silently accepted (CECP requires tolerating them) */
+    dbgf("option '%s'='%s'\n", lo, val ? val : "");
+}
 
 int xboard_main(void) {
     char line[256];
@@ -245,6 +284,14 @@ int xboard_main(void) {
         dbgf(">> %s\n", p);
         if (strncmp(p, "xboard", 6) == 0) {
         } else if (strncmp(p, "protover", 8) == 0) {
+            /* announce the options FIRST, done=1 on the last feature line.
+               CECP combo options use `-combo` with `///` separators and the
+               default marked by a leading `*`; -check takes 1/0. */
+            xb_outf("feature option=\"Threads -spin 1 1 16\"");
+            xb_outf("feature option=\"Hash -spin 32 32 1024\"");
+            xb_outf("feature option=\"CPU_model -combo *80286 /// 8088 /// 8086\"");
+            xb_outf("feature option=\"CPU_KHz -spin 25000 1000 50000\"");
+            xb_outf("feature option=\"VirtualTime -check 0\"");
             xb_outf("feature myname=\"Chess86\" setboard=1 usermove=1 ping=1 playother=1 done=1");
         } else if (strncmp(p, "new", 3) == 0) {
             xb_reset();
@@ -256,6 +303,7 @@ int xboard_main(void) {
             g_sigs[g_sigs_n++] = pos_sig(&gpos);
             force_mode = 1; game_over = 0;
             stop_now = 0; deadline = 0;
+            vclock_newgame();
         } else if (strncmp(p, "force", 5) == 0) {
             force_mode = 1;
         } else if (strncmp(p, "playother", 9) == 0) {
@@ -298,6 +346,34 @@ int xboard_main(void) {
             post_on = 1;
         } else if (strncmp(p, "nopost", 6) == 0) {
             post_on = 0;
+        } else if (strncmp(p, "option", 6) == 0) {
+            char *eq = strchr(p, '=');
+            if (eq) {
+                char *nm = skipsp(p + 6);
+                int nlen = (int)(eq - nm);
+                char name[40];
+                while (nlen > 0 && nm[nlen - 1] == ' ') nlen--;
+                if (nlen > 39) nlen = 39;
+                memcpy(name, nm, nlen);
+                name[nlen] = 0;
+                xb_option(name, skipsp(eq + 1));
+            }
+        } else if (strncmp(p, "setoption", 9) == 0) {
+            /* lenient UCI-style fallback: setoption name Threads value 1 */
+            char *rest = skipsp(p + 9);
+            char *val;
+            if (strncmp(rest, "name", 4) == 0) rest = skipsp(rest + 4);
+            val = strstr(rest, " value ");
+            if (!val) val = strstr(rest, " value");
+            if (val) {
+                char name[40];
+                int nlen = (int)(val - rest);
+                while (nlen > 0 && rest[nlen - 1] == ' ') nlen--;
+                if (nlen > 39) nlen = 39;
+                memcpy(name, rest, nlen);
+                name[nlen] = 0;
+                xb_option(name, skipsp(val + 6));
+            }
         } else if (strncmp(p, "remove", 6) == 0 || strncmp(p, "undo", 4) == 0) {
             unapply(&gpos);
         } else if (p[0] == '?') {

@@ -80,11 +80,11 @@ typedef struct {
                                            (~15.6 ms) + output overhead or we lose on
                                            time at tight clocks. */
 
-/* ---- profiling call counters (`chess profile`) ----
-   Compiled in ONLY with -DPROFILE (`make profile`, build.ps1 -Profile); normal
-   builds expand PCOUNT to nothing, so the counters cost zero cycles in the
-   shipped engine. */
-#ifdef PROFILE
+/* ---- profiling / vclock call counters ----
+   Compiled in with -DPROFILE (`make profile`, build.ps1 -Profile) or -DVCLOCK
+   (the gcc build, where the virtual clock charges the weighted model). Normal
+   16-bit builds expand PCOUNT to nothing, so the counters cost zero cycles. */
+#if defined(PROFILE) || defined(VCLOCK)
 #define PCOUNT(c) (c)++
 extern long c_anodes;        /* alphabeta entry */
 extern long c_qnodes;        /* qsearch entry */
@@ -99,7 +99,11 @@ extern long c_nn_undo;       /* nnue_undo entry */
 extern long c_nn_eval;       /* nnue_eval entry */
 extern long c_refresh;       /* feature-row deltas applied (nn_delta_apply) */
 extern long c_flip;          /* mirror-flip recompute paths (nnue_make) */
+extern long c_isattacked;    /* is_attacked entry */
+extern long c_possig;        /* pos_sig entry */
+#ifdef PROFILE
 int profile(int depth);
+#endif
 #else
 #define PCOUNT(c) ((void)0)
 #endif
@@ -154,6 +158,28 @@ int nnue_ensure_loaded(const char *path);
 int nnue_ensure_default(void);
 int nnue_selftest(const char *fen);
 int nnue_bench(void);
+
+/* ---- virtual time clock (vclock.c) ----
+   VirtualTime=1 makes the engine ignore the GUI's time commands and pace
+   itself against a 40/2h + 20/1h repeating control using a per-CPU cycle
+   model (CPU_model + CPU_KHz). See time-control-and-testing-methodology.md.
+   The 32-bit (VCLOCK) build charges the search's sub-functions at measured
+   per-call costs; the 16-bit build keeps a scalar cycles/node. */
+enum { VCPU_80286 = 0, VCPU_8088, VCPU_8086 };
+extern int vtime_mode;       /* 1 = virtual clock active (ignore GUI time) */
+extern long vcpu_khz;        /* CPU clock in KHz (cycles per ms); long: 50000 KHz overflows a 16-bit int */
+extern int vcpu_model;       /* VCPU_* */
+extern long vtotal_nodes;    /* nodes searched so far in the current move */
+extern long vmax_nodes;      /* scalar node cap for the current move (0 = none) */
+void vclock_set_model(const char *name);
+void vclock_set_khz(long khz);
+void vclock_set_enabled(const char *val);
+void vclock_newgame(void);              /* reset the period clock for a new game */
+void vclock_reset(void);                /* reset per-move state + counters before a move */
+long vclock_budget_ms(void);            /* per-move virtual budget in ms (refills periods) */
+void vclock_set_budget(long budget_ms); /* set the move's stop condition from its budget */
+int vclock_budget_hit(void);            /* 1 = the move's virtual budget is consumed */
+long vclock_charge(void);               /* deduct the move's consumed time; returns consumed ms */
 
 /* ---- chess.c (board, movegen, eval, perft, FEN) ---- */
 void parse_fen(Pos *p, const char *s);

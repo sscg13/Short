@@ -13,13 +13,15 @@ static const int mval[8] = { 0, 100, 320, 330, 500, 900, 0 };
 
 unsigned int movebuf[32][256];
 
-#ifdef PROFILE
+#if defined(PROFILE) || defined(VCLOCK)
 long c_make = 0;                 /* do_make entries */
 long c_undo = 0;                 /* undo_move entries */
 long c_gen_moves = 0;            /* gen_moves entries */
 long c_gen_caps = 0;             /* gen_caps entries */
 long c_gen_quiets = 0;           /* gen_quiets entries */
 long c_nextmove = 0;             /* next_move entries */
+long c_isattacked = 0;           /* is_attacked entries */
+long c_possig = 0;               /* pos_sig entries */
 #endif
 
 /* ------------------------------------------------------------------ */
@@ -110,6 +112,8 @@ void undo_move(Pos *p, unsigned int m, Undo *u) {
 int is_attacked(Pos *p, int sq, int by) {
     int i, to, d;
     int pc;
+
+    PCOUNT(c_isattacked);
 
     if (by == 0) {
         to = sq - 17; if ((to & 0x88) == 0 && p->board[to] == WP) return 1;
@@ -560,6 +564,7 @@ int evaluate(Pos *p) {
 unsigned long pos_sig(Pos *p) {
     unsigned long h = 0x811C9DC5UL;
     int i;
+    PCOUNT(c_possig);
     for (i = 0; i < 128; i++)
         if (p->board[i])
             h = (h * 16777619UL) ^ (unsigned long)((i << 4) | p->board[i]);
