@@ -14,6 +14,11 @@ static long nodes_search;
 static unsigned long rep_path[64];      /* position sigs along the current search line */
 static int rep_n;
 
+/* principal-variation lines for the `post` search-info output (CECP §10).
+   pv[ply][0..pv_len[ply]-1] is the best line from ply, in move encoding. */
+static unsigned int pv[MAXPLY + 1][MAXPLY];
+static int pv_len[MAXPLY + 1];
+
 static int killers[MAXPLY][2];          /* two killer moves per ply (quiet only) */
 
 #define MAX_QDEPTH 8    /* longest capture chain past the search leaf; guards against
@@ -58,6 +63,7 @@ static int alphabeta(Pos *p, int depth, int alpha, int beta, int ply, int half) 
     if (vtime_mode && vclock_budget_hit())
         stop_now = 1;
     if (stop_now) return best;
+    pv_len[ply] = 0;                                 /* no best line yet at this ply */
 
     /* threefold repetition (game history + current line) is a draw */
     {
@@ -90,7 +96,15 @@ static int alphabeta(Pos *p, int depth, int alpha, int beta, int ply, int half) 
             child_half = (TY(pc) == 1 || is_cap) ? 0 : half + 1;
             if (depth <= 0) score = -qsearch(p, -beta, -alpha, ply + 1, child_half, MAX_QDEPTH);
             else score = -alphabeta(p, depth - 1, -beta, -alpha, ply + 1, child_half);
-            if (score > best) best = score;
+            if (score > best) {
+                best = score;
+                if (ply < MAXPLY) {                  /* extend this node's PV with the child's */
+                    int pl = pv_len[ply + 1], k;
+                    pv[ply][0] = m;
+                    for (k = 0; k < pl && k < MAXPLY - 1; k++) pv[ply][k + 1] = pv[ply + 1][k];
+                    pv_len[ply] = (pl >= MAXPLY) ? MAXPLY : pl + 1;
+                }
+            }
             if (best > alpha) alpha = best;
             undo_move(p, m, &u);
             if (alpha >= beta) {
@@ -139,6 +153,7 @@ static int qsearch(Pos *p, int alpha, int beta, int ply, int half, int qd) {
     if (qd <= 0) return evaluate(p);             /* ply budget spent: static eval */
     if (ply >= MAXPLY - 4) return evaluate(p);   /* stay clear of movebuf aux rows */
     if (half >= 100) return 0;
+    pv_len[ply] = 0;                             /* qsearch is a leaf: no continuation */
 
     in_check = is_attacked(p, p->ks[p->side], p->side ^ 1);
     if (!in_check) {
@@ -218,6 +233,31 @@ void search_root(Pos *p, int maxdepth) {
     nnue_active = 0;
 }
 
+/* CECP §10 thinking-output score: normal centipawns, but mate scores are
+   reported as 100000+N ("mate in N moves") / -100000-N ("mated in N moves").
+   The engine's internal mate score is MATE-ply (ply = distance from root to
+   the terminal position), so N = (ply+1)/2. */
+static long score_to_cecp(int score) {
+    if (score >= MATE - MAXPLY) {
+        int n = (MATE - score + 1) / 2;
+        return 100000L + (n < 1 ? 1 : n);
+    }
+    if (score <= -(MATE - MAXPLY)) {
+        int n = (MATE + score + 1) / 2;
+        return -(100000L + (n < 1 ? 1 : n));
+    }
+    return score;
+}
+
+/* print one move in coordinate notation (e2e4 / e7e8q) */
+static void print_move(unsigned int m) {
+    static const char pn[] = " PNBRQK";
+    int f = mfrom(m), t = mto(m);
+    printf("%c%c%c%c", 'a' + (f & 7), '1' + (f >> 4), 'a' + (t & 7), '1' + (t >> 4));
+    if (ispromo(m)) printf("%c", pn[mfl(m) + 1]);
+    printf(" ");
+}
+
 /* iterative deepening root search; returns best move (0 if aborted before any depth) */
 unsigned int think(Pos *p, int maxdepth) {
     int d, i;
@@ -230,6 +270,7 @@ unsigned int think(Pos *p, int maxdepth) {
     for (d = 1; d <= maxdepth; d++) {
         int alpha = -INF, beta = INF, bsc = -INF;
         unsigned int bm = 0;
+        pv_len[0] = 0;
         if (deadline > 0 && (long)clock() >= deadline) break;
         if (vtime_mode && vclock_budget_hit()) break;
         nodes_search = 0;
@@ -246,7 +287,16 @@ unsigned int think(Pos *p, int maxdepth) {
                 int child_half = (TY(pc) == 1 || is_cap) ? 0 : g_half + 1;
                 score = -alphabeta(p, d - 1, -beta, -alpha, 1, child_half);
                 root_score[i] = score;
-                if (score > bsc) { bsc = score; bm = root_m[i]; }
+                if (score > bsc) {
+                    bsc = score;
+                    bm = root_m[i];
+                    pv[0][0] = root_m[i];              /* root move + the child line */
+                    {
+                        int pl = pv_len[1], k;
+                        for (k = 0; k < pl && k < MAXPLY - 1; k++) pv[0][k + 1] = pv[1][k];
+                        pv_len[0] = (pl >= MAXPLY) ? MAXPLY : pl + 1;
+                    }
+                }
                 if (score > alpha) alpha = score;
                 undo_move(p, root_m[i], &u);
                 if (alpha >= beta) break;
@@ -256,7 +306,14 @@ unsigned int think(Pos *p, int maxdepth) {
         if (stop_now) break;
         bestm = bm;
         if (post_on) {
-            printf("%d %d %ld %ld\n", d, bsc, (long)clock() - t0, nodes_search);
+            /* CECP §10 thinking output: ply score time(cs) nodes [*seldepth *speed *tbhits] pv.
+               The optional ints are parsed seldepth speed tbhits (last = tbhits), so emit a
+               0 tbhits to keep speed from being misread. */
+            long cs = (long)((clock() - t0) / (CLOCKS_PER_SEC / 100));
+            long nps = (cs > 0) ? (nodes_search / cs * 100 + (nodes_search % cs) * 100 / cs) : 0;
+            printf("%d %ld %ld %ld %d %ld 0\t", d, score_to_cecp(bsc), cs, nodes_search, d, nps);
+            for (i = 0; i < pv_len[0]; i++) print_move(pv[0][i]);
+            printf("\n");
             fflush(stdout);
         }
     }
