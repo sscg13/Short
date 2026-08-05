@@ -6,4 +6,5 @@
 run.bat
 *.md
 *.map
+*.nnue
 __pycache__/

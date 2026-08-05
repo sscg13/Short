@@ -20,7 +20,7 @@ $modelFlag = switch ($Model) {
     default  { "-ml" }
 }
 
-$sources = @("chess.c", "search.c", "xboard.c", "nnue.c")
+$sources = @("chess.c", "search.c", "xboard.c", "nnue.c", "vclock.c")
 $objs = @()
 foreach ($s in $sources) {
     $flags = @("-bt=dos", "-0", $modelFlag, "-ox", "-d0")

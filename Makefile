@@ -15,8 +15,11 @@
 # inflate nps ~4x and break the speed-fidelity story, so keep it strictly scalar.
 CC      ?= gcc
 EVALFILE ?= chess.net
-CFLAGS  ?= -O2 -Wall -Wextra -Werror -DNN_EMBED_FILE=$(EVALFILE)
-SRCS    := chess.c search.c xboard.c nnue.c
+# -DVCLOCK compiles the weighted cycle counters used by the virtual clock
+# (vclock.c). The 16-bit build does NOT define it, so the counters stay out of
+# the shipped engine; the 16-bit build keeps the scalar vclock model.
+CFLAGS  ?= -O2 -Wall -Wextra -Werror -DVCLOCK -DNN_EMBED_FILE=$(EVALFILE)
+SRCS    := chess.c search.c xboard.c nnue.c vclock.c
 HDRS    := engine.h
 OBJS    := $(SRCS:.c=.o)
 
@@ -33,7 +36,7 @@ all: $(TARGET)
 
 # Build a profiling binary (`chess profile [depth]`) with the call counters on.
 # Uses its own *_prof.o objects so the normal build's objects stay flag-free.
-PROF_OBJS := chess_prof.o search_prof.o xboard_prof.o nnue_prof.o
+PROF_OBJS := chess_prof.o search_prof.o xboard_prof.o nnue_prof.o vclock_prof.o
 profile: chess_prof.exe
 
 chess_prof.exe: $(PROF_OBJS)
@@ -46,6 +49,8 @@ search_prof.o: search.c $(HDRS)
 xboard_prof.o: xboard.c $(HDRS)
 	$(CC) $(CFLAGS) -DPROFILE -c -o $@ $<
 nnue_prof.o: nnue.c $(HDRS)
+	$(CC) $(CFLAGS) -DPROFILE -c -o $@ $<
+vclock_prof.o: vclock.c $(HDRS)
 	$(CC) $(CFLAGS) -DPROFILE -c -o $@ $<
 
 $(TARGET): $(OBJS)
