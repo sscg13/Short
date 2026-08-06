@@ -180,6 +180,9 @@ long vclock_budget_ms(void);            /* per-move virtual budget in ms (refill
 void vclock_set_budget(long budget_ms); /* set the move's stop condition from its budget */
 int vclock_budget_hit(void);            /* 1 = the move's virtual budget is consumed */
 long vclock_charge(void);               /* deduct the move's consumed time; returns consumed ms */
+#ifdef VCLOCK
+long vclock_est_nps(long nodes);        /* weighted-model NPS for the modeled CPU (bench output) */
+#endif
 
 /* ---- chess.c (board, movegen, eval, perft, FEN) ---- */
 void parse_fen(Pos *p, const char *s);

@@ -89,6 +89,15 @@ static long long vclock_cyc(void) {
     r += (long long)w->ev  * c_nn_eval;
     return r;
 }
+
+/* NPS the weighted model predicts for the modeled CPU (vclock_cyc over the
+   accumulated counters, converted at vcpu_khz). Used by `bench` so OpenBench's
+   nps reflects the target 286 @ 25 MHz, not the host. */
+long vclock_est_nps(long nodes) {
+    long long cyc = vclock_cyc();
+    if (cyc <= 0 || vcpu_khz <= 0) return 0;
+    return (long)((long long)nodes * vcpu_khz * 1000LL / cyc);
+}
 #endif
 
 void vclock_set_model(const char *name) {

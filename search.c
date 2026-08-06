@@ -355,15 +355,22 @@ static const char *bench_fens[] = {
 int bench(int depth) {
     int i, d, k;
     long total_nodes = 0;
+#ifndef VCLOCK
     clock_t b0, b1;
     double bsecs;
+#endif
 
     if (depth < 1) depth = BENCH_DEPTH;
     if (depth > 20) depth = 20;
     deadline = 0;                                /* keep the search timing-independent */
     stop_now = 0;
+#ifdef VCLOCK
+    vclock_reset();                              /* zero the weighted counters for the whole suite */
+#endif
 
+#ifndef VCLOCK
     b0 = clock();
+#endif
     for (i = 0; i < BENCH_N; i++) {
         Pos p;
         long pos_nodes = 0;
@@ -412,13 +419,25 @@ int bench(int depth) {
         printf("position %2d/%d  depth %2d  score %5d  move %02X%02X  n=%10ld  t=%7.2fs\n",
                i + 1, BENCH_N, depth, bestscore, bf, bt, pos_nodes, secs);
     }
+#ifndef VCLOCK
     b1 = clock();
     bsecs = (double)(b1 - b0) / (double)CLOCKS_PER_SEC;
+#endif
 
     /* these two lines must stay the last output: OpenBench matches them
        scanning up from the bottom of stdout */
+#ifdef VCLOCK
+    printf("NPS is the weighted-model estimate x1000 for OpenBench's X.XX million display\n");
+#endif
     printf("\nNodes searched : %ld\n", total_nodes);
+#ifdef VCLOCK
+    /* nps = what the weighted model predicts on the modeled CPU (default
+       80286 @ 25 MHz); the host's real nps is irrelevant to the 16-bit target.
+       x1000 so OpenBench displays it as X.XX million. */
+    printf("NPS: %ld\n", vclock_est_nps(total_nodes) * 1000);
+#else
     printf("NPS: %ld\n", (long)(total_nodes / (bsecs > 0.0 ? bsecs : 1.0)));
+#endif
     return 0;
 }
 
