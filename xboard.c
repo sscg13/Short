@@ -6,7 +6,7 @@ static Pos gpos;
 static int force_mode = 1, game_over = 0;
 int post_on = 0;
 int g_half, g_full;              /* halfmove clock, fullmove number */
-unsigned long g_sigs[1024];      /* position signatures for repetition */
+unsigned long g_sigs[MAX_G_SIGS];   /* position signatures for repetition */
 int g_sigs_n;
 static int xb_st = 0, xb_time_cs = 0;
 static int xb_level_mps = 0, xb_level_inc = 0;   /* "level mps base inc" control */
@@ -105,7 +105,7 @@ static unsigned int parse_castle(Pos *p, const char *s) {
 static int draw_claim(Pos *p) {
     int i, occ = 0, minors = 0;
     unsigned long s;
-    if (g_half >= 100) { dbgf("draw_claim: halfmove g_half=%d\n", g_half); return 1; }
+    if (g_half >= MAX_HALF) { dbgf("draw_claim: halfmove g_half=%d\n", g_half); return 1; }
     s = pos_sig(p);
     {
         int c = 0;
@@ -147,7 +147,7 @@ static void apply_move(Pos *p, unsigned int m) {
     }
     if (TY(pc) == 1 || u.cap) g_half = 0; else g_half++;
     if (CO(pc) == 8) g_full++;
-    if (g_sigs_n < 1024) g_sigs[g_sigs_n++] = pos_sig(p);
+    if (g_sigs_n < MAX_G_SIGS) g_sigs[g_sigs_n++] = pos_sig(p);
 }
 
 static void unapply(Pos *p) {
