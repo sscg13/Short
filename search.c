@@ -53,7 +53,7 @@ static int qsearch(Pos *p, int alpha, int beta, int ply, int half, int qd);
 static int alphabeta(Pos *p, int depth, int alpha, int beta, int ply, int half) {
     MGen mg;
     unsigned int m;
-    int best = -INF, legal = 0;
+    int best = -INF, legal = 0, in_check = 0;
 
     PCOUNT(c_anodes);
     nodes_search++;
@@ -83,15 +83,30 @@ static int alphabeta(Pos *p, int depth, int alpha, int beta, int ply, int half) 
     /* 50-move rule: 100 half-moves without a pawn move or capture is a draw */
     if (half >= MAX_HALF) { rep_n--; return 0; }
 
+    /* in-check status of the side to move: a non-king, non-EP move from a
+       square NOT on the king's rank/file/diagonal is then always legal (it can
+       neither leave a check unresolved nor open a new line), so its legality
+       is_attacked test can be skipped. */
+    in_check = is_attacked(p, p->ks[p->side], p->side ^ 1);
+
     mgen_init(p, &mg, ply, killers[ply][0], killers[ply][1], 0);   /* ttm empty for now */
 
     while ((m = next_move(p, &mg)) != 0) {
         Undo u;
-        int us, score, pc, is_cap, child_half;
+        int us, score, pc, is_cap, child_half, legal_move = 0;
         pc = p->board[mfrom(m)];                 /* moving piece, before the make */
         do_make(p, m, &u);
         us = p->side ^ 1;                        /* mover */
-        if (!is_attacked(p, p->ks[us], p->side)) {
+        /* Legality: if not in check, a non-king, non-EP move from a square off
+           the mover king's lines cannot leave the king attacked, so skip the
+           is_attacked test. Otherwise (in check, king move, EP, or an aligned
+           from-square) the real test decides. */
+        if (!in_check && TY(pc) != 6 && mfl(m) != MF_EP &&
+            !sq_on_king_line(p, mfrom(m), us))
+            legal_move = 1;
+        else if (!is_attacked(p, p->ks[us], p->side))
+            legal_move = 1;
+        if (legal_move) {
             legal = 1;
             is_cap = (u.cap != EMPTY) || (mfl(m) == MF_EP);
             child_half = (TY(pc) == 1 || is_cap) ? 0 : half + 1;
@@ -168,11 +183,16 @@ static int qsearch(Pos *p, int alpha, int beta, int ply, int half, int qd) {
 
     while ((m = next_move(p, &mg)) != 0) {
         Undo u;
-        int us, score, pc, is_cap, child_half;
+        int us, score, pc, is_cap, child_half, legal_move = 0;
         pc = p->board[mfrom(m)];
         do_make(p, m, &u);
         us = p->side ^ 1;
-        if (!is_attacked(p, p->ks[us], p->side)) {
+        if (!in_check && TY(pc) != 6 && mfl(m) != MF_EP &&
+            !sq_on_king_line(p, mfrom(m), us))
+            legal_move = 1;
+        else if (!is_attacked(p, p->ks[us], p->side))
+            legal_move = 1;
+        if (legal_move) {
             legal = 1;
             is_cap = (u.cap != EMPTY) || (mfl(m) == MF_EP);
             child_half = (TY(pc) == 1 || is_cap) ? 0 : half + 1;

@@ -26,6 +26,24 @@
    at the SAME per-call costs (sbench re-verified on the AMI-clone machine, ~1%).
    All per-call weights (search, ev, rf) are therefore UNCHANGED; only the
    per-node base R re-fits to the new totals (the savings were absorbed there).
+
+   SEARCH-OPT re-fit (2026-08, branch `optimization`): the legality-check skip
+   (a non-king, non-EP move from a square off the mover king's lines is legal
+   when not in check) cut the profile-1 is_attacked calls 34,973 -> 28,017. Per
+   call costs are UNCHANGED (the same sbench numbers re-verified, ~1%); the
+   weighted model auto-tracks the count drop, and only the per-node base R and
+   the scalar cycles/node re-fit to the new profile totals: 1.814e9 (8088) /
+   0.607e9 (80286) for bench 1 (13230 nodes). The MVV-LVA score table (8x8,
+   next_move) and the MG_TT stage skip are inside the `gm` (drain) weight, which
+   re-measured within noise (49.7K vs 48.5K c286).
+
+   MOVE-SWEEP re-fit (same branch): gen_caps/gen_quiets now sweep only the 64
+   on-board 0x88 squares (the other 64 entries of board[128] are always EMPTY),
+   which cut the per-call costs to gc 16.5K / gq 18.7K / drain 48.2K c286
+   (was 17.3K / 20.0K / 48.5K; 8088 scaled proportionally). Profile-1 total
+   -> 1.808e9 (8088) / 0.604e9 (80286). R and the scalar cycles/node re-fit
+   again.
+
       per-call cycles       8088      80286
         is_attacked          6512       2262
         pos_sig             33488       9678
@@ -35,9 +53,10 @@
         make or undo         1560        525     (pair 3120/1050)
         NNUE apply elem      5613       1980     (nbench, 12 applies/capture pair)
         nnue_eval fwd       19328       6588
-      bench 1 totals (13230 nodes) 2.354e9 / 0.815e9 cycles before copy-make,
-      1.859e9 / 0.617e9 after (material build 10152 nodes unchanged, 0.689e9 /
-      0.233e9 - copy-make only touches NNUE make/undo).
+      bench 1 totals (13230 nodes): 2.354e9 / 0.815e9 (pre-copy-make),
+      1.859e9 / 0.617e9 (copy-make), then 1.814e9 / 0.607e9 (search-opt) and
+      1.808e9 / 0.604e9 (move-sweep). Material build (10152 nodes) unchanged
+      at 0.689e9 / 0.233e9.
       R (per-node base) is what those terms leave over, fitted per NNUE state.
       8086 = 16-bit-bus 8088 core, an ESTIMATE (re-derive before trusting). */
 
@@ -58,9 +77,9 @@ static int  vperiod_started; /* first period not yet granted */
 /* scalar cycles/node, NNUE / material (16-bit build) */
 #ifndef VCLOCK
 static const long cpn_tab[3][2] = {
-    { 46630L,  22980L },   /* VCPU_80286  (copy-make re-fit) */
-    { 140493L, 67800L },   /* VCPU_8088   (copy-make re-fit) */
-    { 94800L,  45000L },   /* VCPU_8086 (estimate) */
+    { 45684L,  22980L },   /* VCPU_80286  (move-sweep re-fit) */
+    { 137113L, 67800L },   /* VCPU_8088   (move-sweep re-fit) */
+    { 93000L,  45000L },   /* VCPU_8086 (estimate) */
 };
 #endif
 
@@ -70,8 +89,8 @@ static long long vbudget_cyc;   /* weighted cycle budget for the current move */
 typedef struct { long att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm; } VW;
 static const VW vw_tab[3] = {
     /*   att    ps     gc     gq      gm   mk   nm   rf    ev     rn     rm */
-    {  2262,  9678, 17298, 20046, 48468, 525, 1000, 1980,  6588,  3339,  6400 }, /* 80286 */
-    {  6512, 33488, 51248, 60416, 146448, 1560, 3000, 5613, 19328, 14844, 19120 }, /* 8088 */
+    {  2262,  9678, 16476, 18672, 48192, 525, 1000, 1980,  6588,  4018,  6400 }, /* 80286 */
+    {  6512, 33488, 49188, 55929, 141970, 1560, 3000, 5613, 19328, 16008, 19120 }, /* 8088 */
     {  5000, 24000, 38000, 45000, 110000, 1100, 2000, 4000, 14000, 30000, 14000 }, /* 8086 est */
 };
 

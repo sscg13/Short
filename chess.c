@@ -108,6 +108,18 @@ void undo_move(Pos *p, unsigned int m, Undo *u) {
 /* attacks                                                            */
 /* ------------------------------------------------------------------ */
 
+/* is the king at ks[s] aligned with sq on a rank/file/diagonal? Used by the
+   search's legality check: a NON-king move from a square NOT on the mover
+   king's rank/file/diagonal can never open an attack on that king, so the
+   is_attacked legality test can be skipped for such moves. */
+int sq_on_king_line(Pos *p, int sq, int s) {
+    int k = p->ks[s];
+    int kr = k >> 4, kf = k & 7, sr = sq >> 4, sf = sq & 7;
+    if (kr == sr) return 1;                          /* same rank */
+    if (kf == sf) return 1;                          /* same file */
+    return (kr + kf == sr + sf) || (kr - kf == sr - sf);  /* diagonals */
+}
+
 int is_attacked(Pos *p, int sq, int by) {
     int i, to, d;
     int pc;
@@ -159,14 +171,19 @@ int is_attacked(Pos *p, int sq, int by) {
 /* move generation (pseudo-legal)                                     */
 /* ------------------------------------------------------------------ */
 
-/* captures (incl. en passant) + all promotion moves; searched first. */
+/* captures (incl. en passant) + all promotion moves; searched first. Sweeps
+   only the 64 on-board 0x88 squares (file 0..7, rank 0..7): the other 64
+   entries of board[128] are always EMPTY (off-board), so skipping them halves
+   the from-sweep. The on-board squares are visited in ascending order, so the
+   move order matches a full 0..127 sweep -> node counts unchanged. After file
+   f=7 the next on-board square is the next rank's file 0, i.e. from+9. */
 int gen_caps(Pos *p, unsigned int *list) {
     int n = 0, from, to, pc, pt, us = p->side, them = us ^ 1;
     int i, d, fwd, r;
 
     PCOUNT(c_gen_caps);
 
-    for (from = 0; from < 128; from++) {
+    for (from = 0; from < 128; from += ((from & 7) == 7) ? 9 : 1) {
         pc = p->board[from];
         if (!pc) continue;
         if (CO(pc) != (us ? 8 : 0)) continue;
@@ -241,14 +258,18 @@ int gen_caps(Pos *p, unsigned int *list) {
     return n;
 }
 
-/* quiet non-capture moves + castling; generated only after caps/killers fail. */
+/* quiet non-capture moves + castling; generated only after caps/killers fail.
+   Sweeps only the 64 on-board 0x88 squares (see gen_caps): the off-board
+   entries of board[128] are always EMPTY, and the on-board squares are visited
+   in ascending order, so the move order matches a full 0..127 sweep -> node
+   counts unchanged. */
 int gen_quiets(Pos *p, unsigned int *list) {
     int n = 0, from, to, to2, pc, pt, us = p->side;
     int i, d, fwd, r;
 
     PCOUNT(c_gen_quiets);
 
-    for (from = 0; from < 128; from++) {
+    for (from = 0; from < 128; from += ((from & 7) == 7) ? 9 : 1) {
         pc = p->board[from];
         if (!pc) continue;
         if (CO(pc) != (us ? 8 : 0)) continue;
@@ -351,12 +372,27 @@ int gen_moves(Pos *p, unsigned int *list) {
 
 #define PROMO_BONUS 16000   /* promotions sort ahead of every capture; int16-safe */
 
-/* MVV-LVA: victim material * 16 - attacker type. Promotions get a bonus. */
+/* MVV-LVA: victim material * 16 - attacker type. Promotions get a bonus.
+   The score depends ONLY on the (victim type, attacker type) pair, so a
+   tiny 8x8 table (128 B) precomputes it once instead of a per-move score
+   buffer or the mval*16 arithmetic on every selection pass. */
+static int mvv_tab[8][8];
+static int mvv_tab_ready;
+
+static void mvv_build(void) {
+    int v, a;
+    for (v = 0; v < 8; v++)
+        for (a = 0; a < 8; a++)
+            mvv_tab[v][a] = mval[v] * 16 - a;
+    mvv_tab_ready = 1;
+}
+
 static int mvv_lva(Pos *p, unsigned int m) {
     int victim = 0, s;
     if (mfl(m) == MF_EP) victim = 1;                       /* captured pawn */
     else if (p->board[mto(m)]) victim = TY(p->board[mto(m)]);
-    s = mval[victim] * 16 - TY(p->board[mfrom(m)]);
+    if (!mvv_tab_ready) mvv_build();
+    s = mvv_tab[victim][TY(p->board[mfrom(m)])];
     if (ispromo(m)) s += PROMO_BONUS;
     return s;
 }
@@ -415,7 +451,7 @@ void mgen_init(Pos *p, MGen *g, int ply, int k0, int k1, unsigned int ttm) {
     g->list = movebuf[ply];
     g->n = 0;
     g->idx = 0;
-    g->stage = MG_TT;
+    g->stage = ttm ? MG_TT : MG_CAPS;   /* skip the TT stage when no ttm */
     g->ttm = ttm;
     g->k0 = k0;
     g->k1 = k1;
@@ -428,7 +464,7 @@ void mgen_init_q(Pos *p, MGen *g, int ply) {
     g->list = movebuf[ply];
     g->n = 0;
     g->idx = 0;
-    g->stage = MG_TT;
+    g->stage = MG_CAPS;
     g->ttm = 0;
     g->k0 = g->k1 = 0;
     g->caps_only = 1;

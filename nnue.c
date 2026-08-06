@@ -15,12 +15,12 @@
  * left-right symmetric by construction (and the 32 king buckets fold e-h ->
  * a-d without losing information).
  *
- * Incremental: do_make() applies per-feature-row deltas to both accumulators
- * and records (row, sign) so undo_move() reverses them exactly. The record is
- * a small near array; the big weight matrix lives in a far segment on 16-bit.
- * A king move that crosses the d/e file boundary flips a POV's mirror flag
- * (every piece re-indexes), so that POV is recomputed from scratch and the
- * delta record is marked for a recompute-on-undo instead.
+ * Incremental: do_make() applies per-feature-row deltas to both accumulators;
+ * nnue_make snapshots the pre-move accumulator onto a per-ply stack slot and
+ * nnue_undo restores it (copy-make), so no delta record is kept. The big weight
+ * matrix lives in a far segment on 16-bit. A king move that crosses the d/e file
+ * boundary flips a POV's mirror flag (every piece re-indexes), so that POV is
+ * recomputed from scratch instead of applying deltas.
  *
  * Feature layout (704 rows, one perspective, in king-normalized coordinates).
  * "own" = the perspective side, "enemy" = the other side. Squares are compact

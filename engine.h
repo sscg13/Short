@@ -124,6 +124,7 @@ extern int post_on;
 void do_make(Pos *p, unsigned int m, Undo *u);
 void undo_move(Pos *p, unsigned int m, Undo *u);
 int is_attacked(Pos *p, int sq, int by);
+int sq_on_king_line(Pos *p, int sq, int s);
 int gen_moves(Pos *p, unsigned int *list);
 long perft(Pos *p, int depth);
 unsigned long pos_sig(Pos *p);
