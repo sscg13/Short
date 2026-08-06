@@ -19,20 +19,27 @@
        from the emulator sbench/nbench measurements; the per-node base R is
        fitted so the model reproduces the measured bench totals exactly.
 
-   Calibration provenance (86Box interpreter measurements, NNUE_OPTIMIZATION.md):
-     per-call cycles       8088      80286
-       is_attacked          6512       2262
-       pos_sig             33488       9678
-       gen_caps            51248      17298
-       gen_quiets          60416      20046
-       gen_moves           146448     48468     (full staged drain, sbench)
-       make or undo         1560        525     (pair 3120/1050)
-       NNUE apply elem      5613       1980     (nbench, 12 applies/capture pair)
-       nnue_eval fwd       19328       6588
-     bench 1 totals (13230 nodes) 2.354e9 / 0.815e9 cycles; material build
-     (10152 nodes) 0.689e9 / 0.233e9.
-     R (per-node base) is what those terms leave over, fitted per NNUE state.
-     8086 = 16-bit-bus 8088 core, an ESTIMATE (re-derive before trusting). */
+   Calibration provenance (86Box interpreter measurements, NNUE_OPTIMIZATION.md).
+   COPY-MAKE re-fit (2026-08, branch copy-make-nnue): the accumulator stack made
+   make/undo ~2x cheaper (undo is one 256-byte copy, no delta reversal), so the
+   profile-1 totals dropped to 1.859e9 (8088 @16 MHz) / 0.617e9 (80286 @6 MHz)
+   at the SAME per-call costs (sbench re-verified on the AMI-clone machine, ~1%).
+   All per-call weights (search, ev, rf) are therefore UNCHANGED; only the
+   per-node base R re-fits to the new totals (the savings were absorbed there).
+      per-call cycles       8088      80286
+        is_attacked          6512       2262
+        pos_sig             33488       9678
+        gen_caps            51248      17298
+        gen_quiets          60416      20046
+        gen_moves           146448     48468     (full staged drain, sbench)
+        make or undo         1560        525     (pair 3120/1050)
+        NNUE apply elem      5613       1980     (nbench, 12 applies/capture pair)
+        nnue_eval fwd       19328       6588
+      bench 1 totals (13230 nodes) 2.354e9 / 0.815e9 cycles before copy-make,
+      1.859e9 / 0.617e9 after (material build 10152 nodes unchanged, 0.689e9 /
+      0.233e9 - copy-make only touches NNUE make/undo).
+      R (per-node base) is what those terms leave over, fitted per NNUE state.
+      8086 = 16-bit-bus 8088 core, an ESTIMATE (re-derive before trusting). */
 
 #include "engine.h"
 
@@ -51,9 +58,9 @@ static int  vperiod_started; /* first period not yet granted */
 /* scalar cycles/node, NNUE / material (16-bit build) */
 #ifndef VCLOCK
 static const long cpn_tab[3][2] = {
-    { 61578L,  22980L },   /* VCPU_80286 */
-    { 177887L, 67800L },   /* VCPU_8088 */
-    { 120000L, 45000L },   /* VCPU_8086 (estimate) */
+    { 46630L,  22980L },   /* VCPU_80286  (copy-make re-fit) */
+    { 140493L, 67800L },   /* VCPU_8088   (copy-make re-fit) */
+    { 94800L,  45000L },   /* VCPU_8086 (estimate) */
 };
 #endif
 
@@ -63,9 +70,9 @@ static long long vbudget_cyc;   /* weighted cycle budget for the current move */
 typedef struct { long att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm; } VW;
 static const VW vw_tab[3] = {
     /*   att    ps     gc     gq      gm   mk   nm   rf    ev     rn     rm */
-    {  2262,  9678, 17298, 20046, 48468, 525, 1000, 1980,  6588, 18300,  6400 }, /* 80286 */
-    {  6512, 33488, 51248, 60416, 146448, 1560, 3000, 5613, 19328, 52300, 19120 }, /* 8088 */
-    {  5000, 24000, 38000, 45000, 110000, 1100, 2000, 4000, 14000, 38000, 14000 }, /* 8086 est */
+    {  2262,  9678, 17298, 20046, 48468, 525, 1000, 1980,  6588,  3339,  6400 }, /* 80286 */
+    {  6512, 33488, 51248, 60416, 146448, 1560, 3000, 5613, 19328, 14844, 19120 }, /* 8088 */
+    {  5000, 24000, 38000, 45000, 110000, 1100, 2000, 4000, 14000, 30000, 14000 }, /* 8086 est */
 };
 
 static long long vclock_cyc(void) {
@@ -81,6 +88,15 @@ static long long vclock_cyc(void) {
     r += (long long)w->rf  * c_refresh;
     r += (long long)w->ev  * c_nn_eval;
     return r;
+}
+
+/* NPS the weighted model predicts for the modeled CPU (vclock_cyc over the
+   accumulated counters, converted at vcpu_khz). Used by `bench` so OpenBench's
+   nps reflects the target 286 @ 25 MHz, not the host. */
+long vclock_est_nps(long nodes) {
+    long long cyc = vclock_cyc();
+    if (cyc <= 0 || vcpu_khz <= 0) return 0;
+    return (long)((long long)nodes * vcpu_khz * 1000LL / cyc);
 }
 #endif
 
