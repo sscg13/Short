@@ -70,6 +70,9 @@ typedef struct {
 } MGen;
 
 #define MAXPLY 32         /* killers[] rows; movebuf rows cover ply 0..MAXPLY-1 */
+#define MAX_G_SIGS 1024   /* game-history position signatures */
+#define MAX_REP_PATH 64   /* search-line repetition signatures */
+#define MAX_HALF 100      /* half-moves before the 50-move rule declares a draw */
 
 #define INF  30000
 #define MATE 29000
@@ -110,7 +113,7 @@ int profile(int depth);
 
 /* ---- shared globals ---- */
 extern int g_half, g_full;              /* halfmove clock, fullmove number */
-extern unsigned long g_sigs[1024];      /* position signatures for repetition */
+extern unsigned long g_sigs[MAX_G_SIGS];      /* position signatures for repetition */
 extern int g_sigs_n;
 extern unsigned int movebuf[32][256];   /* move lists, one row per search ply + aux */
 extern volatile int stop_now;
@@ -180,6 +183,9 @@ long vclock_budget_ms(void);            /* per-move virtual budget in ms (refill
 void vclock_set_budget(long budget_ms); /* set the move's stop condition from its budget */
 int vclock_budget_hit(void);            /* 1 = the move's virtual budget is consumed */
 long vclock_charge(void);               /* deduct the move's consumed time; returns consumed ms */
+#ifdef VCLOCK
+long vclock_est_nps(long nodes);        /* weighted-model NPS for the modeled CPU (bench output) */
+#endif
 
 /* ---- chess.c (board, movegen, eval, perft, FEN) ---- */
 void parse_fen(Pos *p, const char *s);

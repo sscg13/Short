@@ -11,7 +11,7 @@ long c_qnodes = 0;                   /* qsearch entries */
 #endif
 
 static long nodes_search;
-static unsigned long rep_path[64];      /* position sigs along the current search line */
+static unsigned long rep_path[MAX_REP_PATH];   /* position sigs along the current search line */
 static int rep_n;
 
 /* principal-variation lines for the `post` search-info output (CECP §10).
@@ -63,6 +63,7 @@ static int alphabeta(Pos *p, int depth, int alpha, int beta, int ply, int half) 
     if (vtime_mode && vclock_budget_hit())
         stop_now = 1;
     if (stop_now) return best;
+    if (ply >= MAXPLY) return evaluate(p);   /* hard depth cap: never index past pv/killers/movebuf */
     pv_len[ply] = 0;                                 /* no best line yet at this ply */
 
     /* threefold repetition (game history + current line) is a draw */
@@ -70,17 +71,17 @@ static int alphabeta(Pos *p, int depth, int alpha, int beta, int ply, int half) 
         unsigned long sig = pos_sig(p);
         int prior = 0;
         int i;
-        for (i = 0; i < g_sigs_n; i++)
+        for (i = 0; i < g_sigs_n && i < MAX_G_SIGS; i++)
             if (g_sigs[i] == sig) { prior++; if (prior >= 2) break; }
         if (prior < 2)
-            for (i = 0; i < rep_n; i++)
+            for (i = 0; i < rep_n && i < MAX_REP_PATH; i++)
                 if (rep_path[i] == sig) { prior++; if (prior >= 2) break; }
         if (prior >= 2) return 0;               /* 3rd occurrence */
-        rep_path[rep_n++] = sig;
+        if (rep_n < MAX_REP_PATH) rep_path[rep_n++] = sig;
     }
 
     /* 50-move rule: 100 half-moves without a pawn move or capture is a draw */
-    if (half >= 100) return 0;
+    if (half >= MAX_HALF) { rep_n--; return 0; }
 
     mgen_init(p, &mg, ply, killers[ply][0], killers[ply][1], 0);   /* ttm empty for now */
 
@@ -120,7 +121,7 @@ static int alphabeta(Pos *p, int depth, int alpha, int beta, int ply, int half) 
         }
     }
 
-    rep_n--;                                     /* pop this node */
+    if (rep_n > 0) rep_n--;                  /* pop this node */
     if (!legal)
         /* mate scores: -(MATE - ply) so the root prefers the SHORTEST mate */
         return is_attacked(p, p->ks[p->side], p->side ^ 1) ? -(MATE - ply) : 0;
@@ -152,7 +153,7 @@ static int qsearch(Pos *p, int alpha, int beta, int ply, int half, int qd) {
     if (stop_now) return evaluate(p);
     if (qd <= 0) return evaluate(p);             /* ply budget spent: static eval */
     if (ply >= MAXPLY - 4) return evaluate(p);   /* stay clear of movebuf aux rows */
-    if (half >= 100) return 0;
+    if (half >= MAX_HALF) return 0;
     pv_len[ply] = 0;                             /* qsearch is a leaf: no continuation */
 
     in_check = is_attacked(p, p->ks[p->side], p->side ^ 1);
@@ -355,15 +356,22 @@ static const char *bench_fens[] = {
 int bench(int depth) {
     int i, d, k;
     long total_nodes = 0;
+#ifndef VCLOCK
     clock_t b0, b1;
     double bsecs;
+#endif
 
     if (depth < 1) depth = BENCH_DEPTH;
     if (depth > 20) depth = 20;
     deadline = 0;                                /* keep the search timing-independent */
     stop_now = 0;
+#ifdef VCLOCK
+    vclock_reset();                              /* zero the weighted counters for the whole suite */
+#endif
 
+#ifndef VCLOCK
     b0 = clock();
+#endif
     for (i = 0; i < BENCH_N; i++) {
         Pos p;
         long pos_nodes = 0;
@@ -412,13 +420,25 @@ int bench(int depth) {
         printf("position %2d/%d  depth %2d  score %5d  move %02X%02X  n=%10ld  t=%7.2fs\n",
                i + 1, BENCH_N, depth, bestscore, bf, bt, pos_nodes, secs);
     }
+#ifndef VCLOCK
     b1 = clock();
     bsecs = (double)(b1 - b0) / (double)CLOCKS_PER_SEC;
+#endif
 
     /* these two lines must stay the last output: OpenBench matches them
        scanning up from the bottom of stdout */
+#ifdef VCLOCK
+    printf("NPS is the weighted-model estimate x1000 for OpenBench's X.XX million display\n");
+#endif
     printf("\nNodes searched : %ld\n", total_nodes);
+#ifdef VCLOCK
+    /* nps = what the weighted model predicts on the modeled CPU (default
+       80286 @ 25 MHz); the host's real nps is irrelevant to the 16-bit target.
+       x1000 so OpenBench displays it as X.XX million. */
+    printf("NPS: %ld\n", vclock_est_nps(total_nodes) * 1000);
+#else
     printf("NPS: %ld\n", (long)(total_nodes / (bsecs > 0.0 ? bsecs : 1.0)));
+#endif
     return 0;
 }
 
