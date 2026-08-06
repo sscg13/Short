@@ -103,11 +103,22 @@ int nn_fwd_eval(int side);          /* hand-asm forward pass */
 #endif
 #endif
 
-/* per-ply record of which (row, sign) deltas were applied, so undo reverses them */
-typedef struct { unsigned int row; signed char s; } NnD;
-static NnD nn_delta[MAXPLY][2][4];
-static int nn_dn[MAXPLY][2];
+/* copy-make accumulator stack: nnue_make snapshots the pre-move accumulator into
+   the current ply's slot before applying deltas, and nnue_undo restores it. Undo
+   is one 256-byte copy instead of reversing the applied (row, sign) deltas, so a
+   make/undo pair costs half the NNUE apply work. 33*2*64*2 = 8.4 KB near data;
+   nn_acc stays the live accumulator (the hand-asm apply/fwd loops reference it by
+   a fixed offset), so the stack is plain near memcpy on both builds. */
+static short nn_save[MAXPLY + 1][2][NNUE_N];
 static int nn_ply;
+
+static void nn_save_acc(int ply) {
+    memcpy(nn_save[ply], nn_acc, sizeof nn_acc);
+}
+
+static void nn_restore_acc(int ply) {
+    memcpy(nn_acc, nn_save[ply], sizeof nn_acc);
+}
 
 /* ------------------------------------------------------------------ */
 /* feature indexing                                                   */
@@ -167,11 +178,6 @@ static void nn_delta_add(int persp, int row) {
             nn_acc[persp][j] += (short)nn_w1[base + j];
     }
 #endif
-    if (nn_dn[nn_ply][persp] >= 0 && nn_dn[nn_ply][persp] < 4) {
-        nn_delta[nn_ply][persp][nn_dn[nn_ply][persp]].row = (unsigned int)row;
-        nn_delta[nn_ply][persp][nn_dn[nn_ply][persp]].s = 1;
-    }
-    nn_dn[nn_ply][persp]++;
 }
 
 static void nn_delta_sub(int persp, int row) {
@@ -187,11 +193,6 @@ static void nn_delta_sub(int persp, int row) {
             nn_acc[persp][j] -= (short)nn_w1[base + j];
     }
 #endif
-    if (nn_dn[nn_ply][persp] >= 0 && nn_dn[nn_ply][persp] < 4) {
-        nn_delta[nn_ply][persp][nn_dn[nn_ply][persp]].row = (unsigned int)row;
-        nn_delta[nn_ply][persp][nn_dn[nn_ply][persp]].s = -1;
-    }
-    nn_dn[nn_ply][persp]++;
 }
 
 /* compute one perspective's accumulator from scratch (init with the layer-1 bias) */
@@ -221,7 +222,6 @@ static void nn_compute(Pos *p, short out[2][NNUE_N]) {
 void nnue_reset(Pos *p) {
     nn_compute(p, nn_acc);
     nn_ply = 0;
-    nn_dn[0][0] = nn_dn[0][1] = 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -238,6 +238,9 @@ void nnue_make(Pos *p, unsigned int m, Undo *u) {
     PCOUNT(c_nn_make);
     if (ispromo(m)) mover = (mover_col == 0) ? WP : BP;   /* it was a pawn */
 
+    /* snapshot the pre-move accumulator (copy-make: undo restores from the stack) */
+    nn_save_acc(nn_ply);
+
     /* mirror flags before/after this move (only a king move can change them) */
     nn_mirrors(p, mpost);
     mpre[0] = (mover == WK) ? ((sq2c(from) & 7) >= 4) : mpost[0];
@@ -245,12 +248,9 @@ void nnue_make(Pos *p, unsigned int m, Undo *u) {
     for (persp = 0; persp < 2; persp++)
         flip[persp] = (mpre[persp] != mpost[persp]) ? 1 : 0;
 
-    nn_dn[nn_ply][0] = nn_dn[nn_ply][1] = 0;
-
     for (persp = 0; persp < 2; persp++) {
         if (flip[persp]) {
             PCOUNT(c_flip);
-            nn_dn[nn_ply][persp] = -1;   /* every piece re-indexed: undo recomputes */
         } else {
             nn_delta_sub(persp, nn_row(persp, mover, from, mpost[persp]));
             if (u->cap != EMPTY && fl != MF_EP)
@@ -279,42 +279,10 @@ void nnue_make(Pos *p, unsigned int m, Undo *u) {
 }
 
 void nnue_undo(Pos *p) {
-    int persp;
     PCOUNT(c_nn_undo);
+    (void)p;
     if (nn_ply > 0) nn_ply--;
-    for (persp = 0; persp < 2; persp++) {
-        int i;
-        if (nn_dn[nn_ply][persp] < 0) {
-            nn_compute_persp(p, persp, nn_acc[persp]);   /* board is pre-make again */
-            continue;
-        }
-        for (i = 0; i < nn_dn[nn_ply][persp]; i++) {
-            unsigned int row = nn_delta[nn_ply][persp][i].row;
-            if (nn_delta[nn_ply][persp][i].s > 0) {
-#ifdef NNUE_ASM_APPLY
-                nn_apply_sub(persp, (int)row);   /* reverse a recorded add */
-#else
-                {
-                    unsigned int base = row << 6;
-                    int j;
-                    for (j = 0; j < NNUE_N; j++)          /* reverse a recorded add */
-                        nn_acc[persp][j] -= (short)nn_w1[base + j];
-                }
-#endif
-            } else {
-#ifdef NNUE_ASM_APPLY
-                nn_apply_add(persp, (int)row);   /* reverse a recorded sub */
-#else
-                {
-                    unsigned int base = row << 6;
-                    int j;
-                    for (j = 0; j < NNUE_N; j++)          /* reverse a recorded sub */
-                        nn_acc[persp][j] += (short)nn_w1[base + j];
-                }
-#endif
-            }
-        }
-    }
+    nn_restore_acc(nn_ply);   /* copy-make: no delta reversal, no recompute */
 }
 
 /* ------------------------------------------------------------------ */

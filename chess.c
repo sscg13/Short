@@ -100,8 +100,7 @@ void undo_move(Pos *p, unsigned int m, Undo *u) {
     p->ep = u->ep;
     if (TY(piece) == 6) p->ks[p->side] = from;
 
-    /* NNUE undo must run after the board (and kings) are restored: a mirror-flag
-       flip requires recomputing the accumulator from the pre-make position. */
+    /* NNUE undo restores the accumulator stack (copy-make), board-independent. */
     if (nnue_active) nnue_undo(p);
 }
 
