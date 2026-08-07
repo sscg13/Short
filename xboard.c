@@ -292,7 +292,7 @@ int xboard_main(void) {
             xb_outf("feature option=\"CPU_model -combo *80286 /// 8088 /// 8086\"");
             xb_outf("feature option=\"CPU_KHz -spin 25000 1000 50000\"");
             xb_outf("feature option=\"VirtualTime -check 0\"");
-            xb_outf("feature myname=\"Chess86\" setboard=1 usermove=1 ping=1 playother=1 done=1");
+            xb_outf("feature myname=\"Short\" setboard=1 usermove=1 ping=1 playother=1 done=1");
         } else if (strncmp(p, "new", 3) == 0) {
             xb_reset();
         } else if (strncmp(p, "setboard", 8) == 0) {
