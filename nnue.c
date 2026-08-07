@@ -105,7 +105,7 @@ void nn_make_cap(int persp, int to_row, int from_row, int cap_row);
    reads fwd[0] at offset 0 and fwd[1] at +32768 of the same segment (a single
    2D declaration makes that layout guaranteed). */
 short _far nn_fwd[2][NNUE_N][256];
-int nn_fwd_eval(int side);          /* hand-asm forward pass */
+Score nn_fwd_eval(int side);          /* hand-asm forward pass */
 #ifndef NNUE_DISABLE_ASM_FWD
 #define NNUE_ASM_FWD 1
 #endif
@@ -386,7 +386,7 @@ void nnue_undo(Pos *p) {
 /* forward pass                                                       */
 /* ------------------------------------------------------------------ */
 
-int nnue_eval(Pos *p) {
+Score nnue_eval(Pos *p) {
     PCOUNT(c_nn_eval);
 #ifdef NNUE_ASM_FWD
     return nn_fwd_eval(p->side);
@@ -414,7 +414,7 @@ int nnue_eval(Pos *p) {
             else if (an <= -128) out -= (long)(wn << 7);
             else                 out += (long)(an * wn);
         }
-        return (int)(out >> NNUE_SCALE_SHIFT);
+        return (Score)(out >> NNUE_SCALE_SHIFT);
     }
 #endif
 }

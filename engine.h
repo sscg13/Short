@@ -74,6 +74,12 @@ typedef struct {
 #define MAX_REP_PATH 64   /* search-line repetition signatures */
 #define MAX_HALF 100      /* half-moves before the 50-move rule declares a draw */
 
+/* 16-bit evaluation score. All eval/search scores (alpha/beta/best/root
+   scores) live in this type so the gcc (32-bit int) build does the SAME i16
+   arithmetic as the 16-bit target (where int is already 16-bit), keeping the
+   two builds deterministic by construction. INF/MATE fit: 29000/30000 < 32767. */
+typedef short Score;
+
 #define INF  30000
 #define MATE 29000
 
@@ -156,7 +162,7 @@ extern int nnue_active;     /* incremental accumulators are live (during search)
 void nnue_reset(Pos *p);
 void nnue_make(Pos *p, unsigned int m, Undo *u);
 void nnue_undo(Pos *p);
-int nnue_eval(Pos *p);
+Score nnue_eval(Pos *p);
 int nnue_load(const char *path);
 int nnue_ensure_loaded(const char *path);
 int nnue_ensure_default(void);
@@ -191,7 +197,7 @@ long vclock_est_nps(long nodes);        /* weighted-model NPS for the modeled CP
 
 /* ---- chess.c (board, movegen, eval, perft, FEN) ---- */
 void parse_fen(Pos *p, const char *s);
-int evaluate(Pos *p);
+Score evaluate(Pos *p);
 int gen_caps(Pos *p, unsigned int *list);
 int gen_quiets(Pos *p, unsigned int *list);
 void mgen_init(Pos *p, MGen *g, int ply, int k0, int k1, unsigned int ttm);

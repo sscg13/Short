@@ -577,8 +577,9 @@ long perft(Pos *p, int depth) {
 /* evaluation (NNUE when a net is loaded, else material)              */
 /* ------------------------------------------------------------------ */
 
-int evaluate(Pos *p) {
-    int score = 0, sq;
+Score evaluate(Pos *p) {
+    Score score = 0;
+    int sq;
     if (nnue_enabled && nnue_active) return nnue_eval(p);
     for (sq = 0; sq < 128; sq++) {
         int pc = p->board[sq];
