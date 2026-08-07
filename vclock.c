@@ -56,9 +56,14 @@
    rn 4018 -> 8561 (286), 16008 -> 13549 (8088); scalar cpn_tab -> 41126 (286)
    / 108844 (8088 est).
 
+   ZOBRIST re-fit (branch `optimization`): pos_sig is now O(1) - an incremental
+   Zobrist signature maintained by make/undo (was a 128-square FNV-1a at 9,678
+   c286 per call). The cost moved INTO make/undo (a few u64 XORs each, absorbed
+   in `mk`), so `ps` drops to ~0 and `rn` re-fits to the new profile total.
+
       per-call cycles       8088      80286
         is_attacked          6512       2262
-        pos_sig             33488       9678
+        pos_sig               ~100        ~40     (field read, was 33488/9678 FNV)
         gen_caps            51248      17298
         gen_quiets          60416      20046
         gen_moves           146448     48468     (full staged drain, sbench)
@@ -101,9 +106,9 @@ static long long vbudget_cyc;   /* weighted cycle budget for the current move */
 typedef struct { long att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm; } VW;
 static const VW vw_tab[3] = {
     /*   att    ps     gc     gq      gm   mk   nm   rf    ev     rn     rm */
-    {  2262,  9678, 16476, 18672, 48192, 525, 1000, 2400,  6588,  8561,  6400 }, /* 80286 */
-    {  6512, 33488, 49188, 55929, 141970, 1560, 3000, 6800, 19328, 13549, 19120 }, /* 8088 */
-    {  5000, 24000, 38000, 45000, 110000, 1100, 2000, 4000, 14000, 30000, 14000 }, /* 8086 est */
+    {  2262,    40, 16476, 18672, 48192, 525, 1000, 2400,  6588,  8561,  6400 }, /* 80286 */
+    {  6512,   100, 49188, 55929, 141970, 1560, 3000, 6800, 19328, 13549, 19120 }, /* 8088 */
+    {  5000,    80, 38000, 45000, 110000, 1100, 2000, 4000, 14000, 30000, 14000 }, /* 8086 est */
 };
 
 static long long vclock_cyc(void) {

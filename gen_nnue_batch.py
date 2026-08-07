@@ -83,6 +83,8 @@ HEADER = (
     "        add     di, ax\n"
     "        mov     ax, SEG _nn_w1\n"
     "        mov     ds, ax\n"
+    "        add     si, OFFSET _nn_w1\n"
+    "        add     bx, OFFSET _nn_w1\n"
     "        mov     ax, ss\n"
     "        mov     es, ax\n"
 )
@@ -124,6 +126,9 @@ CAP_HEADER = (
     "        add     di, ax\n"
     "        mov     ax, SEG _nn_w1\n"
     "        mov     ds, ax\n"
+    "        add     si, OFFSET _nn_w1\n"
+    "        add     bx, OFFSET _nn_w1\n"
+    "        add     bp, OFFSET _nn_w1\n"
     "        mov     ax, ss\n"
     "        mov     es, ax\n"
 )

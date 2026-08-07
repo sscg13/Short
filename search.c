@@ -11,7 +11,7 @@ long c_qnodes = 0;                   /* qsearch entries */
 #endif
 
 static long nodes_search;
-static unsigned long rep_path[MAX_REP_PATH];   /* position sigs along the current search line */
+static Sig rep_path[MAX_REP_PATH];   /* position sigs along the current search line */
 static int rep_n;
 
 /* principal-variation lines for the `post` search-info output (CECP §10).
@@ -69,7 +69,7 @@ static Score alphabeta(Pos *p, int depth, Score alpha, Score beta, int ply, int 
 
     /* threefold repetition (game history + current line) is a draw */
     {
-        unsigned long sig = pos_sig(p);
+        Sig sig = pos_sig(p);
         int prior = 0;
         int i;
         for (i = 0; i < g_sigs_n && i < MAX_G_SIGS; i++)

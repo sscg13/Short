@@ -54,6 +54,7 @@ nn_apply_add_ PROC FAR
         shl     bx, 1
         mov     ax, SEG _nn_w1
         mov     ds, ax
+        add     si, OFFSET _nn_w1
         mov     ax, ss
         mov     es, ax
         mov     di, OFFSET _nn_acc
@@ -279,6 +280,7 @@ nn_apply_sub_ PROC FAR
         shl     bx, 1
         mov     ax, SEG _nn_w1
         mov     ds, ax
+        add     si, OFFSET _nn_w1
         mov     ax, ss
         mov     es, ax
         mov     di, OFFSET _nn_acc
@@ -519,6 +521,8 @@ nn_make_move_ PROC FAR
         add     di, ax
         mov     ax, SEG _nn_w1
         mov     ds, ax
+        add     si, OFFSET _nn_w1
+        add     bx, OFFSET _nn_w1
         mov     ax, ss
         mov     es, ax
         mov     al, [si+0]
@@ -1018,6 +1022,9 @@ nn_make_cap_ PROC FAR
         add     di, ax
         mov     ax, SEG _nn_w1
         mov     ds, ax
+        add     si, OFFSET _nn_w1
+        add     bx, OFFSET _nn_w1
+        add     bp, OFFSET _nn_w1
         mov     ax, ss
         mov     es, ax
         mov     al, [si+0]

@@ -48,12 +48,23 @@ enum { EMPTY = 0, WP = 1, WN = 2, WB = 3, WR = 4, WQ = 5, WK = 6,
                           ((sq2c(t) & 0x3F) << 6) | \
                           ((((pr) ? (int)(TY(pr) - 1) : (int)(fl)) & 0xF) << 12)))
 
+/* Position signature (incremental Zobrist, 64-bit). STORAGE DECISION: a single
+   unsigned long long beats four separate 16-bit words on BOTH builds. Verified
+   by disassembly: Open Watcom 16-bit already lowers a u64 XOR to four native
+   word XORs and u64 == to four short-circuited word cmp/jne - identical to
+   hand-split four-16-bit codegen - while gcc keeps a single native 64-bit op.
+   So four-16-bit buys nothing on the target and loses on gcc. The collision
+   safety of 64 bits (vs the old 32-bit FNV) also lets g_sigs/rep_path store
+   the full signature. */
+typedef unsigned long long Sig;
+
 typedef struct {
     int board[128];   /* 0x88 board */
     int side;         /* 0 white, 1 black */
     int castle;       /* bit0 WK bit1 WQ bit2 BK bit3 BQ */
     int ep;           /* en-passant target square, or -1 */
     int ks[2];        /* king squares */
+    Sig sig;          /* incremental Zobrist signature of this position */
 } Pos;
 
 typedef struct { int cap, castle, ep; } Undo;
@@ -70,7 +81,13 @@ typedef struct {
 } MGen;
 
 #define MAXPLY 32         /* killers[] rows; movebuf rows cover ply 0..MAXPLY-1 */
-#define MAX_G_SIGS 1024   /* game-history position signatures */
+#define MAX_G_SIGS 128    /* game-history position signatures. A capture or pawn
+                             move irreversibly changes the position, so history
+                             BEFORE the last zeroing move can never be a
+                             threefold partner; apply_move clears it there. And
+                             the 50-move rule (MAX_HALF=100) bounds the quiet
+                             stretch after a zeroing move, so 128 entries is
+                             provably enough (1024 was 8 KB of far data). */
 #define MAX_REP_PATH 64   /* search-line repetition signatures */
 #define MAX_HALF 100      /* half-moves before the 50-move rule declares a draw */
 
@@ -119,7 +136,7 @@ int profile(int depth);
 
 /* ---- shared globals ---- */
 extern int g_half, g_full;              /* halfmove clock, fullmove number */
-extern unsigned long g_sigs[MAX_G_SIGS];      /* position signatures for repetition */
+extern Sig g_sigs[MAX_G_SIGS];          /* position signatures for repetition */
 extern int g_sigs_n;
 extern unsigned int movebuf[32][256];   /* move lists, one row per search ply + aux */
 extern volatile int stop_now;
@@ -133,7 +150,7 @@ int is_attacked(Pos *p, int sq, int by);
 int sq_on_king_line(Pos *p, int sq, int s);
 int gen_moves(Pos *p, unsigned int *list);
 long perft(Pos *p, int depth);
-unsigned long pos_sig(Pos *p);
+Sig pos_sig(Pos *p);
 void search_root(Pos *p, int maxdepth);
 unsigned int think(Pos *p, int maxdepth);
 int bench(int depth);
@@ -198,6 +215,7 @@ long vclock_est_nps(long nodes);        /* weighted-model NPS for the modeled CP
 /* ---- chess.c (board, movegen, eval, perft, FEN) ---- */
 void parse_fen(Pos *p, const char *s);
 Score evaluate(Pos *p);
+void zob_init(void);              /* one-time Zobrist key tables (dedicated init) */
 int gen_caps(Pos *p, unsigned int *list);
 int gen_quiets(Pos *p, unsigned int *list);
 void mgen_init(Pos *p, MGen *g, int ply, int k0, int k1, unsigned int ttm);
