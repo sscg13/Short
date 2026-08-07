@@ -91,12 +91,20 @@ void nn_apply_add(int persp, int row);
 void nn_apply_sub(int persp, int row);
 #define NNUE_ASM_APPLY 1
 
+/* batched make loops (nnue_opt.asm): one 64-element pass with a single
+   word-RMW per element. nn_make_move: acc += w1[to] - w1[from].
+   nn_make_cap:  acc += w1[to] - w1[from] - w1[cap]. */
+void nn_make_move(int persp, int to_row, int from_row);
+void nn_make_cap(int persp, int to_row, int from_row, int cap_row);
+#define NNUE_ASM_BATCH 1
+
 /* per-slot forward product tables (nnue_opt.asm, NNUE_OPTIMIZATION.md §5):
    fwd[p][j][a+128] = w2[p*64+j] * a  for a in [-128,127]. Built at net load so
-   the forward multiply becomes one word load + one shl. Two 32 KB far arrays
-   (one per perspective) stay clear of the 64 KB segment boundary. */
-short _far nn_fwd0[NNUE_N][256];
-short _far nn_fwd1[NNUE_N][256];
+   the forward multiply becomes one word load + one shl. ONE 64 KB far array
+   holding both perspectives so the linker CANNOT reorder them: the asm fwd
+   reads fwd[0] at offset 0 and fwd[1] at +32768 of the same segment (a single
+   2D declaration makes that layout guaranteed). */
+short _far nn_fwd[2][NNUE_N][256];
 int nn_fwd_eval(int side);          /* hand-asm forward pass */
 #ifndef NNUE_DISABLE_ASM_FWD
 #define NNUE_ASM_FWD 1
@@ -124,12 +132,6 @@ static void nn_restore_acc(int ply) {
 /* feature indexing                                                   */
 /* ------------------------------------------------------------------ */
 
-/* horizontal mirror of a compact square (file flips, rank unchanged) */
-static int nn_norm(int c, int mirror) {
-    if (mirror) c = (c & 0xF8) | (7 - (c & 7));
-    return c;
-}
-
 /* per-perspective mirror flags from the king squares: mirror a POV's board
    when that POV's king (after its 180 transform for persp 1) sits on e-h,
    so the own king always normalizes to files a-d. */
@@ -138,59 +140,85 @@ static void nn_mirrors(Pos *p, int m[2]) {
     m[1] = ((7 - (sq2c(p->ks[1]) & 7)) >= 4) ? 1 : 0;  /* R180 of black king file >= e */
 }
 
-static int nn_row(int persp, int pc, int sq88, int mirror) {
-    int c = sq2c(sq88);
+/* feature row for a color-normalized piece on a mirror-normalized compact
+   square (0..703, or -1 = invalid, e.g. a pawn on rank 1/8). This is the
+   pure dispatch used to build the nn_row table (and as the gcc scalar oracle
+   before the table is built). */
+static int nn_row_dispatch(int pc, int c) {
     int ty = TY(pc);
-    int r;
-
-    if (persp == 1) {                 /* black POV: 180 flip + color swap */
-        pc = CO(pc) ? pc - 8 : pc + 8;
-        c = 63 - c;
-        ty = TY(pc);
-    }
-    c = nn_norm(c, mirror);
     if (CO(pc) == 0) {                /* own piece */
         if (ty == 6) return (c >> 3) * 8 + (c & 7);   /* own king: file <= 3 by mirror */
-        if (ty == 1) { r = c >> 3; if (r < 1 || r > 6) return -1; return 32 + (r - 1) * 8 + (c & 7); }
+        if (ty == 1) { int r = c >> 3; if (r < 1 || r > 6) return -1; return 32 + (r - 1) * 8 + (c & 7); }
         if (ty >= 2 && ty <= 5) return 80 + (ty - 2) * 64 + c;
         return -1;
     } else {                          /* enemy piece */
         if (ty == 6) return 336 + c;
-        if (ty == 1) { r = c >> 3; if (r < 1 || r > 6) return -1; return 400 + (r - 1) * 8 + (c & 7); }
+        if (ty == 1) { int r = c >> 3; if (r < 1 || r > 6) return -1; return 400 + (r - 1) * 8 + (c & 7); }
         if (ty >= 2 && ty <= 5) return 448 + (ty - 2) * 64 + c;
         return -1;
     }
 }
 
-/* incremental add/remove of a feature row (make path): count, apply, record.
-   The loop is inline (no separate call) and pure add/sub (no sign multiply),
-   and base is a 16-bit shift instead of a 32-bit multiply (row<=703 -> <<6 fits). */
-static void nn_delta_add(int persp, int row) {
-    if (row < 0) return;
+/* nn_row lookup table: [pc][normalized compact square] -> row or -1. Built
+   once from nn_row_dispatch; replaces the branchy per-call dispatch (nn_row is
+   called once per feature apply, 114,921x in profile-1). 15x64 i16 = 1.9 KB
+   near data (DGROUP has ~10 KB headroom). */
+static short nn_rowtab[15][64];
+static int nn_rowtab_ready;
+
+static void nn_rowtab_build(void) {
+    int pc, c;
+    for (pc = 1; pc < 15; pc++)
+        for (c = 0; c < 64; c++)
+            nn_rowtab[pc][c] = (short)nn_row_dispatch(pc, c);
+    nn_rowtab_ready = 1;
+}
+
+/* feature row for a piece at sq88 in this POV, given the mirror flag */
+static int nn_row(int persp, int pc, int sq88, int mirror) {
+    int c = sq2c(sq88);
+    if (persp == 1) {                 /* black POV: 180 flip + color swap */
+        pc = CO(pc) ? pc - 8 : pc + 8;
+        c = 63 - c;
+    }
+    if (mirror) c = (c & 0xF8) | (7 - (c & 7));
+    return nn_rowtab[pc][c];
+}
+
+/* Batched feature-row apply (make path). nn_batch_addsub applies +w1[to] -
+   w1[from] in ONE pass (one word-RMW per element, both on the 16-bit asm path
+   and the scalar C oracle); nn_batch_cap applies +w1[to] - w1[from] -
+   w1[cap]. Bit-identical to sequential sub+add (i16 arithmetic mod 2^16),
+   so node counts are unchanged by construction. A negative row means the
+   piece has no feature (e.g. a pawn on the promotion rank) -> skip it. */
+static void nn_batch_addsub(int persp, int to_row, int from_row) {
+    if (to_row < 0 || from_row < 0) return;
     PCOUNT(c_refresh);
-#ifdef NNUE_ASM_APPLY
-    nn_apply_add(persp, row);
+#ifdef NNUE_ASM_BATCH
+    nn_make_move(persp, to_row, from_row);
 #else
     {
-        unsigned int base = (unsigned)row << 6;
+        unsigned int b0 = (unsigned)to_row << 6, b1 = (unsigned)from_row << 6;
         int j;
         for (j = 0; j < NNUE_N; j++)
-            nn_acc[persp][j] += (short)nn_w1[base + j];
+            nn_acc[persp][j] += (short)nn_w1[b0 + j] - (short)nn_w1[b1 + j];
     }
 #endif
 }
 
-static void nn_delta_sub(int persp, int row) {
-    if (row < 0) return;
+static void nn_batch_cap(int persp, int to_row, int from_row, int cap_row) {
+    if (to_row < 0 || from_row < 0 || cap_row < 0) return;
     PCOUNT(c_refresh);
-#ifdef NNUE_ASM_APPLY
-    nn_apply_sub(persp, row);
+#ifdef NNUE_ASM_BATCH
+    nn_make_cap(persp, to_row, from_row, cap_row);
 #else
     {
-        unsigned int base = (unsigned)row << 6;
+        unsigned int b0 = (unsigned)to_row << 6, b1 = (unsigned)from_row << 6;
+        unsigned int b2 = (unsigned)cap_row << 6;
         int j;
         for (j = 0; j < NNUE_N; j++)
-            nn_acc[persp][j] -= (short)nn_w1[base + j];
+            nn_acc[persp][j] += (short)nn_w1[b0 + j] - (short)nn_w1[b1 + j]
+                              - (short)nn_w1[b2 + j];
     }
 #endif
 }
@@ -228,6 +256,68 @@ void nnue_reset(Pos *p) {
 /* incremental make / undo                                            */
 /* ------------------------------------------------------------------ */
 
+/* Precomputed castling deltas. A castle is a fixed set of piece-square
+   changes, so the accumulator change can be precomputed once (per net load)
+   for the cases that keep a perspective's mirror flag unchanged:
+     case 0 = kingside, castling side's own perspective,
+     case 1 = kingside, the OTHER (nstm) perspective,
+     case 2 = queenside, the OTHER (nstm) perspective  (the castling side's
+              own perspective always flips on queenside: the king crosses the
+              d/e boundary, so it is recomputed from scratch instead).
+   Rows are computed with the ACTUAL perspective that will use them (own vs
+   nstm) and both mirror values, so the runtime lookup is an exact index.
+   Index [case][mover_col][mirror][j]. 3*2*2*64 i16 = 1.5 KB near data.
+   Built at net load. */
+static short cast_delta[3][2][2][NNUE_N];
+
+static void nn_castle_build(void) {
+    /* (king from, king to, rook from, rook to) as 0x88 squares, per color.
+       The perspective that uses each case is: case 0 = the castling side's
+       OWN perspective; cases 1-2 = the OTHER (nstm) perspective. Each delta
+       is built with the actual persp, pieces and squares of that color. */
+    static const int ks_sq[2][2][4] = {
+        /* O-O */
+        { { 0x04, 0x06, 0x07, 0x05 },   /* white: e1->g1, h1->f1 */
+          { 0x74, 0x76, 0x77, 0x75 } }, /* black: e8->g8, h8->f8 */
+        /* O-O-O */
+        { { 0x04, 0x02, 0x00, 0x03 },   /* white: e1->c1, a1->d1 */
+          { 0x74, 0x72, 0x70, 0x73 } }, /* black: e8->c8, a8->d8 */
+    };
+    static const int case_cast[3] = { 0, 0, 1 };   /* 0=O-O, 1=O-O-O */
+    int c, w, m, j;
+
+    for (c = 0; c < 3; c++) {
+        for (w = 0; w < 2; w++) {
+            const int *s = ks_sq[case_cast[c]][w];
+            int persp = (c == 0) ? w : (w ^ 1);   /* case 0: own persp; 1-2: nstm */
+            int king = (w == 0) ? WK : BK;
+            int rook = (w == 0) ? WR : BR;
+            for (m = 0; m < 2; m++) {
+                int kf = nn_row(persp, king, s[0], m);
+                int kt = nn_row(persp, king, s[1], m);
+                int rf = nn_row(persp, rook, s[2], m);
+                int rt = nn_row(persp, rook, s[3], m);
+                for (j = 0; j < NNUE_N; j++) {
+                    short a = 0;
+                    if (kt >= 0) a += (short)nn_w1[((unsigned)kt << 6) + j];
+                    if (kf >= 0) a -= (short)nn_w1[((unsigned)kf << 6) + j];
+                    if (rt >= 0) a += (short)nn_w1[((unsigned)rt << 6) + j];
+                    if (rf >= 0) a -= (short)nn_w1[((unsigned)rf << 6) + j];
+                    cast_delta[c][w][m][j] = a;
+                }
+            }
+        }
+    }
+}
+
+/* apply the precomputed castle delta to one perspective (mirror unchanged) */
+static void nn_castle_apply(int persp, int case_idx, int mover_col, int mirror) {
+    int j;
+    const short *d = cast_delta[case_idx][mover_col][mirror];
+    for (j = 0; j < NNUE_N; j++)
+        nn_acc[persp][j] += d[j];
+}
+
 void nnue_make(Pos *p, unsigned int m, Undo *u) {
     int from = mfrom(m), to = mto(m), fl = mfl(m);
     int mover_col = p->side ^ 1;          /* side that just moved */
@@ -251,26 +341,33 @@ void nnue_make(Pos *p, unsigned int m, Undo *u) {
     for (persp = 0; persp < 2; persp++) {
         if (flip[persp]) {
             PCOUNT(c_flip);
+        } else if (fl == MF_CASTLE) {
+            /* castle with no mirror change: precomputed delta.
+               kingside: both perspectives (own case 0, other case 1).
+               queenside: only the other (nstm) perspective reaches here (the
+               castling side's own perspective flipped and recomputes below). */
+            int case_idx;
+            if (to == 0x06 || to == 0x76)      /* kingside */
+                case_idx = (persp == mover_col) ? 0 : 1;
+            else                                 /* queenside */
+                case_idx = 2;
+            PCOUNT(c_refresh);
+            nn_castle_apply(persp, case_idx, mover_col, mpost[persp]);
         } else {
-            nn_delta_sub(persp, nn_row(persp, mover, from, mpost[persp]));
-            if (u->cap != EMPTY && fl != MF_EP)
-                nn_delta_sub(persp, nn_row(persp, u->cap, to, mpost[persp]));
+            int to_row, from_row, cap_row = -1;
+            to_row   = nn_row(persp, newp, to, mpost[persp]);
+            from_row = nn_row(persp, mover, from, mpost[persp]);
             if (fl == MF_EP) {
                 int esq = (mover_col == 0) ? to - 16 : to + 16;
                 int ep = (mover_col == 0) ? BP : WP;
-                nn_delta_sub(persp, nn_row(persp, ep, esq, mpost[persp]));
+                cap_row = nn_row(persp, ep, esq, mpost[persp]);
+            } else if (u->cap != EMPTY) {
+                cap_row = nn_row(persp, u->cap, to, mpost[persp]);
             }
-            if (fl == MF_CASTLE) {
-                int rf, rt, rook;
-                if (to == 0x06)      { rf = 0x07; rt = 0x05; }
-                else if (to == 0x02) { rf = 0x00; rt = 0x03; }
-                else if (to == 0x76) { rf = 0x77; rt = 0x75; }
-                else                 { rf = 0x70; rt = 0x73; }
-                rook = (mover_col == 0) ? WR : BR;
-                nn_delta_sub(persp, nn_row(persp, rook, rf, mpost[persp]));
-                nn_delta_add(persp, nn_row(persp, rook, rt, mpost[persp]));
-            }
-            nn_delta_add(persp, nn_row(persp, newp, to, mpost[persp]));
+            if (cap_row >= 0)
+                nn_batch_cap(persp, to_row, from_row, cap_row);
+            else
+                nn_batch_addsub(persp, to_row, from_row);
         }
     }
     for (persp = 0; persp < 2; persp++)
@@ -337,8 +434,8 @@ static void nn_fwd_build(void) {
         short v0 = (short)(-128 * w0);
         short v1 = (short)(-128 * w1);
         for (a = 0; a < 256; a++) {
-            nn_fwd0[j][a] = v0;
-            nn_fwd1[j][a] = v1;
+            nn_fwd[0][j][a] = v0;
+            nn_fwd[1][j][a] = v1;
             v0 = (short)(v0 + w0);
             v1 = (short)(v1 + w1);
         }
@@ -364,10 +461,23 @@ static int nnue_parse_blob(const unsigned char *p, long len) {
             | ((int)(unsigned char)p[13 + w1sz + NNUE_N + NNUE_W2_SIZE] << 8);
     if ((unsigned)nn_bias > 32767) nn_bias -= 65536;            /* sign-extend i16 */
     nnue_enabled = 1;
+    nnue_tables_init();
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* one-time table builds (dedicated init: all precomputation/setup     */
+/* ------------------------------------------------------------------ */
+
+/* build every net-dependent table: the feature-row lookup, the forward
+   product tables, and the castling deltas. Must run after the weights are in
+   memory (nn_w1/nn_w2). Call once at net load; idempotent via the ready flag. */
+void nnue_tables_init(void) {
+    nn_rowtab_build();
 #ifdef NNUE_ASM_FWD
     nn_fwd_build();
 #endif
-    return 1;
+    nn_castle_build();
 }
 
 int nnue_load(const char *path) {
@@ -533,9 +643,7 @@ int nnue_selftest(const char *fen) {
             nn_w2[z] = (signed char)((((long)z * 11 + 5) & 255) - 128);
         nn_bias = 1000;
         nnue_enabled = 1;
-#ifdef NNUE_ASM_FWD
-        nn_fwd_build();
-#endif
+        nnue_tables_init();
     }
 
     /* color symmetry: acc_black(x) must equal acc_white(rot180 + colorflip x) */

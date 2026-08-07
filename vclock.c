@@ -44,6 +44,18 @@
    -> 1.808e9 (8088) / 0.604e9 (80286). R and the scalar cycles/node re-fit
    again.
 
+   BATCHED-APPLY re-fit (same branch): nnue_make now applies +w1[to]-w1[from]
+   (normal) or +w1[to]-w1[from]-w1[cap] (capture/EP) in ONE 64-element pass
+   with a single word-RMW per element (nn_make_move_/nn_make_cap_ asm, or the
+   matching scalar C). The per-call `rf` weight becomes the batched-apply cost
+   and `c_refresh` now counts BATCH calls (44,645 in profile-1, was 114,921
+   single-row applies). Castling deltas are precomputed. The nbench make+undo
+   pair dropped 24,810 -> 10,710 c286 (-57%), and the profile-1 total -> 0.544e9
+   (80286, measured 90.68 s @6 MHz) / ~1.44e9 (8088, estimated by the same
+   apply cut). rn and rf re-fit: rf 1980 -> 2400 (286), 5613 -> 6800 (8088);
+   rn 4018 -> 8561 (286), 16008 -> 13549 (8088); scalar cpn_tab -> 41126 (286)
+   / 108844 (8088 est).
+
       per-call cycles       8088      80286
         is_attacked          6512       2262
         pos_sig             33488       9678
@@ -77,9 +89,9 @@ static int  vperiod_started; /* first period not yet granted */
 /* scalar cycles/node, NNUE / material (16-bit build) */
 #ifndef VCLOCK
 static const long cpn_tab[3][2] = {
-    { 45684L,  22980L },   /* VCPU_80286  (move-sweep re-fit) */
-    { 137113L, 67800L },   /* VCPU_8088   (move-sweep re-fit) */
-    { 93000L,  45000L },   /* VCPU_8086 (estimate) */
+    { 41126L,  22980L },   /* VCPU_80286  (batched-apply re-fit) */
+    { 108844L, 67800L },   /* VCPU_8088   (batched-apply re-fit, est) */
+    { 85000L,  45000L },   /* VCPU_8086 (estimate) */
 };
 #endif
 
@@ -89,8 +101,8 @@ static long long vbudget_cyc;   /* weighted cycle budget for the current move */
 typedef struct { long att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm; } VW;
 static const VW vw_tab[3] = {
     /*   att    ps     gc     gq      gm   mk   nm   rf    ev     rn     rm */
-    {  2262,  9678, 16476, 18672, 48192, 525, 1000, 1980,  6588,  4018,  6400 }, /* 80286 */
-    {  6512, 33488, 49188, 55929, 141970, 1560, 3000, 5613, 19328, 16008, 19120 }, /* 8088 */
+    {  2262,  9678, 16476, 18672, 48192, 525, 1000, 2400,  6588,  8561,  6400 }, /* 80286 */
+    {  6512, 33488, 49188, 55929, 141970, 1560, 3000, 6800, 19328, 13549, 19120 }, /* 8088 */
     {  5000, 24000, 38000, 45000, 110000, 1100, 2000, 4000, 14000, 30000, 14000 }, /* 8086 est */
 };
 

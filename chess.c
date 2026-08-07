@@ -377,21 +377,18 @@ int gen_moves(Pos *p, unsigned int *list) {
    tiny 8x8 table (128 B) precomputes it once instead of a per-move score
    buffer or the mval*16 arithmetic on every selection pass. */
 static int mvv_tab[8][8];
-static int mvv_tab_ready;
 
 static void mvv_build(void) {
     int v, a;
     for (v = 0; v < 8; v++)
         for (a = 0; a < 8; a++)
             mvv_tab[v][a] = mval[v] * 16 - a;
-    mvv_tab_ready = 1;
 }
 
 static int mvv_lva(Pos *p, unsigned int m) {
     int victim = 0, s;
     if (mfl(m) == MF_EP) victim = 1;                       /* captured pawn */
     else if (p->board[mto(m)]) victim = TY(p->board[mto(m)]);
-    if (!mvv_tab_ready) mvv_build();
     s = mvv_tab[victim][TY(p->board[mfrom(m)])];
     if (ispromo(m)) s += PROMO_BONUS;
     return s;
@@ -700,6 +697,8 @@ int main(int argc, char **argv) {
     long nodes;
     clock_t t0, t1;
     double secs;
+
+    mvv_build();   /* one-time MVV-LVA table (dedicated init) */
 
     /* NNUE net: `chess --nnue file ...` overrides the default net. The default is
        the EMBEDDED net on the gcc build (OpenBench embeds the trained net via
