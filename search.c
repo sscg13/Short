@@ -11,7 +11,7 @@ long c_qnodes = 0;                   /* qsearch entries */
 #endif
 
 static long nodes_search;
-static unsigned long rep_path[MAX_REP_PATH];   /* position sigs along the current search line */
+static Sig rep_path[MAX_REP_PATH];   /* position sigs along the current search line */
 static int rep_n;
 
 /* principal-variation lines for the `post` search-info output (CECP §10).
@@ -26,7 +26,7 @@ static int killers[MAXPLY][2];          /* two killer moves per ply (quiet only)
 
 /* root move list + scores, reused across iterative-deepening iterations */
 static unsigned int root_m[256];
-static int root_score[256];
+static Score root_score[256];
 static int root_n;
 
 /* selection sort the root moves by last iteration's score (best first) */
@@ -37,7 +37,7 @@ static void sort_root(void) {
         for (j = i + 1; j < root_n; j++)
             if (root_score[j] > root_score[best]) best = j;
         if (best != i) {
-            unsigned int tm = root_m[i]; int ts = root_score[i];
+            unsigned int tm = root_m[i]; Score ts = root_score[i];
             root_m[i] = root_m[best]; root_m[best] = tm;
             root_score[i] = root_score[best]; root_score[best] = ts;
         }
@@ -48,12 +48,13 @@ static void sort_root(void) {
 /* alpha-beta search                                                  */
 /* ------------------------------------------------------------------ */
 
-static int qsearch(Pos *p, int alpha, int beta, int ply, int half, int qd);
+static Score qsearch(Pos *p, Score alpha, Score beta, int ply, int half, int qd);
 
-static int alphabeta(Pos *p, int depth, int alpha, int beta, int ply, int half) {
+static Score alphabeta(Pos *p, int depth, Score alpha, Score beta, int ply, int half) {
     MGen mg;
     unsigned int m;
-    int best = -INF, legal = 0;
+    Score best = -INF;
+    int legal = 0, in_check = 0;
 
     PCOUNT(c_anodes);
     nodes_search++;
@@ -68,7 +69,7 @@ static int alphabeta(Pos *p, int depth, int alpha, int beta, int ply, int half) 
 
     /* threefold repetition (game history + current line) is a draw */
     {
-        unsigned long sig = pos_sig(p);
+        Sig sig = pos_sig(p);
         int prior = 0;
         int i;
         for (i = 0; i < g_sigs_n && i < MAX_G_SIGS; i++)
@@ -83,15 +84,31 @@ static int alphabeta(Pos *p, int depth, int alpha, int beta, int ply, int half) 
     /* 50-move rule: 100 half-moves without a pawn move or capture is a draw */
     if (half >= MAX_HALF) { rep_n--; return 0; }
 
+    /* in-check status of the side to move: a non-king, non-EP move from a
+       square NOT on the king's rank/file/diagonal is then always legal (it can
+       neither leave a check unresolved nor open a new line), so its legality
+       is_attacked test can be skipped. */
+    in_check = is_attacked(p, p->ks[p->side], p->side ^ 1);
+
     mgen_init(p, &mg, ply, killers[ply][0], killers[ply][1], 0);   /* ttm empty for now */
 
     while ((m = next_move(p, &mg)) != 0) {
         Undo u;
-        int us, score, pc, is_cap, child_half;
+        int us, pc, is_cap, child_half, legal_move = 0;
+        Score score;
         pc = p->board[mfrom(m)];                 /* moving piece, before the make */
         do_make(p, m, &u);
         us = p->side ^ 1;                        /* mover */
-        if (!is_attacked(p, p->ks[us], p->side)) {
+        /* Legality: if not in check, a non-king, non-EP move from a square off
+           the mover king's lines cannot leave the king attacked, so skip the
+           is_attacked test. Otherwise (in check, king move, EP, or an aligned
+           from-square) the real test decides. */
+        if (!in_check && TY(pc) != 6 && mfl(m) != MF_EP &&
+            !sq_on_king_line(p, mfrom(m), us))
+            legal_move = 1;
+        else if (!is_attacked(p, p->ks[us], p->side))
+            legal_move = 1;
+        if (legal_move) {
             legal = 1;
             is_cap = (u.cap != EMPTY) || (mfl(m) == MF_EP);
             child_half = (TY(pc) == 1 || is_cap) ? 0 : half + 1;
@@ -138,10 +155,11 @@ static int alphabeta(Pos *p, int depth, int alpha, int beta, int ply, int half) 
    If the side to move is in check, stand-pat is invalid: generate ALL legal moves
    (full staged generator) to find evasions, and score a mate properly.
    Returns the score from the side-to-move's point of view (negamax). */
-static int qsearch(Pos *p, int alpha, int beta, int ply, int half, int qd) {
+static Score qsearch(Pos *p, Score alpha, Score beta, int ply, int half, int qd) {
     MGen mg;
     unsigned int m;
-    int in_check, stand, legal = 0;
+    int in_check, legal = 0;
+    Score stand;
 
     PCOUNT(c_qnodes);
     nodes_search++;
@@ -168,11 +186,17 @@ static int qsearch(Pos *p, int alpha, int beta, int ply, int half, int qd) {
 
     while ((m = next_move(p, &mg)) != 0) {
         Undo u;
-        int us, score, pc, is_cap, child_half;
+        int us, pc, is_cap, child_half, legal_move = 0;
+        Score score;
         pc = p->board[mfrom(m)];
         do_make(p, m, &u);
         us = p->side ^ 1;
-        if (!is_attacked(p, p->ks[us], p->side)) {
+        if (!in_check && TY(pc) != 6 && mfl(m) != MF_EP &&
+            !sq_on_king_line(p, mfrom(m), us))
+            legal_move = 1;
+        else if (!is_attacked(p, p->ks[us], p->side))
+            legal_move = 1;
+        if (legal_move) {
             legal = 1;
             is_cap = (u.cap != EMPTY) || (mfl(m) == MF_EP);
             child_half = (TY(pc) == 1 || is_cap) ? 0 : half + 1;
@@ -198,8 +222,9 @@ void search_root(Pos *p, int maxdepth) {
     for (i = 0; i < root_n; i++) root_score[i] = 0;
     if (nnue_ensure_default()) { nnue_reset(p); nnue_active = 1; }
     for (d = 1; d <= maxdepth; d++) {
-        int alpha = -INF, beta = INF;
-        int bestscore = -INF, bf = 0, bt = 0;
+        Score alpha = -INF, beta = INF;
+        Score bestscore = -INF;
+        int bf = 0, bt = 0;
         clock_t t0, t1;
         double secs;
 
@@ -209,7 +234,8 @@ void search_root(Pos *p, int maxdepth) {
         sort_root();
         for (i = 0; i < root_n; i++) {
             Undo u;
-            int us, score;
+            int us;
+            Score score;
             do_make(p, root_m[i], &u);
             us = p->side ^ 1;
             if (!is_attacked(p, p->ks[us], p->side)) {
@@ -238,7 +264,7 @@ void search_root(Pos *p, int maxdepth) {
    reported as 100000+N ("mate in N moves") / -100000-N ("mated in N moves").
    The engine's internal mate score is MATE-ply (ply = distance from root to
    the terminal position), so N = (ply+1)/2. */
-static long score_to_cecp(int score) {
+static long score_to_cecp(Score score) {
     if (score >= MATE - MAXPLY) {
         int n = (MATE - score + 1) / 2;
         return 100000L + (n < 1 ? 1 : n);
@@ -269,7 +295,7 @@ unsigned int think(Pos *p, int maxdepth) {
     for (i = 0; i < root_n; i++) root_score[i] = 0;
     if (nnue_ensure_default()) { nnue_reset(p); nnue_active = 1; }
     for (d = 1; d <= maxdepth; d++) {
-        int alpha = -INF, beta = INF, bsc = -INF;
+        Score alpha = -INF, beta = INF, bsc = -INF;
         unsigned int bm = 0;
         pv_len[0] = 0;
         if (deadline > 0 && (long)clock() >= deadline) break;
@@ -279,7 +305,9 @@ unsigned int think(Pos *p, int maxdepth) {
         rep_n = 0;
         sort_root();
         for (i = 0; i < root_n; i++) {
-            Undo u; int us, score;
+            Undo u;
+            int us;
+            Score score;
             do_make(p, root_m[i], &u);
             us = p->side ^ 1;
             if (!is_attacked(p, p->ks[us], p->side)) {
@@ -375,7 +403,8 @@ int bench(int depth) {
     for (i = 0; i < BENCH_N; i++) {
         Pos p;
         long pos_nodes = 0;
-        int bestscore = -INF, bf = 0, bt = 0;
+        Score bestscore = -INF;
+        int bf = 0, bt = 0;
         clock_t t0, t1;
         double secs;
 
@@ -388,14 +417,16 @@ int bench(int depth) {
 
         t0 = clock();
         for (d = 1; d <= depth; d++) {
-            int alpha = -INF, beta = INF, bsc = -INF;
+            Score alpha = -INF, beta = INF, bsc = -INF;
             unsigned int bm = 0;
             nodes_search = 0;
             rep_n = 0;
             stop_now = 0;
             sort_root();
             for (k = 0; k < root_n; k++) {
-                Undo u; int us, score;
+                Undo u;
+                int us;
+                Score score;
                 do_make(&p, root_m[k], &u);
                 us = p.side ^ 1;
                 if (!is_attacked(&p, p.ks[us], p.side)) {
@@ -483,13 +514,15 @@ int profile(int depth) {
         if (nnue_ensure_default()) { nnue_reset(&p); nnue_active = 1; }
 
         for (d = 1; d <= depth; d++) {
-            int alpha = -INF, beta = INF;
+            Score alpha = -INF, beta = INF;
             nodes_search = 0;
             rep_n = 0;
             stop_now = 0;
             sort_root();
             for (k = 0; k < root_n; k++) {
-                Undo u; int us, score;
+                Undo u;
+                int us;
+                Score score;
                 do_make(&p, root_m[k], &u);
                 us = p.side ^ 1;
                 if (!is_attacked(&p, p.ks[us], p.side)) {

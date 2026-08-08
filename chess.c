@@ -13,6 +13,104 @@ static const int mval[8] = { 0, 100, 320, 330, 500, 900, 0 };
 
 unsigned int movebuf[32][256];
 
+/* ---- incremental Zobrist (position signature) ----
+   Piece-square keys are indexed by [piece][compact square]; compact squares
+   (0..63, sq2c) halve the table vs 0x88 (64 on-board squares only). On the
+   16-bit build the 7.5 KB table goes in a far segment (DGROUP has ~5 KB free;
+   the game history g_sigs is now 128 x 8 = 1 KB and fits near). Keys are
+   generated deterministically (fixed-seed xorshift, same sequence on gcc and
+   16-bit) so both builds compute identical signatures - determinism by
+    construction. */
+#if defined(__WATCOMC__) && !defined(__386__)
+static unsigned long long _far zpsq[15][64];
+static unsigned long long _far zside[2];
+static unsigned long long _far zcastle[16];
+static unsigned long long _far zep[65];
+#else
+static unsigned long long zpsq[15][64];
+static unsigned long long zside[2];
+static unsigned long long zcastle[16];
+static unsigned long long zep[65];
+#endif
+
+static unsigned long zseed = 0x9E3779B9UL;
+
+static unsigned short znext16(void) {
+    zseed ^= zseed << 13;
+    zseed ^= zseed >> 17;
+    zseed ^= zseed << 5;
+    return (unsigned short)(zseed >> 16);
+}
+
+static unsigned long long zkey(void) {
+    return ((unsigned long long)znext16() << 48) |
+           ((unsigned long long)znext16() << 32) |
+           ((unsigned long long)znext16() << 16) |
+           (unsigned long long)znext16();
+}
+
+/* one-time table build (dedicated init, run at main start) */
+void zob_init(void) {
+    int pc, sq, i;
+    for (pc = 1; pc < 15; pc++)
+        for (sq = 0; sq < 64; sq++)
+            zpsq[pc][sq] = zkey();
+    zside[0] = zkey(); zside[1] = zkey();
+    for (i = 0; i < 16; i++) zcastle[i] = zkey();
+    for (i = 0; i < 65; i++) zep[i] = zkey();
+}
+
+/* ep-square key index: -1 (no ep) -> 64, else compact square */
+#define ZEPI(ep) ((ep) < 0 ? 64 : (int)sq2c(ep))
+
+/* XOR the move's signature delta into p->sig. Called from BOTH do_make (after
+   the board/castle/ep updates, before the side flip) and undo_move (after the
+   side flip back, before the restores), when board[to] still holds the moved
+   piece, board[from] is empty, p->castle/ep hold the NEW values and u the OLD.
+   XOR is its own inverse, so make and undo apply the same keys and round-trip. */
+static void zob_apply(Pos *p, unsigned int m, const Undo *u) {
+    int from = mfrom(m), to = mto(m), fl = mfl(m);
+    int side = p->side;                       /* old side to move (pre-flip) */
+    int post = p->board[to];                  /* piece at dest (mover or promo) */
+    int orig = ispromo(m) ? (side ? BP : WP) : post;
+    int rf, rt;
+
+    p->sig ^= zpsq[orig][sq2c(from)];
+    p->sig ^= zpsq[post][sq2c(to)];
+    if (fl == MF_EP) {
+        int esq = side ? to + 16 : to - 16;   /* captured pawn square */
+        p->sig ^= zpsq[side ? WP : BP][sq2c(esq)];
+    } else if (u->cap) {
+        p->sig ^= zpsq[u->cap][sq2c(to)];
+    }
+    if (fl == MF_CASTLE) {
+        if (to == 0x06)      { rf = 0x07; rt = 0x05; }
+        else if (to == 0x02) { rf = 0x00; rt = 0x03; }
+        else if (to == 0x76) { rf = 0x77; rt = 0x75; }
+        else                 { rf = 0x70; rt = 0x73; }
+        p->sig ^= zpsq[side ? BR : WR][sq2c(rf)];
+        p->sig ^= zpsq[side ? BR : WR][sq2c(rt)];
+    }
+    p->sig ^= zcastle[u->castle];
+    p->sig ^= zcastle[p->castle];
+    p->sig ^= zep[ZEPI(u->ep)];
+    p->sig ^= zep[ZEPI(p->ep)];
+    p->sig ^= zside[side];
+    p->sig ^= zside[side ^ 1];
+}
+
+/* compute the signature from scratch (used at parse_fen) */
+static void zob_compute(Pos *p) {
+    unsigned long long h = 0;
+    int i;
+    for (i = 0; i < 128; i++)
+        if (p->board[i]) h ^= zpsq[p->board[i]][sq2c(i)];
+    h ^= zside[p->side];
+    h ^= zcastle[p->castle & 0xF];
+    h ^= zep[ZEPI(p->ep)];
+    p->sig = h;
+}
+
 #if defined(PROFILE) || defined(VCLOCK)
 long c_make = 0;                 /* do_make entries */
 long c_undo = 0;                 /* undo_move entries */
@@ -68,6 +166,8 @@ void do_make(Pos *p, unsigned int m, Undo *u) {
 
     if (TY(piece) == 6) p->ks[p->side] = to;
 
+    zob_apply(p, m, u);          /* sig: old -> new (board/castle/ep already set) */
+
     p->side ^= 1;
 
     if (nnue_active) nnue_make(p, m, u);
@@ -81,6 +181,12 @@ void undo_move(Pos *p, unsigned int m, Undo *u) {
     PCOUNT(c_undo);
 
     p->side ^= 1;
+
+    /* sig: new -> old. Must run before the board/castle/ep restores, while
+       board[to] holds the moved piece, board[from] is empty, p->castle/ep are
+       still the NEW values and u the OLD - the same state zob_apply saw in
+       do_make (after its updates, before its side flip). */
+    zob_apply(p, m, u);
 
     if (ispromo(m)) piece = (p->side == 0) ? WP : BP;
     p->board[from] = piece;
@@ -107,6 +213,18 @@ void undo_move(Pos *p, unsigned int m, Undo *u) {
 /* ------------------------------------------------------------------ */
 /* attacks                                                            */
 /* ------------------------------------------------------------------ */
+
+/* is the king at ks[s] aligned with sq on a rank/file/diagonal? Used by the
+   search's legality check: a NON-king move from a square NOT on the mover
+   king's rank/file/diagonal can never open an attack on that king, so the
+   is_attacked legality test can be skipped for such moves. */
+int sq_on_king_line(Pos *p, int sq, int s) {
+    int k = p->ks[s];
+    int kr = k >> 4, kf = k & 7, sr = sq >> 4, sf = sq & 7;
+    if (kr == sr) return 1;                          /* same rank */
+    if (kf == sf) return 1;                          /* same file */
+    return (kr + kf == sr + sf) || (kr - kf == sr - sf);  /* diagonals */
+}
 
 int is_attacked(Pos *p, int sq, int by) {
     int i, to, d;
@@ -159,14 +277,19 @@ int is_attacked(Pos *p, int sq, int by) {
 /* move generation (pseudo-legal)                                     */
 /* ------------------------------------------------------------------ */
 
-/* captures (incl. en passant) + all promotion moves; searched first. */
+/* captures (incl. en passant) + all promotion moves; searched first. Sweeps
+   only the 64 on-board 0x88 squares (file 0..7, rank 0..7): the other 64
+   entries of board[128] are always EMPTY (off-board), so skipping them halves
+   the from-sweep. The on-board squares are visited in ascending order, so the
+   move order matches a full 0..127 sweep -> node counts unchanged. After file
+   f=7 the next on-board square is the next rank's file 0, i.e. from+9. */
 int gen_caps(Pos *p, unsigned int *list) {
     int n = 0, from, to, pc, pt, us = p->side, them = us ^ 1;
     int i, d, fwd, r;
 
     PCOUNT(c_gen_caps);
 
-    for (from = 0; from < 128; from++) {
+    for (from = 0; from < 128; from += ((from & 7) == 7) ? 9 : 1) {
         pc = p->board[from];
         if (!pc) continue;
         if (CO(pc) != (us ? 8 : 0)) continue;
@@ -241,14 +364,18 @@ int gen_caps(Pos *p, unsigned int *list) {
     return n;
 }
 
-/* quiet non-capture moves + castling; generated only after caps/killers fail. */
+/* quiet non-capture moves + castling; generated only after caps/killers fail.
+   Sweeps only the 64 on-board 0x88 squares (see gen_caps): the off-board
+   entries of board[128] are always EMPTY, and the on-board squares are visited
+   in ascending order, so the move order matches a full 0..127 sweep -> node
+   counts unchanged. */
 int gen_quiets(Pos *p, unsigned int *list) {
     int n = 0, from, to, to2, pc, pt, us = p->side;
     int i, d, fwd, r;
 
     PCOUNT(c_gen_quiets);
 
-    for (from = 0; from < 128; from++) {
+    for (from = 0; from < 128; from += ((from & 7) == 7) ? 9 : 1) {
         pc = p->board[from];
         if (!pc) continue;
         if (CO(pc) != (us ? 8 : 0)) continue;
@@ -351,12 +478,24 @@ int gen_moves(Pos *p, unsigned int *list) {
 
 #define PROMO_BONUS 16000   /* promotions sort ahead of every capture; int16-safe */
 
-/* MVV-LVA: victim material * 16 - attacker type. Promotions get a bonus. */
+/* MVV-LVA: victim material * 16 - attacker type. Promotions get a bonus.
+   The score depends ONLY on the (victim type, attacker type) pair, so a
+   tiny 8x8 table (128 B) precomputes it once instead of a per-move score
+   buffer or the mval*16 arithmetic on every selection pass. */
+static int mvv_tab[8][8];
+
+static void mvv_build(void) {
+    int v, a;
+    for (v = 0; v < 8; v++)
+        for (a = 0; a < 8; a++)
+            mvv_tab[v][a] = mval[v] * 16 - a;
+}
+
 static int mvv_lva(Pos *p, unsigned int m) {
     int victim = 0, s;
     if (mfl(m) == MF_EP) victim = 1;                       /* captured pawn */
     else if (p->board[mto(m)]) victim = TY(p->board[mto(m)]);
-    s = mval[victim] * 16 - TY(p->board[mfrom(m)]);
+    s = mvv_tab[victim][TY(p->board[mfrom(m)])];
     if (ispromo(m)) s += PROMO_BONUS;
     return s;
 }
@@ -415,7 +554,7 @@ void mgen_init(Pos *p, MGen *g, int ply, int k0, int k1, unsigned int ttm) {
     g->list = movebuf[ply];
     g->n = 0;
     g->idx = 0;
-    g->stage = MG_TT;
+    g->stage = ttm ? MG_TT : MG_CAPS;   /* skip the TT stage when no ttm */
     g->ttm = ttm;
     g->k0 = k0;
     g->k1 = k1;
@@ -428,7 +567,7 @@ void mgen_init_q(Pos *p, MGen *g, int ply) {
     g->list = movebuf[ply];
     g->n = 0;
     g->idx = 0;
-    g->stage = MG_TT;
+    g->stage = MG_CAPS;
     g->ttm = 0;
     g->k0 = g->k1 = 0;
     g->caps_only = 1;
@@ -544,8 +683,9 @@ long perft(Pos *p, int depth) {
 /* evaluation (NNUE when a net is loaded, else material)              */
 /* ------------------------------------------------------------------ */
 
-int evaluate(Pos *p) {
-    int score = 0, sq;
+Score evaluate(Pos *p) {
+    Score score = 0;
+    int sq;
     if (nnue_enabled && nnue_active) return nnue_eval(p);
     for (sq = 0; sq < 128; sq++) {
         int pc = p->board[sq];
@@ -560,17 +700,12 @@ int evaluate(Pos *p) {
 /* position signature (for repetition)                                */
 /* ------------------------------------------------------------------ */
 
-unsigned long pos_sig(Pos *p) {
-    unsigned long h = 0x811C9DC5UL;
-    int i;
+/* O(1): the signature is maintained incrementally in do_make/undo_move and
+   computed from scratch only at parse_fen (zob_compute). The from-scratch
+   FNV-1a over 128 squares is gone (was 9,678 c286 per node). */
+Sig pos_sig(Pos *p) {
     PCOUNT(c_possig);
-    for (i = 0; i < 128; i++)
-        if (p->board[i])
-            h = (h * 16777619UL) ^ (unsigned long)((i << 4) | p->board[i]);
-    h = (h * 16777619UL) ^ (unsigned long)p->side;
-    h = (h * 16777619UL) ^ (unsigned long)(p->castle & 0xF);
-    h = (h * 16777619UL) ^ (unsigned long)(p->ep + 1);
-    return h;
+    return p->sig;
 }
 
 /* ------------------------------------------------------------------ */
@@ -633,6 +768,8 @@ void parse_fen(Pos *p, const char *s) {
         if (p->board[i] == WK) p->ks[0] = i;
         else if (p->board[i] == BK) p->ks[1] = i;
     }
+
+    zob_compute(p);   /* incremental signature must start from this position */
 }
 
 /* ------------------------------------------------------------------ */
@@ -664,6 +801,9 @@ int main(int argc, char **argv) {
     long nodes;
     clock_t t0, t1;
     double secs;
+
+    mvv_build();   /* one-time MVV-LVA table (dedicated init) */
+    zob_init();    /* one-time Zobrist key tables (dedicated init) */
 
     /* NNUE net: `chess --nnue file ...` overrides the default net. The default is
        the EMBEDDED net on the gcc build (OpenBench embeds the trained net via

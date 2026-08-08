@@ -6,12 +6,13 @@ static Pos gpos;
 static int force_mode = 1, game_over = 0;
 int post_on = 0;
 int g_half, g_full;              /* halfmove clock, fullmove number */
-unsigned long g_sigs[MAX_G_SIGS];   /* position signatures for repetition */
+/* game-history position signatures. 128 x 8 bytes = 1 KB fits DGROUP (was 1024
+   x 8 = 8 KB far); cleared on every zeroing move (see apply_move). No takeback
+   (remove/undo) support, so this is the only move-history structure. */
+Sig g_sigs[MAX_G_SIGS];
 int g_sigs_n;
 static int xb_st = 0, xb_time_cs = 0;
 static int xb_level_mps = 0, xb_level_inc = 0;   /* "level mps base inc" control */
-static struct { unsigned int m; Undo u; int half, full, sn; } gstack[1024];
-static int gstack_n;
 
 static FILE *fdbg;                      /* protocol debug log (chess_debug.txt) */
 
@@ -104,16 +105,16 @@ static unsigned int parse_castle(Pos *p, const char *s) {
 
 static int draw_claim(Pos *p) {
     int i, occ = 0, minors = 0;
-    unsigned long s;
+    Sig s = p->sig;
     if (g_half >= MAX_HALF) { dbgf("draw_claim: halfmove g_half=%d\n", g_half); return 1; }
-    s = pos_sig(p);
     {
         int c = 0;
         for (i = 0; i < g_sigs_n; i++)
             if (g_sigs[i] == s) {
                 if (++c >= 3) {
-                    dbgf("draw_claim: repetition sig=%08lX count=%d g_sigs_n=%d\n",
-                         s, c, g_sigs_n);
+                    /* %llX is not portable to the 16-bit libc; print hi/lo */
+                    dbgf("draw_claim: repetition sig=%08lX%08lX count=%d g_sigs_n=%d\n",
+                         (unsigned long)(s >> 32), (unsigned long)s, c, g_sigs_n);
                     return 1;
                 }
             }
@@ -138,25 +139,16 @@ static int draw_claim(Pos *p) {
 static void apply_move(Pos *p, unsigned int m) {
     Undo u;
     int pc = p->board[mfrom(m)];
-    int half = g_half, full = g_full, sn = g_sigs_n;
     do_make(p, m, &u);
-    if (gstack_n < 1024) {
-        gstack[gstack_n].m = m; gstack[gstack_n].u = u;
-        gstack[gstack_n].half = half; gstack[gstack_n].full = full;
-        gstack[gstack_n].sn = sn; gstack_n++;
+    if (TY(pc) == 1 || u.cap) {
+        /* zeroing move (pawn move or capture): irreversible, so no game-history
+           position before it can repeat after it - drop the history. */
+        g_half = 0; g_sigs_n = 0;
+    } else {
+        g_half++;
     }
-    if (TY(pc) == 1 || u.cap) g_half = 0; else g_half++;
     if (CO(pc) == 8) g_full++;
     if (g_sigs_n < MAX_G_SIGS) g_sigs[g_sigs_n++] = pos_sig(p);
-}
-
-static void unapply(Pos *p) {
-    if (gstack_n <= 0) return;
-    gstack_n--;
-    undo_move(p, gstack[gstack_n].m, &gstack[gstack_n].u);
-    g_half = gstack[gstack_n].half;
-    g_full = gstack[gstack_n].full;
-    g_sigs_n = gstack[gstack_n].sn;
 }
 
 static void xb_go(void) {
@@ -233,7 +225,7 @@ static void xb_go(void) {
 
 static void xb_reset(void) {
     parse_fen(&gpos, start_fen);
-    g_sigs_n = 0; gstack_n = 0;
+    g_sigs_n = 0;
     g_sigs[g_sigs_n++] = pos_sig(&gpos);
     force_mode = 1; game_over = 0;
     stop_now = 0; deadline = 0;          /* keep xb_time_cs/xb_st/post_on: WinBoard
@@ -292,14 +284,14 @@ int xboard_main(void) {
             xb_outf("feature option=\"CPU_model -combo *80286 /// 8088 /// 8086\"");
             xb_outf("feature option=\"CPU_KHz -spin 25000 1000 50000\"");
             xb_outf("feature option=\"VirtualTime -check 0\"");
-            xb_outf("feature myname=\"Chess86\" setboard=1 usermove=1 ping=1 playother=1 done=1");
+            xb_outf("feature myname=\"Short\" setboard=1 usermove=1 ping=1 playother=1 done=1");
         } else if (strncmp(p, "new", 3) == 0) {
             xb_reset();
         } else if (strncmp(p, "setboard", 8) == 0) {
             /* like `new` but with a given FEN: full state reset so a setboard
                followed directly by `go` works even after a finished game. */
             parse_fen(&gpos, skipsp(p + 8));
-            g_sigs_n = 0; gstack_n = 0;
+            g_sigs_n = 0;
             g_sigs[g_sigs_n++] = pos_sig(&gpos);
             force_mode = 1; game_over = 0;
             stop_now = 0; deadline = 0;
@@ -374,12 +366,11 @@ int xboard_main(void) {
                 name[nlen] = 0;
                 xb_option(name, skipsp(val + 6));
             }
-        } else if (strncmp(p, "remove", 6) == 0 || strncmp(p, "undo", 4) == 0) {
-            unapply(&gpos);
         } else if (p[0] == '?') {
             stop_now = 1;
         } else {
-            /* hard/easy/random/name/accepted/rejected/variant/analyze/exit/bk/edit/hint: ignored */
+            /* remove/undo/hard/easy/random/name/accepted/rejected/variant/analyze/
+               exit/bk/edit/hint: ignored (no takeback support - see MEMORY.md) */
         }
     }
     dbgf("stdin closed, exiting\n");
