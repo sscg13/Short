@@ -52,7 +52,7 @@ static Score qsearch(Pos *p, Score alpha, Score beta, int ply, int half, int qd)
 
 static Score alphabeta(Pos *p, int depth, Score alpha, Score beta, int ply, int half) {
     MGen mg;
-    unsigned int m;
+    unsigned int m, ttm = 0, bestmove = 0;
     Score best = -INF;
     int legal = 0, in_check = 0;
 
@@ -84,13 +84,26 @@ static Score alphabeta(Pos *p, int depth, Score alpha, Score beta, int ply, int 
     /* 50-move rule: 100 half-moves without a pawn move or capture is a draw */
     if (half >= MAX_HALF) { rep_n--; return 0; }
 
+    /* transposition table (A/B: move-ordering only). The stored move is tried
+       first (MG_TT stage); the stored score/bound is NOT used for cutoffs or
+       window tightening, isolating the TT-move-ordering effect from the score
+       reuse. */
+    {
+        unsigned int tmv = 0;
+        Score tsc = 0;
+        int tfl = 0, tdep = 0;
+        if (tt_probe(p, ply, &tmv, &tsc, &tfl, &tdep)) {
+            ttm = tmv;
+        }
+    }
+
     /* in-check status of the side to move: a non-king, non-EP move from a
        square NOT on the king's rank/file/diagonal is then always legal (it can
        neither leave a check unresolved nor open a new line), so its legality
        is_attacked test can be skipped. */
     in_check = is_attacked(p, p->ks[p->side], p->side ^ 1);
 
-    mgen_init(p, &mg, ply, killers[ply][0], killers[ply][1], 0);   /* ttm empty for now */
+    mgen_init(p, &mg, ply, killers[ply][0], killers[ply][1], ttm);
 
     while ((m = next_move(p, &mg)) != 0) {
         Undo u;
@@ -116,6 +129,7 @@ static Score alphabeta(Pos *p, int depth, Score alpha, Score beta, int ply, int 
             else score = -alphabeta(p, depth - 1, -beta, -alpha, ply + 1, child_half);
             if (score > best) {
                 best = score;
+                bestmove = m;
                 if (ply < MAXPLY) {                  /* extend this node's PV with the child's */
                     int pl = pv_len[ply + 1], k;
                     pv[ply][0] = m;
@@ -139,9 +153,16 @@ static Score alphabeta(Pos *p, int depth, Score alpha, Score beta, int ply, int 
     }
 
     if (rep_n > 0) rep_n--;                  /* pop this node */
-    if (!legal)
+    if (!legal) {
         /* mate scores: -(MATE - ply) so the root prefers the SHORTEST mate */
-        return is_attacked(p, p->ks[p->side], p->side ^ 1) ? -(MATE - ply) : 0;
+        Score r = is_attacked(p, p->ks[p->side], p->side ^ 1) ? (Score)-(MATE - ply) : 0;
+        if (!stop_now) tt_store(p, 0, depth, r, TT_EXACT, ply);
+        return r;
+    }
+    if (!stop_now) {
+        int flag = (best <= alpha) ? TT_UPPER : (best >= beta) ? TT_LOWER : TT_EXACT;
+        tt_store(p, bestmove, depth, best, flag, ply);
+    }
     return best;
 }
 
@@ -411,6 +432,7 @@ int bench(int depth) {
         parse_fen(&p, bench_fens[i]);
         g_sigs_n = 0;                            /* no game-history repetitions */
         memset(killers, 0, sizeof killers);
+        tt_clear();                              /* no cross-position TT reuse */
         root_n = gen_moves(&p, root_m);
         for (k = 0; k < root_n; k++) root_score[k] = 0;
         if (nnue_ensure_default()) { nnue_reset(&p); nnue_active = 1; }
@@ -478,7 +500,7 @@ int bench(int depth) {
 /* profile: same 8-position suite as bench(), but resets the call/     */
 /* feature counters first and reports a cost breakdown after. Depth    */
 /* defaults to 4; identical search semantics to bench() so node counts */
-/* stay the same (1,582,816 at depth 4). Builds need -DPROFILE.        */
+/* stay the same (911,306 at depth 4 with the TT). Builds need -DPROFILE. */
 /* ------------------------------------------------------------------ */
 int profile(int depth) {
     int i, d, k;
@@ -496,6 +518,8 @@ int profile(int depth) {
     c_nn_make = c_nn_undo = c_nn_eval = c_refresh = c_flip = 0;
     c_isattacked = 0;
     c_possig = 0;
+    c_tt_probe = 0;
+    c_tt_store = 0;
 
     b0 = clock();
     for (i = 0; i < BENCH_N; i++) {
@@ -505,10 +529,12 @@ int profile(int depth) {
         long s_mk = c_make, s_uc = c_undo, s_gm = c_gen_moves, s_gc = c_gen_caps, s_gq = c_gen_quiets;
         long s_nn = c_nn_make, s_nu = c_nn_undo, s_ev = c_nn_eval, s_rf = c_refresh;
         long s_at = c_isattacked, s_ps = c_possig;
+        long s_tp = c_tt_probe, s_ts = c_tt_store;
 
         parse_fen(&p, bench_fens[i]);
         g_sigs_n = 0;                            /* no game-history repetitions */
         memset(killers, 0, sizeof killers);
+        tt_clear();                              /* no cross-position TT reuse */
         root_n = gen_moves(&p, root_m);
         for (k = 0; k < root_n; k++) root_score[k] = 0;
         if (nnue_ensure_default()) { nnue_reset(&p); nnue_active = 1; }
@@ -541,11 +567,12 @@ int profile(int depth) {
         nnue_active = 0;
         total_nodes += pos_nodes;
         printf("pos %d: nodes=%ld an=%ld qn=%ld nx=%ld mk=%ld uc=%ld gm=%ld gc=%ld gq=%ld "
-               "nm=%ld nu=%ld ev=%ld rf=%ld at=%ld ps=%ld\n",
+               "nm=%ld nu=%ld ev=%ld rf=%ld at=%ld ps=%ld tp=%ld ts=%ld\n",
                i + 1, pos_nodes, c_anodes - s_an, c_qnodes - s_qn, c_nextmove - s_nm,
                c_make - s_mk, c_undo - s_uc, c_gen_moves - s_gm, c_gen_caps - s_gc,
                c_gen_quiets - s_gq, c_nn_make - s_nn, c_nn_undo - s_nu, c_nn_eval - s_ev,
-               c_refresh - s_rf, c_isattacked - s_at, c_possig - s_ps);
+               c_refresh - s_rf, c_isattacked - s_at, c_possig - s_ps,
+               c_tt_probe - s_tp, c_tt_store - s_ts);
     }
     b1 = clock();
     bsecs = (double)(b1 - b0) / (double)CLOCKS_PER_SEC;
@@ -560,6 +587,7 @@ int profile(int depth) {
     printf("profile nn_make=%ld nn_undo=%ld nn_eval=%ld refresh_rows=%ld flips=%ld\n",
            c_nn_make, c_nn_undo, c_nn_eval, c_refresh, c_flip);
     printf("profile is_attacked=%ld pos_sig=%ld\n", c_isattacked, c_possig);
+    printf("profile tt_probe=%ld tt_store=%ld\n", c_tt_probe, c_tt_store);
     return 0;
 }
 #endif /* PROFILE */
@@ -579,6 +607,10 @@ int sbench(void) {
     int i, iters, p;
     clock_t t0, t1;
     long att = 0, caps = 0, quiets = 0, drain = 0, make10k = 0, sig = 0;
+    long ttpr = 0, ttst = 0;
+    unsigned int mv;
+    Score tsc;
+    int tfl, tdp;
 
     nnue_active = 0;                                /* board-only make/undo */
     for (p = 0; p < BENCH_N; p++) {
@@ -627,11 +659,26 @@ int sbench(void) {
         for (i = 0; i < iters; i++) pos_sig(&pos);
         t1 = clock();
         sig += (long)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
+
+        /* TT probe (hit path) + store, averaged over the 8 positions */
+        iters = 2000;
+        tt_clear();
+        tt_store(&pos, list[0], 5, 100, TT_EXACT, 0);
+        t0 = clock();
+        for (i = 0; i < iters; i++) tt_probe(&pos, 0, &mv, &tsc, &tfl, &tdp);
+        t1 = clock();
+        ttpr += (long)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
+        t0 = clock();
+        for (i = 0; i < iters; i++) tt_store(&pos, list[0], 5, 100, TT_EXACT, 0);
+        t1 = clock();
+        ttst += (long)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
     }
 
-    printf("sbench att=%ld caps=%ld quiets=%ld drain=%ld make10k=%ld sig=%ld\n",
+    printf("sbench att=%ld caps=%ld quiets=%ld drain=%ld make10k=%ld sig=%ld "
+           "ttprobe=%ld ttstore=%ld\n",
            att * 1000 / (1500 * 2 * BENCH_N), caps * 1000 / (300 * BENCH_N),
            quiets * 1000 / (300 * BENCH_N), drain * 1000 / (300 * BENCH_N),
-           make10k * 1000 / (2000 * BENCH_N), sig * 1000 / (400 * BENCH_N));
+           make10k * 1000 / (2000 * BENCH_N), sig * 1000 / (400 * BENCH_N),
+           ttpr * 1000 / (2000 * BENCH_N), ttst * 1000 / (2000 * BENCH_N));
     return 0;
 }

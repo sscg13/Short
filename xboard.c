@@ -227,6 +227,7 @@ static void xb_reset(void) {
     parse_fen(&gpos, start_fen);
     g_sigs_n = 0;
     g_sigs[g_sigs_n++] = pos_sig(&gpos);
+    tt_clear();                              /* fresh game: empty the TT */
     force_mode = 1; game_over = 0;
     stop_now = 0; deadline = 0;          /* keep xb_time_cs/xb_st/post_on: WinBoard
                                             re-sends them at each new game anyway */
@@ -293,6 +294,7 @@ int xboard_main(void) {
             parse_fen(&gpos, skipsp(p + 8));
             g_sigs_n = 0;
             g_sigs[g_sigs_n++] = pos_sig(&gpos);
+            tt_clear();                              /* fresh position: empty the TT */
             force_mode = 1; game_over = 0;
             stop_now = 0; deadline = 0;
             vclock_newgame();

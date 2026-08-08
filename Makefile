@@ -27,7 +27,7 @@ EVALFILE ?= chess.net
 # model NPS. Same for the embedded net.
 CFLAGS  ?= -O2 -Wall -Wextra -Werror
 CFLAGS  += -DVCLOCK -DNN_EMBED_FILE=$(EVALFILE)
-SRCS    := chess.c search.c xboard.c nnue.c vclock.c
+SRCS    := chess.c search.c xboard.c nnue.c vclock.c tt.c
 HDRS    := engine.h
 OBJS    := $(SRCS:.c=.o)
 
@@ -44,7 +44,7 @@ all: $(TARGET)
 
 # Build a profiling binary (`chess profile [depth]`) with the call counters on.
 # Uses its own *_prof.o objects so the normal build's objects stay flag-free.
-PROF_OBJS := chess_prof.o search_prof.o xboard_prof.o nnue_prof.o vclock_prof.o
+PROF_OBJS := chess_prof.o search_prof.o xboard_prof.o nnue_prof.o vclock_prof.o tt_prof.o
 profile: chess_prof.exe
 
 chess_prof.exe: $(PROF_OBJS)
@@ -59,6 +59,8 @@ xboard_prof.o: xboard.c $(HDRS)
 nnue_prof.o: nnue.c $(HDRS)
 	$(CC) $(CFLAGS) -DPROFILE -c -o $@ $<
 vclock_prof.o: vclock.c $(HDRS)
+	$(CC) $(CFLAGS) -DPROFILE -c -o $@ $<
+tt_prof.o: tt.c $(HDRS)
 	$(CC) $(CFLAGS) -DPROFILE -c -o $@ $<
 
 $(TARGET): $(OBJS)

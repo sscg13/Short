@@ -61,6 +61,14 @@
    c286 per call). The cost moved INTO make/undo (a few u64 XORs each, absorbed
    in `mk`), so `ps` drops to ~0 and `rn` re-fits to the new profile total.
 
+   TT re-fit (2026-08, branch `tt`): a 64 KB far transposition table (tt.c)
+   shrinks the tree (bench totals: 8088 NNUE profile-1 1.809e9 cyc, 286 0.592e9)
+   and adds probe/store calls (tp/ts). The full weight table was RE-MEASURED on
+   the emulators (sbench, uninstrumented build): mk was ~4x stale and ps ~2.5x
+   stale (the incremental-Zobrist cost in make/undo was never re-fit into them),
+   so rn/rm re-fit to the shipped bench-1 totals as well. nm/rf/ev still carry
+   the older nbench numbers; re-verify before trusting deep-search extrapolation.
+
       per-call cycles       8088      80286
         is_attacked          6512       2262
         pos_sig               ~100        ~40     (field read, was 33488/9678 FNV)
@@ -103,13 +111,19 @@ static const long cpn_tab[3][2] = {
 #ifdef VCLOCK
 static long long vbudget_cyc;   /* weighted cycle budget for the current move */
 
-typedef struct { long att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm; } VW;
+typedef struct { long att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm, tp, ts; } VW;
 static const VW vw_tab[3] = {
-    /*   att    ps     gc     gq      gm   mk   nm   rf    ev     rn     rm */
-    {  2262,    40, 16476, 18672, 48192, 525, 1000, 2400,  6588,  8561,  6400 }, /* 80286 */
-    {  6512,   100, 49188, 55929, 141970, 1560, 3000, 6800, 19328, 13549, 19120 }, /* 8088 */
-    {  5000,    80, 38000, 45000, 110000, 1100, 2000, 4000, 14000, 30000, 14000 }, /* 8086 est */
+    /*   att    ps     gc     gq      gm    mk    nm   rf    ev     rn      rm      tp    ts */
+    {  2316,   102, 16890, 18258, 46818, 1956, 1000, 2400,  6588,   7218,   7901,   594,  492 }, /* 80286 */
+    {  6368,   272, 46880, 54912, 137680, 6144, 3000, 6800, 19328,  27921,  23670,  1968, 1808 }, /* 8088 */
+    {  4776,   204, 35160, 41184, 103260, 4608, 2250, 5100, 14496,  20941,  17753,  1476, 1356 }, /* 8086 est */
 };
+/* Re-fit (2026-08, TT): att/gc/gq/gm/mk/ps/tp/ts are fresh sbench measurements
+   on the uninstrumented 16-bit build (8088 @16 / 286 @6 MHz). mk and ps were
+   ~4x / ~2.5x STALE (the incremental-Zobrist cost folded into make/undo was
+   never re-fit). nm/rf/ev kept from the nbench measurements (re-verify: the
+   rn/rm per-CPU ratio is not fully consistent). rn/rm re-fit to the SHIPPED
+   (no-counter) bench-1 totals, so the model predicts the real engine's NPS. */
 
 static long long vclock_cyc(void) {
     const VW *w = &vw_tab[vcpu_model];
@@ -123,6 +137,8 @@ static long long vclock_cyc(void) {
     r += (long long)w->nm  * (c_nn_make + c_nn_undo);
     r += (long long)w->rf  * c_refresh;
     r += (long long)w->ev  * c_nn_eval;
+    r += (long long)w->tp  * c_tt_probe;
+    r += (long long)w->ts  * c_tt_store;
     return r;
 }
 
@@ -171,6 +187,8 @@ void vclock_reset(void) {
     c_nn_make = c_nn_undo = c_nn_eval = c_refresh = c_flip = 0;
     c_isattacked = 0;
     c_possig = 0;
+    c_tt_probe = 0;
+    c_tt_store = 0;
 #endif
 }
 

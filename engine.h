@@ -127,6 +127,8 @@ extern long c_refresh;       /* feature-row deltas applied (nn_delta_apply) */
 extern long c_flip;          /* mirror-flip recompute paths (nnue_make) */
 extern long c_isattacked;    /* is_attacked entry */
 extern long c_possig;        /* pos_sig entry */
+extern long c_tt_probe;      /* transposition-table probe entry */
+extern long c_tt_store;      /* transposition-table store entry */
 #ifdef PROFILE
 int profile(int depth);
 #endif
@@ -186,6 +188,15 @@ int nnue_ensure_default(void);
 void nnue_tables_init(void);   /* one-time table builds (rowtab/fwd/castle) after net load */
 int nnue_selftest(const char *fen);
 int nnue_bench(void);
+
+/* ---- transposition table (tt.c) ----
+   One far 64 KB table on the 16-bit target (4096 x 16-byte entries), plain
+   array on gcc. Probe/store keyed on the full Pos.sig; see tt.c. */
+enum { TT_EXACT = 0, TT_LOWER = 1, TT_UPPER = 2 };  /* stored score bound */
+void tt_clear(void);                                    /* empty the table */
+int  tt_probe(Pos *p, int ply, unsigned int *move_out, Score *score_out,
+              int *flag_out, int *depth_out);           /* 1 = hit */
+void tt_store(Pos *p, unsigned int move, int depth, Score score, int flag, int ply);
 
 /* ---- virtual time clock (vclock.c) ----
    VirtualTime=1 makes the engine ignore the GUI's time commands and pace
