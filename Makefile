@@ -18,7 +18,15 @@ EVALFILE ?= chess.net
 # -DVCLOCK compiles the weighted cycle counters used by the virtual clock
 # (vclock.c). The 16-bit build does NOT define it, so the counters stay out of
 # the shipped engine; the 16-bit build keeps the scalar vclock model.
-CFLAGS  ?= -O2 -Wall -Wextra -Werror -DVCLOCK -DNN_EMBED_FILE=$(EVALFILE)
+#
+# `?=` (not `=`) lets the caller override the optimization/warning set, but the
+# two flags below are appended with `+=` so they can NEVER be dropped: OpenBench
+# and CI harnesses commonly export CFLAGS themselves, which would otherwise
+# silently disable VCLOCK and make `bench` print the raw HOST nps (timing-
+# dependent, different on every worker) instead of the deterministic weighted-
+# model NPS. Same for the embedded net.
+CFLAGS  ?= -O2 -Wall -Wextra -Werror
+CFLAGS  += -DVCLOCK -DNN_EMBED_FILE=$(EVALFILE)
 SRCS    := chess.c search.c xboard.c nnue.c vclock.c
 HDRS    := engine.h
 OBJS    := $(SRCS:.c=.o)
