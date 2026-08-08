@@ -3,16 +3,16 @@
 #include "engine.h"
 
 static Pos gpos;
-static int force_mode = 1, game_over = 0;
-int post_on = 0;
-int g_half, g_full;              /* halfmove clock, fullmove number */
+static i16 force_mode = 1, game_over = 0;
+i16 post_on = 0;
+i16 g_half, g_full;              /* halfmove clock, fullmove number */
 /* game-history position signatures. 128 x 8 bytes = 1 KB fits DGROUP (was 1024
    x 8 = 8 KB far); cleared on every zeroing move (see apply_move). No takeback
    (remove/undo) support, so this is the only move-history structure. */
 Sig g_sigs[MAX_G_SIGS];
-int g_sigs_n;
-static int xb_st = 0, xb_time_cs = 0;
-static int xb_level_mps = 0, xb_level_inc = 0;   /* "level mps base inc" control */
+i16 g_sigs_n;
+static i16 xb_st = 0, xb_time_cs = 0;
+static i16 xb_level_mps = 0, xb_level_inc = 0;   /* "level mps base inc" control */
 
 static FILE *fdbg;                      /* protocol debug log (chess_debug.txt) */
 
@@ -44,9 +44,9 @@ void xb_outf(const char *fmt, ...) {
 static const char *start_fen =
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
-static int legal_move(Pos *p, unsigned int m) {
+static i16 legal_move(Pos *p, u16 m) {
     Undo u;
-    int us, ok;
+    i16 us, ok;
     do_make(p, m, &u);
     us = p->side ^ 1;
     ok = !is_attacked(p, p->ks[us], p->side);
@@ -54,9 +54,9 @@ static int legal_move(Pos *p, unsigned int m) {
     return ok;
 }
 
-static void move_to_coord(unsigned int m, char *buf) {
+static void move_to_coord(u16 m, char *buf) {
     static const char pn[] = " PNBRQK";
-    int f = mfrom(m), t = mto(m);
+    i16 f = mfrom(m), t = mto(m);
     buf[0] = 'a' + (f & 7);
     buf[1] = '1' + (f >> 4);
     buf[2] = 'a' + (t & 7);
@@ -65,14 +65,14 @@ static void move_to_coord(unsigned int m, char *buf) {
     else buf[4] = 0;
 }
 
-static unsigned int parse_coord(Pos *p, const char *s) {
-    unsigned int *list = movebuf[30];
-    int n = gen_moves(p, list);
-    int i, pr = 0;
+static u16 parse_coord(Pos *p, const char *s) {
+    u16 *list = movebuf[30];
+    i16 n = gen_moves(p, list);
+    i16 i, pr = 0;
     if (s[0] < 'a' || s[0] > 'h' || s[2] < 'a' || s[2] > 'h') return 0;
     {
-        int f = (s[1] - '1') * 16 + (s[0] - 'a');
-        int t = (s[3] - '1') * 16 + (s[2] - 'a');
+        i16 f = (s[1] - '1') * 16 + (s[0] - 'a');
+        i16 t = (s[3] - '1') * 16 + (s[2] - 'a');
         switch (s[4]) {
             case 'n': case 'N': pr = WN; break;
             case 'b': case 'B': pr = WB; break;
@@ -80,8 +80,8 @@ static unsigned int parse_coord(Pos *p, const char *s) {
             case 'q': case 'Q': pr = WQ; break;
         }
         for (i = 0; i < n; i++) {
-            if ((int)mfrom(list[i]) != f) continue;
-            if ((int)mto(list[i]) != t) continue;
+            if (mfrom(list[i]) != f) continue;
+            if (mto(list[i]) != t) continue;
             if (!legal_move(p, list[i])) continue;
             if (pr) { if (ispromo(list[i]) && mfl(list[i]) + 1 == TY(pr)) return list[i]; }
             else if (!ispromo(list[i])) return list[i];
@@ -90,25 +90,25 @@ static unsigned int parse_coord(Pos *p, const char *s) {
     return 0;
 }
 
-static unsigned int parse_castle(Pos *p, const char *s) {
-    unsigned int *list = movebuf[30];
-    int n = gen_moves(p, list), i, want = 0;
+static u16 parse_castle(Pos *p, const char *s) {
+    u16 *list = movebuf[30];
+    i16 n = gen_moves(p, list), i, want = 0;
     if ((s[0] == 'O' || s[0] == '0') && s[1] == '-' && (s[2] == 'O' || s[2] == '0')) {
         if (s[3] == '-' && (s[4] == 'O' || s[4] == '0')) want = 0x02;
         else want = 0x06;
     } else return 0;
     for (i = 0; i < n; i++)
-        if (mfl(list[i]) == MF_CASTLE && (int)(mto(list[i]) & 0x0F) == want)
+        if (mfl(list[i]) == MF_CASTLE && (mto(list[i]) & 0x0F) == want)
             return list[i];
     return 0;
 }
 
-static int draw_claim(Pos *p) {
-    int i, occ = 0, minors = 0;
+static i16 draw_claim(Pos *p) {
+    i16 i, occ = 0, minors = 0;
     Sig s = p->sig;
     if (g_half >= MAX_HALF) { dbgf("draw_claim: halfmove g_half=%d\n", g_half); return 1; }
     {
-        int c = 0;
+        i16 c = 0;
         for (i = 0; i < g_sigs_n; i++)
             if (g_sigs[i] == s) {
                 if (++c >= 3) {
@@ -120,8 +120,8 @@ static int draw_claim(Pos *p) {
             }
     }
     for (i = 0; i < 128; i++) {
-        int pc = p->board[i];
-        int ty;
+        i16 pc = p->board[i];
+        i16 ty;
         if (!pc) continue;
         ty = TY(pc);
         if (ty == 1) return 0;
@@ -136,9 +136,9 @@ static int draw_claim(Pos *p) {
     return 0;
 }
 
-static void apply_move(Pos *p, unsigned int m) {
+static void apply_move(Pos *p, u16 m) {
     Undo u;
-    int pc = p->board[mfrom(m)];
+    i16 pc = p->board[mfrom(m)];
     do_make(p, m, &u);
     if (TY(pc) == 1 || u.cap) {
         /* zeroing move (pawn move or capture): irreversible, so no game-history
@@ -152,10 +152,10 @@ static void apply_move(Pos *p, unsigned int m) {
 }
 
 static void xb_go(void) {
-    unsigned int *list = movebuf[28];
-    int n = gen_moves(&gpos, list);
-    int i, legal = 0;
-    unsigned int m = 0, first = 0;
+    u16 *list = movebuf[28];
+    i16 n = gen_moves(&gpos, list);
+    i16 i, legal = 0;
+    u16 m = 0, first = 0;
     char b[8];
     if (game_over) return;
     force_mode = 0;
@@ -180,23 +180,23 @@ static void xb_go(void) {
     if (vtime_mode) {
         /* virtual clock: ignore the GUI entirely; the budget is the 40/2h+
            20/1h control at CPU_model/CPU_KHz speed (see vclock.c) */
-        long bms = vclock_budget_ms();
+        i32 bms = vclock_budget_ms();
         vclock_reset();
         vclock_set_budget(bms);
         deadline = 0;
         dbgf("go(virtual): model=%d khz=%ld budget_ms=%ld\n",
-             vcpu_model, vcpu_khz, bms);
+             vcpu_model, (long)vcpu_khz, (long)bms);
     } else {
-        long budget = 3000;
-        long remaining_ms = (long)xb_time_cs * 10;
+        i32 budget = 3000;
+        i32 remaining_ms = (i32)xb_time_cs * 10;
         if (xb_st > 0) {
-            budget = (long)xb_st * 1000;         /* fixed seconds per move */
+            budget = (i32)xb_st * 1000;         /* fixed seconds per move */
         } else if (xb_level_mps > 0) {
             /* tournament control "level mps base inc": remaining/mps + increment */
             if (remaining_ms > 0)
-                budget = remaining_ms / xb_level_mps + (long)xb_level_inc * 1000;
+                budget = remaining_ms / xb_level_mps + (i32)xb_level_inc * 1000;
         } else if (xb_time_cs > 0) {
-            long cs = xb_time_cs / 40;           /* ~1/40 of remaining clock */
+            i32 cs = xb_time_cs / 40;           /* ~1/40 of remaining clock */
             if (cs < 50) cs = 50;
             budget = cs * 10;                    /* centiseconds -> ms */
         }
@@ -204,16 +204,16 @@ static void xb_go(void) {
         if (remaining_ms > TIME_MARGIN_MS + 100 && budget > remaining_ms - TIME_MARGIN_MS)
             budget = remaining_ms - TIME_MARGIN_MS;
         if (budget < 100) budget = 100;
-        deadline = (long)clock() + budget - TIME_MARGIN_MS;
+        deadline = (i32)clock() + budget - TIME_MARGIN_MS;
         dbgf("go: side=%d st=%d time_cs=%ld level=%d+%d budget=%ld deadline=%ld\n",
              gpos.side, xb_st, (long)xb_time_cs, xb_level_mps, xb_level_inc,
-             budget, deadline);
+             (long)budget, (long)deadline);
     }
     m = think(&gpos, 10);
     if (vtime_mode) {
-        long cn = vtotal_nodes;
-        long cms = vclock_charge();
-        dbgf("vclock nodes=%ld consumed=%ldms\n", cn, cms);
+        i32 cn = vtotal_nodes;
+        i32 cms = vclock_charge();
+        dbgf("vclock nodes=%ld consumed=%ldms\n", (long)cn, (long)cms);
     }
     deadline = 0;
     stop_now = 0;
@@ -239,7 +239,7 @@ static char *skipsp(char *s) { while (*s == ' ') s++; return s; }
 /* CECP `option name=value` / UCI-ish `setoption name X value Y` handler. */
 static void xb_option(const char *nm, const char *val) {
     char lo[40];
-    int i;
+    i16 i;
     for (i = 0; nm[i] && i < 39; i++) {
         char c = nm[i];
         lo[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
@@ -270,7 +270,7 @@ int xboard_main(void) {
     xb_reset();
     while (fgets(line, sizeof(line), stdin)) {
         char *p = line;
-        int i;
+        i16 i;
         for (i = 0; line[i] && line[i] != '\n' && line[i] != '\r'; i++);
         line[i] = 0;
         while (*p == ' ') p++;
@@ -306,7 +306,7 @@ int xboard_main(void) {
             xb_go();
         } else if (strncmp(p, "usermove", 8) == 0 || strncmp(p, "move ", 5) == 0) {
             char *mv = skipsp(p + (strncmp(p, "usermove", 8) == 0 ? 8 : 5));
-            unsigned int m = parse_coord(&gpos, mv);
+            u16 m = parse_coord(&gpos, mv);
             if (!m) m = parse_castle(&gpos, mv);
             if (!m) { xb_outf("Illegal move: %s", mv); }
             else {

@@ -2,16 +2,16 @@
 
 #include "engine.h"
 
-static const int kn[8] = { -33, -31, -18, -14, 14, 18, 31, 33 };
-static const int ki[8] = { -17, -16, -15, -1, 1, 15, 16, 17 };
-static const int rb[4] = { -16, 1, 16, -1 };
-static const int bb[4] = { -17, -15, 15, 17 };
-static const int qd[8] = { -17, -16, -15, -1, 1, 15, 16, 17 };
-static const int pw[4] = { WN, WB, WR, WQ };
-static const int pb[4] = { BN, BB, BR, BQ };
-static const int mval[8] = { 0, 100, 320, 330, 500, 900, 0 };
+static const i16 kn[8] = { -33, -31, -18, -14, 14, 18, 31, 33 };
+static const i16 ki[8] = { -17, -16, -15, -1, 1, 15, 16, 17 };
+static const i16 rb[4] = { -16, 1, 16, -1 };
+static const i16 bb[4] = { -17, -15, 15, 17 };
+static const i16 qd[8] = { -17, -16, -15, -1, 1, 15, 16, 17 };
+static const i16 pw[4] = { WN, WB, WR, WQ };
+static const i16 pb[4] = { BN, BB, BR, BQ };
+static const i16 mval[8] = { 0, 100, 320, 330, 500, 900, 0 };
 
-unsigned int movebuf[32][256];
+u16 movebuf[32][256];
 
 /* ---- incremental Zobrist (position signature) ----
    Piece-square keys are indexed by [piece][compact square]; compact squares
@@ -22,18 +22,18 @@ unsigned int movebuf[32][256];
    16-bit) so both builds compute identical signatures - determinism by
     construction. */
 #if defined(__WATCOMC__) && !defined(__386__)
-static unsigned long long _far zpsq[15][64];
-static unsigned long long _far zside[2];
-static unsigned long long _far zcastle[16];
-static unsigned long long _far zep[65];
+static u64 _far zpsq[15][64];
+static u64 _far zside[2];
+static u64 _far zcastle[16];
+static u64 _far zep[65];
 #else
-static unsigned long long zpsq[15][64];
-static unsigned long long zside[2];
-static unsigned long long zcastle[16];
-static unsigned long long zep[65];
+static u64 zpsq[15][64];
+static u64 zside[2];
+static u64 zcastle[16];
+static u64 zep[65];
 #endif
 
-static unsigned long long zseed = 0x9E3779B97F4A7C15ULL;
+static u64 zseed = 0x9E3779B97F4A7C15ULL;
 
 /* 64-bit xorshift (Marsaglia, period 2^64-1). The state is unsigned long long
    = 64 bits on EVERY build (16-bit Watcom, Windows and Linux gcc), so the
@@ -42,7 +42,7 @@ static unsigned long long zseed = 0x9E3779B97F4A7C15ULL;
    broke bench determinism there; it ALSO confined the "64-bit" keys to a
    32-bit subspace (GF(2) rank 32), so different positions collided and fed
    bogus moves into the transposition table. */
-static unsigned long long zkey(void) {
+static u64 zkey(void) {
     zseed ^= zseed << 13;
     zseed ^= zseed >> 7;
     zseed ^= zseed << 17;
@@ -51,7 +51,7 @@ static unsigned long long zkey(void) {
 
 /* one-time table build (dedicated init, run at main start) */
 void zob_init(void) {
-    int pc, sq, i;
+    i16 pc, sq, i;
     for (pc = 1; pc < 15; pc++)
         for (sq = 0; sq < 64; sq++)
             zpsq[pc][sq] = zkey();
@@ -61,24 +61,24 @@ void zob_init(void) {
 }
 
 /* ep-square key index: -1 (no ep) -> 64, else compact square */
-#define ZEPI(ep) ((ep) < 0 ? 64 : (int)sq2c(ep))
+#define ZEPI(ep) ((ep) < 0 ? 64 : (i16)sq2c(ep))
 
 /* XOR the move's signature delta into p->sig. Called from BOTH do_make (after
    the board/castle/ep updates, before the side flip) and undo_move (after the
    side flip back, before the restores), when board[to] still holds the moved
    piece, board[from] is empty, p->castle/ep hold the NEW values and u the OLD.
    XOR is its own inverse, so make and undo apply the same keys and round-trip. */
-static void zob_apply(Pos *p, unsigned int m, const Undo *u) {
-    int from = mfrom(m), to = mto(m), fl = mfl(m);
-    int side = p->side;                       /* old side to move (pre-flip) */
-    int post = p->board[to];                  /* piece at dest (mover or promo) */
-    int orig = ispromo(m) ? (side ? BP : WP) : post;
-    int rf, rt;
+static void zob_apply(Pos *p, u16 m, const Undo *u) {
+    i16 from = mfrom(m), to = mto(m), fl = mfl(m);
+    i16 side = p->side;                       /* old side to move (pre-flip) */
+    i16 post = p->board[to];                  /* piece at dest (mover or promo) */
+    i16 orig = ispromo(m) ? (side ? BP : WP) : post;
+    i16 rf, rt;
 
     p->sig ^= zpsq[orig][sq2c(from)];
     p->sig ^= zpsq[post][sq2c(to)];
     if (fl == MF_EP) {
-        int esq = side ? to + 16 : to - 16;   /* captured pawn square */
+        i16 esq = side ? to + 16 : to - 16;   /* captured pawn square */
         p->sig ^= zpsq[side ? WP : BP][sq2c(esq)];
     } else if (u->cap) {
         p->sig ^= zpsq[u->cap][sq2c(to)];
@@ -101,8 +101,8 @@ static void zob_apply(Pos *p, unsigned int m, const Undo *u) {
 
 /* compute the signature from scratch (used at parse_fen) */
 static void zob_compute(Pos *p) {
-    unsigned long long h = 0;
-    int i;
+    u64 h = 0;
+    i16 i;
     for (i = 0; i < 128; i++)
         if (p->board[i]) h ^= zpsq[p->board[i]][sq2c(i)];
     h ^= zside[p->side];
@@ -112,25 +112,25 @@ static void zob_compute(Pos *p) {
 }
 
 #if defined(PROFILE) || defined(VCLOCK)
-long c_make = 0;                 /* do_make entries */
-long c_undo = 0;                 /* undo_move entries */
-long c_gen_moves = 0;            /* gen_moves entries */
-long c_gen_caps = 0;             /* gen_caps entries */
-long c_gen_quiets = 0;           /* gen_quiets entries */
-long c_nextmove = 0;             /* next_move entries */
-long c_isattacked = 0;           /* is_attacked entries */
-long c_possig = 0;               /* pos_sig entries */
+i32 c_make = 0;                 /* do_make entries */
+i32 c_undo = 0;                 /* undo_move entries */
+i32 c_gen_moves = 0;            /* gen_moves entries */
+i32 c_gen_caps = 0;             /* gen_caps entries */
+i32 c_gen_quiets = 0;           /* gen_quiets entries */
+i32 c_nextmove = 0;             /* next_move entries */
+i32 c_isattacked = 0;           /* is_attacked entries */
+i32 c_possig = 0;               /* pos_sig entries */
 #endif
 
 /* ------------------------------------------------------------------ */
 /* make / unmake                                                      */
 /* ------------------------------------------------------------------ */
 
-void do_make(Pos *p, unsigned int m, Undo *u) {
-    int from = mfrom(m), to = mto(m);
-    int fl = mfl(m);
-    int piece = p->board[from];
-    int promo = ispromo(m) ? (CO(piece) | (fl + 1)) : 0;
+void do_make(Pos *p, u16 m, Undo *u) {
+    i16 from = mfrom(m), to = mto(m);
+    i16 fl = mfl(m);
+    i16 piece = p->board[from];
+    i16 promo = ispromo(m) ? (CO(piece) | (fl + 1)) : 0;
 
     PCOUNT(c_make);
 
@@ -173,10 +173,10 @@ void do_make(Pos *p, unsigned int m, Undo *u) {
     if (nnue_active) nnue_make(p, m, u);
 }
 
-void undo_move(Pos *p, unsigned int m, Undo *u) {
-    int from = mfrom(m), to = mto(m);
-    int fl = mfl(m);
-    int piece = p->board[to];
+void undo_move(Pos *p, u16 m, Undo *u) {
+    i16 from = mfrom(m), to = mto(m);
+    i16 fl = mfl(m);
+    i16 piece = p->board[to];
 
     PCOUNT(c_undo);
 
@@ -218,17 +218,17 @@ void undo_move(Pos *p, unsigned int m, Undo *u) {
    search's legality check: a NON-king move from a square NOT on the mover
    king's rank/file/diagonal can never open an attack on that king, so the
    is_attacked legality test can be skipped for such moves. */
-int sq_on_king_line(Pos *p, int sq, int s) {
-    int k = p->ks[s];
-    int kr = k >> 4, kf = k & 7, sr = sq >> 4, sf = sq & 7;
+i16 sq_on_king_line(Pos *p, i16 sq, i16 s) {
+    i16 k = p->ks[s];
+    i16 kr = k >> 4, kf = k & 7, sr = sq >> 4, sf = sq & 7;
     if (kr == sr) return 1;                          /* same rank */
     if (kf == sf) return 1;                          /* same file */
     return (kr + kf == sr + sf) || (kr - kf == sr - sf);  /* diagonals */
 }
 
-int is_attacked(Pos *p, int sq, int by) {
-    int i, to, d;
-    int pc;
+i16 is_attacked(Pos *p, i16 sq, i16 by) {
+    i16 i, to, d;
+    i16 pc;
 
     PCOUNT(c_isattacked);
 
@@ -283,9 +283,9 @@ int is_attacked(Pos *p, int sq, int by) {
    the from-sweep. The on-board squares are visited in ascending order, so the
    move order matches a full 0..127 sweep -> node counts unchanged. After file
    f=7 the next on-board square is the next rank's file 0, i.e. from+9. */
-int gen_caps(Pos *p, unsigned int *list) {
-    int n = 0, from, to, pc, pt, us = p->side, them = us ^ 1;
-    int i, d, fwd, r;
+i16 gen_caps(Pos *p, u16 *list) {
+    i16 n = 0, from, to, pc, pt, us = p->side, them = us ^ 1;
+    i16 i, d, fwd, r;
 
     PCOUNT(c_gen_caps);
 
@@ -296,7 +296,7 @@ int gen_caps(Pos *p, unsigned int *list) {
         pt = TY(pc);
 
         if (pt == WP || pt == BP) {
-            int isW = (pc == WP), prank;
+            i16 isW = (pc == WP), prank;
             fwd = isW ? 16 : -16;
             r = from >> 4;
             prank = isW ? 6 : 1;   /* row index of from-square for a promoting push */
@@ -316,7 +316,7 @@ int gen_caps(Pos *p, unsigned int *list) {
                 if (to == p->ep) {
                     list[n++] = MK(to, from, MF_EP, 0);
                 } else {
-                    int tgt = p->board[to];
+                    i16 tgt = p->board[to];
                     if (tgt && CO(tgt) == (them ? 8 : 0)) {
                         if (r == prank) {
                             for (i = 0; i < 4; i++)
@@ -342,8 +342,8 @@ int gen_caps(Pos *p, unsigned int *list) {
                     list[n++] = MK(to, from, 0, 0);
             }
         } else {
-            const int *dirs;
-            int ndir;
+            const i16 *dirs;
+            i16 ndir;
             if (pt == WB || pt == BB)      { dirs = bb; ndir = 4; }
             else if (pt == WR || pt == BR) { dirs = rb; ndir = 4; }
             else                           { dirs = qd; ndir = 8; }
@@ -351,7 +351,7 @@ int gen_caps(Pos *p, unsigned int *list) {
                 d = dirs[i];
                 to = from + d;
                 while ((to & 0x88) == 0) {
-                    int tgt = p->board[to];
+                    i16 tgt = p->board[to];
                     if (tgt) {
                         if (CO(tgt) != CO(pc)) list[n++] = MK(to, from, 0, 0);
                         break;
@@ -369,9 +369,9 @@ int gen_caps(Pos *p, unsigned int *list) {
    entries of board[128] are always EMPTY, and the on-board squares are visited
    in ascending order, so the move order matches a full 0..127 sweep -> node
    counts unchanged. */
-int gen_quiets(Pos *p, unsigned int *list) {
-    int n = 0, from, to, to2, pc, pt, us = p->side;
-    int i, d, fwd, r;
+i16 gen_quiets(Pos *p, u16 *list) {
+    i16 n = 0, from, to, to2, pc, pt, us = p->side;
+    i16 i, d, fwd, r;
 
     PCOUNT(c_gen_quiets);
 
@@ -382,7 +382,7 @@ int gen_quiets(Pos *p, unsigned int *list) {
         pt = TY(pc);
 
         if (pt == WP || pt == BP) {
-            int isW = (pc == WP), prank, srank;
+            i16 isW = (pc == WP), prank, srank;
             fwd = isW ? 16 : -16;
             r = from >> 4;
             prank = isW ? 6 : 1;   /* row index of from-square for a promoting push */
@@ -414,8 +414,8 @@ int gen_quiets(Pos *p, unsigned int *list) {
                     list[n++] = MK(to, from, 0, 0);
             }
         } else {
-            const int *dirs;
-            int ndir;
+            const i16 *dirs;
+            i16 ndir;
             if (pt == WB || pt == BB)      { dirs = bb; ndir = 4; }
             else if (pt == WR || pt == BR) { dirs = rb; ndir = 4; }
             else                           { dirs = qd; ndir = 8; }
@@ -423,7 +423,7 @@ int gen_quiets(Pos *p, unsigned int *list) {
                 d = dirs[i];
                 to = from + d;
                 while ((to & 0x88) == 0) {
-                    int tgt = p->board[to];
+                    i16 tgt = p->board[to];
                     if (!tgt) {
                         list[n++] = MK(to, from, 0, 0);
                         to += d;
@@ -459,8 +459,8 @@ int gen_quiets(Pos *p, unsigned int *list) {
 }
 
 /* full pseudo-legal list = captures + quiets (perft/protocol still use this) */
-int gen_moves(Pos *p, unsigned int *list) {
-    int n = gen_caps(p, list);
+i16 gen_moves(Pos *p, u16 *list) {
+    i16 n = gen_caps(p, list);
 
     PCOUNT(c_gen_moves);
     return n + gen_quiets(p, list + n);
@@ -482,17 +482,17 @@ int gen_moves(Pos *p, unsigned int *list) {
    The score depends ONLY on the (victim type, attacker type) pair, so a
    tiny 8x8 table (128 B) precomputes it once instead of a per-move score
    buffer or the mval*16 arithmetic on every selection pass. */
-static int mvv_tab[8][8];
+static i16 mvv_tab[8][8];
 
 static void mvv_build(void) {
-    int v, a;
+    i16 v, a;
     for (v = 0; v < 8; v++)
         for (a = 0; a < 8; a++)
             mvv_tab[v][a] = mval[v] * 16 - a;
 }
 
-static int mvv_lva(Pos *p, unsigned int m) {
-    int victim = 0, s;
+static i16 mvv_lva(Pos *p, u16 m) {
+    i16 victim = 0, s;
     if (mfl(m) == MF_EP) victim = 1;                       /* captured pawn */
     else if (p->board[mto(m)]) victim = TY(p->board[mto(m)]);
     s = mvv_tab[victim][TY(p->board[mfrom(m)])];
@@ -504,10 +504,10 @@ static int mvv_lva(Pos *p, unsigned int m) {
    side to move. A bare "from occupied, to empty" check is not enough: a
    killer recorded in another branch may point at a square that now holds a
    different piece (even a king), and making that move corrupts ks[]/board. */
-static int quiet_killer_ok(Pos *p, unsigned int m) {
-    int from = mfrom(m), to = mto(m);
-    int piece = p->board[from];
-    int pt, i, d, diff;
+static i16 quiet_killer_ok(Pos *p, u16 m) {
+    i16 from = mfrom(m), to = mto(m);
+    i16 piece = p->board[from];
+    i16 pt, i, d, diff;
 
     if (!piece) return 0;
     if (CO(piece) != (p->side ? 8 : 0)) return 0;   /* must be our piece */
@@ -516,7 +516,7 @@ static int quiet_killer_ok(Pos *p, unsigned int m) {
 
     pt = TY(piece);
     if (pt == 1) {
-        int fwd = (piece == WP) ? 16 : -16;
+        i16 fwd = (piece == WP) ? 16 : -16;
         if (to == from + fwd) return 1;
         if (to == from + 2 * fwd)
             return (piece == WP) ? ((from >> 4) == 1) : ((from >> 4) == 6);
@@ -533,8 +533,8 @@ static int quiet_killer_ok(Pos *p, unsigned int m) {
         return 0;
     }
     if (pt == 3 || pt == 4 || pt == 5) {
-        const int *dirs;
-        int ndir;
+        const i16 *dirs;
+        i16 ndir;
         if (pt == 3)      { dirs = bb; ndir = 4; }
         else if (pt == 4) { dirs = rb; ndir = 4; }
         else              { dirs = qd; ndir = 8; }
@@ -549,7 +549,7 @@ static int quiet_killer_ok(Pos *p, unsigned int m) {
     return 0;
 }
 
-void mgen_init(Pos *p, MGen *g, int ply, int k0, int k1, unsigned int ttm) {
+void mgen_init(Pos *p, MGen *g, i16 ply, u16 k0, u16 k1, u16 ttm) {
     (void)p;
     g->list = movebuf[ply];
     g->n = 0;
@@ -562,7 +562,7 @@ void mgen_init(Pos *p, MGen *g, int ply, int k0, int k1, unsigned int ttm) {
 }
 
 /* quiescence init: captures only (MVV-LVA), no killers/quiets */
-void mgen_init_q(Pos *p, MGen *g, int ply) {
+void mgen_init_q(Pos *p, MGen *g, i16 ply) {
     (void)p;
     g->list = movebuf[ply];
     g->n = 0;
@@ -573,9 +573,9 @@ void mgen_init_q(Pos *p, MGen *g, int ply) {
     g->caps_only = 1;
 }
 
-unsigned int next_move(Pos *p, MGen *g) {
-    unsigned int m;
-    int i, best, bscore;
+u16 next_move(Pos *p, MGen *g) {
+    u16 m;
+    i16 i, best, bscore;
 
     PCOUNT(c_nextmove);
 
@@ -591,7 +591,7 @@ again:
         while (g->idx < g->n) {
             best = -1; bscore = -32000;
             for (i = g->idx; i < g->n; i++) {
-                int s;
+                i16 s;
                 if (g->list[i] == g->ttm) continue;       /* already tried */
                 s = mvv_lva(p, g->list[i]);
                 if (s > bscore) { bscore = s; best = i; }
@@ -607,7 +607,7 @@ again:
 
     case MG_KILLERS:
         if (g->idx < 2) {
-            unsigned int k = (g->idx == 0) ? g->k0 : g->k1;
+            u16 k = (g->idx == 0) ? g->k0 : g->k1;
             g->idx++;
             if (k && k != g->ttm && quiet_killer_ok(p, k)) return k;
             goto again;
@@ -632,10 +632,11 @@ again:
 
 /* debug: staged generator must yield exactly the gen_moves set, once each */
 static int moveset_check(Pos *p) {
-    unsigned int all[256], got[256];
+    u16 all[256], got[256];
     MGen mg;
-    unsigned int m;
-    int n, i, j, na = 0, bad = 0;
+    u16 m;
+    i16 n, i, j, na = 0;
+    i16 bad = 0;
 
     n = gen_moves(p, all);
     mgen_init(p, &mg, 0, 0, 0, 0);
@@ -659,15 +660,15 @@ static int moveset_check(Pos *p) {
 /* perft                                                              */
 /* ------------------------------------------------------------------ */
 
-long perft(Pos *p, int depth) {
-    long nodes = 0;
-    unsigned int *list = movebuf[depth];
-    int n = gen_moves(p, list);
-    int i;
+i32 perft(Pos *p, i16 depth) {
+    i32 nodes = 0;
+    u16 *list = movebuf[depth];
+    i16 n = gen_moves(p, list);
+    i16 i;
 
     for (i = 0; i < n; i++) {
         Undo u;
-        int us;
+        i16 us;
         do_make(p, list[i], &u);
         us = p->side ^ 1;              /* mover */
         if (!is_attacked(p, p->ks[us], p->side)) {   /* enemy of mover */
@@ -685,10 +686,10 @@ long perft(Pos *p, int depth) {
 
 Score evaluate(Pos *p) {
     Score score = 0;
-    int sq;
+    i16 sq;
     if (nnue_enabled && nnue_active) return nnue_eval(p);
     for (sq = 0; sq < 128; sq++) {
-        int pc = p->board[sq];
+        i16 pc = p->board[sq];
         if (!pc) continue;
         if (CO(pc) == 0) score += mval[TY(pc)];
         else             score -= mval[TY(pc)];
@@ -712,7 +713,7 @@ Sig pos_sig(Pos *p) {
 /* FEN                                                                */
 /* ------------------------------------------------------------------ */
 
-static int pchar(char c) {
+static i16 pchar(char c) {
     switch (c) {
         case 'P': return WP; case 'N': return WN; case 'B': return WB;
         case 'R': return WR; case 'Q': return WQ; case 'K': return WK;
@@ -723,7 +724,7 @@ static int pchar(char c) {
 }
 
 void parse_fen(Pos *p, const char *s) {
-    int i, rank = 7, file = 0;
+    i16 i, rank = 7, file = 0;
 
     for (i = 0; i < 128; i++) p->board[i] = EMPTY;
     p->ks[0] = p->ks[1] = -1;
@@ -752,7 +753,7 @@ void parse_fen(Pos *p, const char *s) {
     while (*s && *s != ' ') {
         char c = *s++;
         if (c >= 'a' && c <= 'h') {
-            int f = c - 'a';
+            i16 f = c - 'a';
             if (*s >= '1' && *s <= '8')
                 p->ep = ((*s) - '1') * 16 + f;
         }
@@ -760,8 +761,8 @@ void parse_fen(Pos *p, const char *s) {
 
     g_half = 0; g_full = 1;
     if (*s) {
-        int h = 0, f = 1;
-        if (sscanf(s, "%d %d", &h, &f) >= 1) { g_half = h; g_full = f; }
+        i16 h = 0, f = 1;
+        if (sscanf(s, "%hd %hd", &h, &f) >= 1) { g_half = h; g_full = f; }
     }
 
     for (i = 0; i < 128; i++) {
@@ -785,7 +786,7 @@ static const char *fens[] = {
     "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10"
 };
 
-static const unsigned long expv[6][6] = {
+static const u32 expv[6][6] = {
     { 20, 400, 8902, 197281, 4865609, 119060324 },
     { 48, 2039, 97862, 4085603, 193690690, 0 },
     { 14, 191, 2812, 43238, 674624, 11030083 },
@@ -795,10 +796,10 @@ static const unsigned long expv[6][6] = {
 };
 
 int main(int argc, char **argv) {
-    int maxd = 5, test = 0, i, splitsel = 0;
-    int j, nn_log = 1;
+    i16 maxd = 5, test = 0, i, splitsel = 0;
+    i16 j, nn_log = 1;
     Pos pos;
-    long nodes;
+    i32 nodes;
     clock_t t0, t1;
     double secs;
 
@@ -905,12 +906,12 @@ int main(int argc, char **argv) {
     printf("pos=%d CLOCKS_PER_SEC=%d\n", test + 1, (int)CLOCKS_PER_SEC);
 
     if (splitsel) {
-        unsigned int *list = movebuf[29];
-        int n = gen_moves(&pos, list);
+        u16 *list = movebuf[29];
+        i16 n = gen_moves(&pos, list);
         for (i = 0; i < n; i++) {
             Undo u;
-            int us;
-            long c;
+            i16 us;
+            i32 c;
             do_make(&pos, list[i], &u);
             us = pos.side ^ 1;
             if (!is_attacked(&pos, pos.ks[us], pos.side))
@@ -919,21 +920,21 @@ int main(int argc, char **argv) {
                 c = -1;
             undo_move(&pos, list[i], &u);
             printf("m=%02X%02X p=%d -> %lu\n",
-                   mfrom(list[i]), mto(list[i]), mpro(list[i], us ? 8 : 0), c);
+                   mfrom(list[i]), mto(list[i]), mpro(list[i], us ? 8 : 0), (unsigned long)c);
         }
         return 0;
     }
 
     for (i = 1; i <= maxd; i++) {
-        unsigned long want, got;
+        u32 want, got;
         t0 = clock();
         nodes = perft(&pos, i);
         t1 = clock();
         secs = (double)(t1 - t0) / (double)CLOCKS_PER_SEC;
-        got = (unsigned long)nodes;
+        got = (u32)nodes;
         want = expv[test][i - 1];
         printf("perft(%d)=%lu  %8.2fs  %6lu nps  %s\n",
-               i, got, secs,
+               i, (unsigned long)got, secs,
                secs > 0 ? (unsigned long)((double)nodes / secs) : 0UL,
                (want && got != want) ? "*** WRONG ***" : "ok");
     }
