@@ -11,7 +11,7 @@ $env:PATH    = "$ow\binnt;" + $env:PATH
 $env:INCLUDE = "$ow\h"
 $env:LIB     = "$ow\lib386\nt"
 
-$sources = @("chess.c", "search.c", "xboard.c", "nnue.c")
+$sources = @("chess.c", "search.c", "xboard.c", "nnue.c", "vclock.c", "tt.c")
 $objs = @()
 foreach ($s in $sources) {
     # -3 = 386 target (oldest 32-bit CPU): simplest, most sequential codegen, closest

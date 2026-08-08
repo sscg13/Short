@@ -7,4 +7,5 @@ run.bat
 *.md
 *.map
 *.nnue
+*.net
 __pycache__/

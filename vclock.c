@@ -61,6 +61,14 @@
    c286 per call). The cost moved INTO make/undo (a few u64 XORs each, absorbed
    in `mk`), so `ps` drops to ~0 and `rn` re-fits to the new profile total.
 
+   TT re-fit (2026-08, branch `tt`): a 64 KB far transposition table (tt.c)
+   shrinks the tree (bench totals: 8088 NNUE profile-1 1.809e9 cyc, 286 0.592e9)
+   and adds probe/store calls (tp/ts). The full weight table was RE-MEASURED on
+   the emulators (sbench, uninstrumented build): mk was ~4x stale and ps ~2.5x
+   stale (the incremental-Zobrist cost in make/undo was never re-fit into them),
+   so rn/rm re-fit to the shipped bench-1 totals as well. nm/rf/ev still carry
+   the older nbench numbers; re-verify before trusting deep-search extrapolation.
+
       per-call cycles       8088      80286
         is_attacked          6512       2262
         pos_sig               ~100        ~40     (field read, was 33488/9678 FNV)
@@ -79,21 +87,21 @@
 
 #include "engine.h"
 
-int vtime_mode = 0;          /* VirtualTime=1: use the virtual clock */
-long vcpu_khz = 25000;       /* CPU_KHz: cycles per ms of the modeled CPU */
-int vcpu_model = VCPU_80286; /* CPU_model index */
+i16 vtime_mode = 0;          /* VirtualTime=1: use the virtual clock */
+i32 vcpu_khz = 25000;       /* CPU_KHz: cycles per ms of the modeled CPU */
+i16 vcpu_model = VCPU_80286; /* CPU_model index */
 
-long vtotal_nodes = 0;       /* nodes searched so far in the current move */
-long vmax_nodes = 0;         /* scalar node cap for the current move (0 = none) */
+i32 vtotal_nodes = 0;       /* nodes searched so far in the current move */
+i32 vmax_nodes = 0;         /* scalar node cap for the current move (0 = none) */
 
 /* virtual period state: 40 moves in 2 h, then 20 moves per 1 h, repeating */
-static long vperiod_ms;      /* virtual ms left in the current period */
-static int  vperiod_left;    /* moves left in the current period */
-static int  vperiod_started; /* first period not yet granted */
+static i32 vperiod_ms;      /* virtual ms left in the current period */
+static i16 vperiod_left;    /* moves left in the current period */
+static i16 vperiod_started; /* first period not yet granted */
 
 /* scalar cycles/node, NNUE / material (16-bit build) */
 #ifndef VCLOCK
-static const long cpn_tab[3][2] = {
+static const i32 cpn_tab[3][2] = {
     { 41126L,  22980L },   /* VCPU_80286  (batched-apply re-fit) */
     { 108844L, 67800L },   /* VCPU_8088   (batched-apply re-fit, est) */
     { 85000L,  45000L },   /* VCPU_8086 (estimate) */
@@ -101,38 +109,46 @@ static const long cpn_tab[3][2] = {
 #endif
 
 #ifdef VCLOCK
-static long long vbudget_cyc;   /* weighted cycle budget for the current move */
+static i64 vbudget_cyc;   /* weighted cycle budget for the current move */
 
-typedef struct { long att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm; } VW;
+typedef struct { i32 att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm, tp, ts; } VW;
 static const VW vw_tab[3] = {
-    /*   att    ps     gc     gq      gm   mk   nm   rf    ev     rn     rm */
-    {  2262,    40, 16476, 18672, 48192, 525, 1000, 2400,  6588,  8561,  6400 }, /* 80286 */
-    {  6512,   100, 49188, 55929, 141970, 1560, 3000, 6800, 19328, 13549, 19120 }, /* 8088 */
-    {  5000,    80, 38000, 45000, 110000, 1100, 2000, 4000, 14000, 30000, 14000 }, /* 8086 est */
+    /*   att    ps     gc     gq      gm    mk    nm   rf    ev     rn      rm      tp    ts */
+    {  2316,   102, 16890, 18258, 46818, 1956, 1000, 2400,  6588,   7218,   7901,   594,  492 }, /* 80286 */
+    {  6368,   272, 46880, 54912, 137680, 6144, 3000, 6800, 19328,  27921,  23670,  1968, 1808 }, /* 8088 */
+    {  4776,   204, 35160, 41184, 103260, 4608, 2250, 5100, 14496,  20941,  17753,  1476, 1356 }, /* 8086 est */
 };
+/* Re-fit (2026-08, TT): att/gc/gq/gm/mk/ps/tp/ts are fresh sbench measurements
+   on the uninstrumented 16-bit build (8088 @16 / 286 @6 MHz). mk and ps were
+   ~4x / ~2.5x STALE (the incremental-Zobrist cost folded into make/undo was
+   never re-fit). nm/rf/ev kept from the nbench measurements (re-verify: the
+   rn/rm per-CPU ratio is not fully consistent). rn/rm re-fit to the SHIPPED
+   (no-counter) bench-1 totals, so the model predicts the real engine's NPS. */
 
-static long long vclock_cyc(void) {
+static i64 vclock_cyc(void) {
     const VW *w = &vw_tab[vcpu_model];
-    long long r = (long long)(nnue_enabled ? w->rn : w->rm) * (c_anodes + c_qnodes);
-    r += (long long)w->att * c_isattacked;
-    r += (long long)w->ps  * c_possig;
-    r += (long long)w->gc  * c_gen_caps;
-    r += (long long)w->gq  * c_gen_quiets;
-    r += (long long)w->gm  * c_gen_moves;
-    r += (long long)w->mk  * (c_make + c_undo);
-    r += (long long)w->nm  * (c_nn_make + c_nn_undo);
-    r += (long long)w->rf  * c_refresh;
-    r += (long long)w->ev  * c_nn_eval;
+    i64 r = (i64)(nnue_enabled ? w->rn : w->rm) * (c_anodes + c_qnodes);
+    r += (i64)w->att * c_isattacked;
+    r += (i64)w->ps  * c_possig;
+    r += (i64)w->gc  * c_gen_caps;
+    r += (i64)w->gq  * c_gen_quiets;
+    r += (i64)w->gm  * c_gen_moves;
+    r += (i64)w->mk  * (c_make + c_undo);
+    r += (i64)w->nm  * (c_nn_make + c_nn_undo);
+    r += (i64)w->rf  * c_refresh;
+    r += (i64)w->ev  * c_nn_eval;
+    r += (i64)w->tp  * c_tt_probe;
+    r += (i64)w->ts  * c_tt_store;
     return r;
 }
 
 /* NPS the weighted model predicts for the modeled CPU (vclock_cyc over the
    accumulated counters, converted at vcpu_khz). Used by `bench` so OpenBench's
    nps reflects the target 286 @ 25 MHz, not the host. */
-long vclock_est_nps(long nodes) {
-    long long cyc = vclock_cyc();
+i32 vclock_est_nps(i32 nodes) {
+    i64 cyc = vclock_cyc();
     if (cyc <= 0 || vcpu_khz <= 0) return 0;
-    return (long)((long long)nodes * vcpu_khz * 1000LL / cyc);
+    return (i32)((i64)nodes * vcpu_khz * 1000LL / cyc);
 }
 #endif
 
@@ -143,7 +159,7 @@ void vclock_set_model(const char *name) {
     else vcpu_model = VCPU_80286;   /* "80286" or anything else */
 }
 
-void vclock_set_khz(long khz) {
+void vclock_set_khz(i32 khz) {
     if (khz < 100) khz = 100;         /* keep the /100 scalings in range */
     if (khz > 50000) khz = 50000;
     vcpu_khz = khz;
@@ -171,13 +187,15 @@ void vclock_reset(void) {
     c_nn_make = c_nn_undo = c_nn_eval = c_refresh = c_flip = 0;
     c_isattacked = 0;
     c_possig = 0;
+    c_tt_probe = 0;
+    c_tt_store = 0;
 #endif
 }
 
 /* per-move virtual budget in ms; refills the current period when it is spent.
    The first period is 40 moves in 2 h, every later period 20 moves in 1 h, so
    the per-move average is 180 s throughout. */
-long vclock_budget_ms(void) {
+i32 vclock_budget_ms(void) {
     if (!vperiod_started || vperiod_left <= 0) {
         if (!vperiod_started) {               /* period 1: 40 moves in 2 h */
             vperiod_ms = 7200L * 1000L;
@@ -192,19 +210,19 @@ long vclock_budget_ms(void) {
 }
 
 /* set the stop condition for the current move from its virtual budget */
-void vclock_set_budget(long budget_ms) {
+void vclock_set_budget(i32 budget_ms) {
 #ifdef VCLOCK
-    vbudget_cyc = (long long)budget_ms * vcpu_khz;
+    vbudget_cyc = (i64)budget_ms * vcpu_khz;
 #else
-    long cpn = cpn_tab[vcpu_model][nnue_enabled ? 0 : 1];
+    i32 cpn = cpn_tab[vcpu_model][nnue_enabled ? 0 : 1];
     if (budget_ms <= 0 || cpn < 100) vmax_nodes = 0;
-    else vmax_nodes = (long)(((unsigned long)budget_ms / 100) * (unsigned long)vcpu_khz
-                             / ((unsigned long)cpn / 100));
+    else vmax_nodes = (i32)(((u32)budget_ms / 100) * (u32)vcpu_khz
+                            / ((u32)cpn / 100));
 #endif
 }
 
 /* 1 when the current move has consumed its virtual budget */
-int vclock_budget_hit(void) {
+i16 vclock_budget_hit(void) {
 #ifdef VCLOCK
     return vbudget_cyc > 0 && vclock_cyc() >= vbudget_cyc;
 #else
@@ -214,15 +232,15 @@ int vclock_budget_hit(void) {
 
 /* charge the current period the virtual ms the completed move consumed and
    close out its bookkeeping; returns the consumed virtual ms. */
-long vclock_charge(void) {
-    long vms;
+i32 vclock_charge(void) {
+    i32 vms;
 #ifdef VCLOCK
-    vms = (long)(vclock_cyc() / vcpu_khz);
+    vms = (i32)(vclock_cyc() / vcpu_khz);
 #else
-    long cpn = cpn_tab[vcpu_model][nnue_enabled ? 0 : 1];
+    i32 cpn = cpn_tab[vcpu_model][nnue_enabled ? 0 : 1];
     if (vtotal_nodes > 0 && cpn >= 100 && vcpu_khz >= 100)
-        vms = (long)(((unsigned long)vtotal_nodes / 100) * (unsigned long)cpn
-                     / ((unsigned long)vcpu_khz / 100));
+        vms = (i32)(((u32)vtotal_nodes / 100) * (u32)cpn
+                    / ((u32)vcpu_khz / 100));
     else vms = 0;
 #endif
     vperiod_ms -= vms;
