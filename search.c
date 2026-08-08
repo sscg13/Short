@@ -93,7 +93,11 @@ static Score alphabeta(Pos *p, int depth, Score alpha, Score beta, int ply, int 
         Score tsc = 0;
         int tfl = 0, tdep = 0;
         if (tt_probe(p, ply, &tmv, &tsc, &tfl, &tdep)) {
-            ttm = tmv;
+            /* only trust the stored move if its from-square holds a piece of
+               the side to move (a stale/corrupt entry must never enter the
+               search; the legality filter below would otherwise accept it) */
+            if (tmv && CO(p->board[mfrom(tmv)]) == (p->side ? 8 : 0))
+                ttm = tmv;
         }
     }
 
@@ -110,6 +114,8 @@ static Score alphabeta(Pos *p, int depth, Score alpha, Score beta, int ply, int 
         int us, pc, is_cap, child_half, legal_move = 0;
         Score score;
         pc = p->board[mfrom(m)];                 /* moving piece, before the make */
+        if (!pc || CO(pc) != (p->side ? 8 : 0)) continue;  /* not our piece: skip
+                                                              (guards a bogus TT move) */
         do_make(p, m, &u);
         us = p->side ^ 1;                        /* mover */
         /* Legality: if not in check, a non-king, non-EP move from a square off
@@ -210,6 +216,7 @@ static Score qsearch(Pos *p, Score alpha, Score beta, int ply, int half, int qd)
         int us, pc, is_cap, child_half, legal_move = 0;
         Score score;
         pc = p->board[mfrom(m)];
+        if (!pc || CO(pc) != (p->side ? 8 : 0)) continue;  /* not our piece: skip */
         do_make(p, m, &u);
         us = p->side ^ 1;
         if (!in_check && TY(pc) != 6 && mfl(m) != MF_EP &&
@@ -368,6 +375,18 @@ unsigned int think(Pos *p, int maxdepth) {
         }
     }
     dbgf("think end bestm=%04X stop=%d d=%d\n", (unsigned)bestm, (int)stop_now, d - 1);
+    /* safety net: bestm must be one of the generated root moves. A corrupt
+       search/TT state must never leak an illegal move to the GUI; fall back
+       to the first legal root move and log it. */
+    {
+        int k2, have = 0;
+        for (k2 = 0; k2 < root_n; k2++)
+            if (root_m[k2] == bestm) { have = 1; break; }
+        if (!have) {
+            dbgf("think bestm=%04X NOT a root move - fallback to root_m[0]\n", (unsigned)bestm);
+            bestm = (root_n > 0) ? root_m[0] : 0;
+        }
+    }
     nnue_active = 0;
     return bestm;
 }

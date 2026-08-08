@@ -33,20 +33,20 @@ static unsigned long long zcastle[16];
 static unsigned long long zep[65];
 #endif
 
-static unsigned long zseed = 0x9E3779B9UL;
+static unsigned long long zseed = 0x9E3779B97F4A7C15ULL;
 
-static unsigned short znext16(void) {
-    zseed ^= zseed << 13;
-    zseed ^= zseed >> 17;
-    zseed ^= zseed << 5;
-    return (unsigned short)(zseed >> 16);
-}
-
+/* 64-bit xorshift (Marsaglia, period 2^64-1). The state is unsigned long long
+   = 64 bits on EVERY build (16-bit Watcom, Windows and Linux gcc), so the
+   Zobrist keys are byte-identical across platforms. A prior 32-bit `unsigned
+   long` seed was 32-bit on Windows/16-bit but 64-bit on Linux (LP64), which
+   broke bench determinism there; it ALSO confined the "64-bit" keys to a
+   32-bit subspace (GF(2) rank 32), so different positions collided and fed
+   bogus moves into the transposition table. */
 static unsigned long long zkey(void) {
-    return ((unsigned long long)znext16() << 48) |
-           ((unsigned long long)znext16() << 32) |
-           ((unsigned long long)znext16() << 16) |
-           (unsigned long long)znext16();
+    zseed ^= zseed << 13;
+    zseed ^= zseed >> 7;
+    zseed ^= zseed << 17;
+    return zseed;
 }
 
 /* one-time table build (dedicated init, run at main start) */
