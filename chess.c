@@ -618,8 +618,17 @@ again:
     case MG_QUIETS:
         if (g->idx == 0) g->n = gen_quiets(p, g->list);
         while (g->idx < g->n) {
-            m = g->list[g->idx++];
-            if (m == g->ttm || m == g->k0 || m == g->k1) continue;  /* already tried */
+            best = -1; bscore = -32000;
+            for (i = g->idx; i < g->n; i++) {
+                u16 q = g->list[i];
+                i16 s;
+                if (q == g->ttm || q == g->k0 || q == g->k1) continue;  /* already tried */
+                s = qhist[p->side][TY(p->board[mfrom(q)]) - 1][(q >> 6) & 0x3F];
+                if (s > bscore) { bscore = s; best = i; }
+            }
+            if (best < 0) break;                        /* only already-tried left */
+            m = g->list[best]; g->list[best] = g->list[g->idx]; g->list[g->idx] = m;
+            g->idx++;
             return m;
         }
         g->stage = MG_DONE;

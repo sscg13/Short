@@ -5,13 +5,13 @@
    CPU_KHz. Each move is granted a virtual time budget (180 s/move on average,
    time banked within the current period, hard flag at move 40 and every 20
    after that), and the search is stopped once the estimated cost of the work
-   it has done reaches that budget. See time-control-and-testing-methodology.md
+   it has done reaches that budget. See TESTING.md
    sections 2, 5 and 7.
 
    Cost model:
      - 16-bit build (no VCLOCK): a scalar cycles/node per CPU model, NNUE vs
        material, fitted to the measured bench totals.
-     - 32-bit build (VCLOCK, the OpenBench/testing build): a WEIGHTED model
+     - gcc build (VCLOCK, the OpenBench/testing build): a WEIGHTED model
        that charges the search's sub-functions at their measured per-call
        costs, so a move's cost tracks how the work is actually spent: qsearch
        rate, move density (branching factor), NNUE activity, and threat probes
@@ -83,7 +83,19 @@
       1.808e9 / 0.604e9 (move-sweep). Material build (10152 nodes) unchanged
       at 0.689e9 / 0.233e9.
       R (per-node base) is what those terms leave over, fitted per NNUE state.
-      8086 = 16-bit-bus 8088 core, an ESTIMATE (re-derive before trusting). */
+      8086 = 16-bit-bus 8088 core, an ESTIMATE (re-derive before trusting).
+
+   QUIET-HISTORY re-fit (2026-08, branch `quiet-history`): MG_QUIETS now orders
+   the generated quiets by a piece-to quiet-history table (qhist[2][6][64], see
+   search.c) with a selection-sort exactly like the MVV-LVA caps stage. The new
+   cost is inside next_move (no per-call weight; same treatment as MVV-LVA), so
+   it lands in the per-node base R and the scalar cpn_tab. Re-measured bench-1
+   totals on the emulators: 1.936e9 (8088) / 0.6215e9 (80286) for the SAME 13,230
+   nodes (depth-1 node count is ordering-independent - no beta cutoffs fire at
+   the root, so the counts verify the re-fit is purely the added selection cost).
+   Delta = +9,686 cyc/node (8088) / +1,326 (80286); the material build gets the
+   same per-node delta (the selection loop never touches NNUE). 8086 est = 0.75x
+   of the 8088 delta (matches the existing 8086/8088 weight ratio). */
 
 #include "engine.h"
 
@@ -102,9 +114,9 @@ static i16 vperiod_started; /* first period not yet granted */
 /* scalar cycles/node, NNUE / material (16-bit build) */
 #ifndef VCLOCK
 static const i32 cpn_tab[3][2] = {
-    { 41126L,  22980L },   /* VCPU_80286  (batched-apply re-fit) */
-    { 108844L, 67800L },   /* VCPU_8088   (batched-apply re-fit, est) */
-    { 85000L,  45000L },   /* VCPU_8086 (estimate) */
+    { 42452L,  24306L },   /* VCPU_80286  (quiet-history re-fit: +1326 cyc/node) */
+    { 118530L, 77486L },   /* VCPU_8088   (quiet-history re-fit: +9686 cyc/node) */
+    { 92265L,  52265L },   /* VCPU_8086 (estimate) */
 };
 #endif
 
@@ -114,16 +126,19 @@ static i64 vbudget_cyc;   /* weighted cycle budget for the current move */
 typedef struct { i32 att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm, tp, ts; } VW;
 static const VW vw_tab[3] = {
     /*   att    ps     gc     gq      gm    mk    nm   rf    ev     rn      rm      tp    ts */
-    {  2316,   102, 16890, 18258, 46818, 1956, 1000, 2400,  6588,   7218,   7901,   594,  492 }, /* 80286 */
-    {  6368,   272, 46880, 54912, 137680, 6144, 3000, 6800, 19328,  27921,  23670,  1968, 1808 }, /* 8088 */
-    {  4776,   204, 35160, 41184, 103260, 4608, 2250, 5100, 14496,  20941,  17753,  1476, 1356 }, /* 8086 est */
+    {  2316,   102, 16890, 18258, 46818, 1956, 1000, 2400,  6588,   8544,   9227,   594,  492 }, /* 80286 */
+    {  6368,   272, 46880, 54912, 137680, 6144, 3000, 6800, 19328,  37607,  33356,  1968, 1808 }, /* 8088 */
+    {  4776,   204, 35160, 41184, 103260, 4608, 2250, 5100, 14496,  28206,  25018,  1476, 1356 }, /* 8086 est */
 };
 /* Re-fit (2026-08, TT): att/gc/gq/gm/mk/ps/tp/ts are fresh sbench measurements
    on the uninstrumented 16-bit build (8088 @16 / 286 @6 MHz). mk and ps were
    ~4x / ~2.5x STALE (the incremental-Zobrist cost folded into make/undo was
    never re-fit). nm/rf/ev kept from the nbench measurements (re-verify: the
    rn/rm per-CPU ratio is not fully consistent). rn/rm re-fit to the SHIPPED
-   (no-counter) bench-1 totals, so the model predicts the real engine's NPS. */
+   (no-counter) bench-1 totals, so the model predicts the real engine's NPS.
+   Re-fit (2026-08, quiet-history): the MG_QUIETS selection-sort cost lands in
+   the per-node base, so rn/rm += the measured delta (+1326 c286 / +9686 c88);
+   the material base rm gets the same delta (the sort never touches NNUE). */
 
 static i64 vclock_cyc(void) {
     const VW *w = &vw_tab[vcpu_model];

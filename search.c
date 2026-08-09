@@ -21,6 +21,17 @@ static i16 pv_len[MAXPLY + 1];
 
 static u16 killers[MAXPLY][2];          /* two killer moves per ply (quiet only) */
 
+i16 qhist[2][6][64];   /* quiet-history: side, piece-type-1, to-square-compact */
+
+/* bonus/penalty for a quiet move's history slot, clamped to +-QH_MAX */
+static void qhist_update(Pos *p, u16 m, i16 delta) {
+    i16 *h = &qhist[p->side][TY(p->board[mfrom(m)]) - 1][(m >> 6) & 0x3F];
+    i16 v = *h + delta;
+    if (v >  QH_MAX) v =  QH_MAX;
+    if (v < -QH_MAX) v = -QH_MAX;
+    *h = v;
+}
+
 #define MAX_QDEPTH 8    /* longest capture chain past the search leaf; guards against
                            qsearch explosions (deep recapture lines) */
 
@@ -112,7 +123,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
     while ((m = next_move(p, &mg)) != 0) {
         Undo u;
         i16 us, pc, is_cap, child_half, legal_move = 0;
-        Score score;
+        Score score, alpha0 = alpha;         /* window this move is searched against */
         pc = p->board[mfrom(m)];                 /* moving piece, before the make */
         if (!pc || CO(pc) != (p->side ? 8 : 0)) continue;  /* not our piece: skip
                                                               (guards a bogus TT move) */
@@ -146,12 +157,21 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
             if (best > alpha) alpha = best;
             undo_move(p, m, &u);
             if (alpha >= beta) {
-                /* killer: a true quiet (no promo/ep/castle flag, empty target) */
+                /* killer + history: a true quiet (no promo/ep/castle flag, empty
+                   target) that caused the cutoff gets a depth^2 bonus; the deeper
+                   the cutoff, the more reliable the move, so it dominates. */
                 if (mfl(m) == 0 && u.cap == EMPTY) {
+                    i16 dd = depth * depth;
                     killers[ply][1] = killers[ply][0];
                     killers[ply][0] = m;
+                    qhist_update(p, m, dd);
                 }
                 break;                            /* beta cutoff */
+            } else if (score <= alpha0) {
+                /* fail low: a quiet that failed to beat its window is penalized
+                   (symmetric depth^2), so it sorts behind unsearched quiets. */
+                if (mfl(m) == 0 && u.cap == EMPTY)
+                    qhist_update(p, m, -(i16)(depth * depth));
             }
         } else {
             undo_move(p, m, &u);
@@ -452,6 +472,7 @@ int bench(int depth) {
         parse_fen(&p, bench_fens[i]);
         g_sigs_n = 0;                            /* no game-history repetitions */
         memset(killers, 0, sizeof killers);
+        memset(qhist, 0, sizeof qhist);
         tt_clear();                              /* no cross-position TT reuse */
         root_n = gen_moves(&p, root_m);
         for (k = 0; k < root_n; k++) root_score[k] = 0;
@@ -554,6 +575,7 @@ int profile(int depth) {
         parse_fen(&p, bench_fens[i]);
         g_sigs_n = 0;                            /* no game-history repetitions */
         memset(killers, 0, sizeof killers);
+        memset(qhist, 0, sizeof qhist);
         tt_clear();                              /* no cross-position TT reuse */
         root_n = gen_moves(&p, root_m);
         for (k = 0; k < root_n; k++) root_score[k] = 0;
