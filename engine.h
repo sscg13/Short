@@ -170,6 +170,16 @@ i32 perft(Pos *p, i16 depth);
 Sig pos_sig(Pos *p);
 void search_root(Pos *p, i16 maxdepth);
 u16 think(Pos *p, i16 maxdepth);
+
+/* quiet-history move-ordering table. Indexed by side to move (2), moving
+   piece type-1 (6) and destination square in compact 0..63 (the move already
+   stores it in bits 6..11, so `(m >> 6) & 0x3F` is free). 2*6*64 i16 = 1536 B
+   near: the hottest ordering path (every quiet at every node), so it must be
+   fast near data - and at 72% DGROUP there is room. Values are bonus/penalty
+   sums clamped to +-QH_MAX; the -32000 selection sentinel in next_move stays
+   strictly below any stored value so no valid quiet is ever skipped. */
+#define QH_MAX 30000
+extern i16 qhist[2][6][64];
 int bench(int depth);
 int profile(int depth);
 int sbench(void);
@@ -216,7 +226,7 @@ void tt_store(Pos *p, u16 move, i16 depth, Score score, i16 flag, i16 ply);
 /* ---- virtual time clock (vclock.c) ----
    VirtualTime=1 makes the engine ignore the GUI's time commands and pace
    itself against a 40/2h + 20/1h repeating control using a per-CPU cycle
-   model (CPU_model + CPU_KHz). See time-control-and-testing-methodology.md.
+   model (CPU_model + CPU_KHz). See TESTING.md.
    The 32-bit (VCLOCK) build charges the search's sub-functions at measured
    per-call costs; the 16-bit build keeps a scalar cycles/node. */
 enum { VCPU_80286 = 0, VCPU_8088, VCPU_8086 };
