@@ -95,7 +95,18 @@
    the root, so the counts verify the re-fit is purely the added selection cost).
    Delta = +9,686 cyc/node (8088) / +1,326 (80286); the material build gets the
    same per-node delta (the selection loop never touches NNUE). 8086 est = 0.75x
-   of the 8088 delta (matches the existing 8086/8088 weight ratio). */
+   of the 8088 delta (matches the existing 8086/8088 weight ratio).
+
+   PVS + FAIL-SOFT re-fit (2026-08, branch `pvs`): alphabeta now searches the
+   first legal move at full window and the rest at a zero window (re-searching
+   only on a fail high), and qsearch returns the best score found (fail-soft)
+   instead of clamping to alpha. Bench-1 node count rose 13,230 -> 13,458 (root
+   zero-window re-searches) but the per-node cost DROPPED (zero-window cutoffs
+   prune more than the re-searches add): re-measured bench-1 totals 1.950e9
+   (8088) / 0.6255e9 (80286) at 13,458 nodes. Delta = -1,422 cyc/node (8088) /
+   -504 (80286), applied to R and the scalar cpn_tab; the material build gets
+   the same per-node delta (the search-structure change is NNUE-independent).
+   8086 est = 0.75x of the 8088 delta. Bench 4 = 653,046 (was 880,565). */
 
 #include "engine.h"
 
@@ -114,9 +125,9 @@ static i16 vperiod_started; /* first period not yet granted */
 /* scalar cycles/node, NNUE / material (16-bit build) */
 #ifndef VCLOCK
 static const i32 cpn_tab[3][2] = {
-    { 42452L,  24306L },   /* VCPU_80286  (quiet-history re-fit: +1326 cyc/node) */
-    { 118530L, 77486L },   /* VCPU_8088   (quiet-history re-fit: +9686 cyc/node) */
-    { 92265L,  52265L },   /* VCPU_8086 (estimate) */
+    { 41948L,  23802L },   /* VCPU_80286  (PVS re-fit: -504 cyc/node) */
+    { 117108L, 76064L },   /* VCPU_8088   (PVS re-fit: -1422 cyc/node) */
+    { 91198L,  51198L },   /* VCPU_8086 (estimate) */
 };
 #endif
 
@@ -126,9 +137,9 @@ static i64 vbudget_cyc;   /* weighted cycle budget for the current move */
 typedef struct { i32 att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm, tp, ts; } VW;
 static const VW vw_tab[3] = {
     /*   att    ps     gc     gq      gm    mk    nm   rf    ev     rn      rm      tp    ts */
-    {  2316,   102, 16890, 18258, 46818, 1956, 1000, 2400,  6588,   8544,   9227,   594,  492 }, /* 80286 */
-    {  6368,   272, 46880, 54912, 137680, 6144, 3000, 6800, 19328,  37607,  33356,  1968, 1808 }, /* 8088 */
-    {  4776,   204, 35160, 41184, 103260, 4608, 2250, 5100, 14496,  28206,  25018,  1476, 1356 }, /* 8086 est */
+    {  2316,   102, 16890, 18258, 46818, 1956, 1000, 2400,  6588,   8040,   8723,   594,  492 }, /* 80286 */
+    {  6368,   272, 46880, 54912, 137680, 6144, 3000, 6800, 19328,  36185,  31934,  1968, 1808 }, /* 8088 */
+    {  4776,   204, 35160, 41184, 103260, 4608, 2250, 5100, 14496,  27139,  23951,  1476, 1356 }, /* 8086 est */
 };
 /* Re-fit (2026-08, TT): att/gc/gq/gm/mk/ps/tp/ts are fresh sbench measurements
    on the uninstrumented 16-bit build (8088 @16 / 286 @6 MHz). mk and ps were
@@ -138,7 +149,10 @@ static const VW vw_tab[3] = {
    (no-counter) bench-1 totals, so the model predicts the real engine's NPS.
    Re-fit (2026-08, quiet-history): the MG_QUIETS selection-sort cost lands in
    the per-node base, so rn/rm += the measured delta (+1326 c286 / +9686 c88);
-   the material base rm gets the same delta (the sort never touches NNUE). */
+   the material base rm gets the same delta (the sort never touches NNUE).
+   Re-fit (2026-08, PVS): the zero-window search + fail-soft qsearch changes the
+   node count AND the per-node cost; rn/rm += the measured bench-1 delta
+   (-504 c286 / -1422 c88) so the model reproduces the new totals. */
 
 static i64 vclock_cyc(void) {
     const VW *w = &vw_tab[vcpu_model];
