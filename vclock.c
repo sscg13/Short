@@ -106,7 +106,17 @@
    (8088) / 0.6255e9 (80286) at 13,458 nodes. Delta = -1,422 cyc/node (8088) /
    -504 (80286), applied to R and the scalar cpn_tab; the material build gets
    the same per-node delta (the search-structure change is NNUE-independent).
-   8086 est = 0.75x of the 8088 delta. Bench 4 = 653,046 (was 880,565). */
+   8086 est = 0.75x of the 8088 delta. Bench 4 = 653,046 (was 880,565).
+
+   RFP (2026-08, branch `rfp`): reverse futility pruning in alphabeta
+   (depth 1..7, non-PV, not in check: return eval when eval - 100*depth >=
+   beta) cuts bench 4 653,046 -> 382,982 but leaves bench 1 UNCHANGED at 13,458
+   (RFP needs depth >= 1, so a depth-1 search never fires it). No re-fit needed:
+   the weighted model auto-tracks the added alphabeta-node evals (they route
+   through nnue_eval -> c_nn_eval -> `ev`) and the node-count drop (c_anodes ->
+   `rn`); the scalar cpn_tab is still calibrated on the unchanged bench-1. The
+   one deliberate estimate: for deeper searches the material build's added
+   alphabeta evals are uncharged (folded into the fitted base R, as always). */
 
 #include "engine.h"
 
