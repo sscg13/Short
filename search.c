@@ -35,6 +35,14 @@ static void qhist_update(Pos *p, u16 m, i16 delta) {
 #define MAX_QDEPTH 8    /* longest capture chain past the search leaf; guards against
                            qsearch explosions (deep recapture lines) */
 
+/* reverse futility pruning: a shallow, non-PV node whose static eval already
+   beats beta by more than a depth-scaled margin returns that eval without
+   searching - even a move that loses the whole margin keeps the score above
+   beta. RFP_DEPTH caps the window; RFP_MARGIN is the centipawn slack per ply
+   (the deeper the node, the wider the margin it needs to be "safe"). */
+#define RFP_DEPTH  7
+#define RFP_MARGIN 100
+
 /* root move list + scores, reused across iterative-deepening iterations */
 static u16 root_m[256];
 static Score root_score[256];
@@ -117,6 +125,18 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
        neither leave a check unresolved nor open a new line), so its legality
        is_attacked test can be skipped. */
     in_check = is_attacked(p, p->ks[p->side], p->side ^ 1);
+
+    /* reverse futility pruning. Skipped while in check (the eval is unreliable
+       with the king exposed), at PV nodes (their score becomes a true bound),
+       and at depth 0 (qsearch already stand-pats the leaf). On a hit, pop this
+       node's rep-path entry (pushed above) before returning. */
+    if (depth >= 1 && depth <= RFP_DEPTH && !in_check && beta - alpha == 1) {
+        Score eval = evaluate(p);
+        if (eval - depth * RFP_MARGIN >= beta) {
+            rep_n--;
+            return eval;
+        }
+    }
 
     mgen_init(p, &mg, ply, killers[ply][0], killers[ply][1], ttm);
 
