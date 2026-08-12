@@ -211,6 +211,26 @@ void undo_move(Pos *p, u16 m, Undo *u) {
 }
 
 /* ------------------------------------------------------------------ */
+/* null move (search-only "pass": same position, opponent to move)    */
+/* ------------------------------------------------------------------ */
+
+/* Null-move make/undo: flip the side to move and toggle the Zobrist side key.
+   Nothing else changes - the board, castle rights, ep square and the NNUE
+   accumulators all stay (the accumulators encode the piece placement, and
+   nnue_eval picks the stm accumulator from p->side, so the null-move position
+   evaluates correctly with the same accumulators). The two sides are keyed by
+   distinct zside[] entries, so XOR of both toggles the side component of the
+   signature regardless of the current side; since XOR is its own inverse, make
+   and undo are the same operation. */
+void nm_make(Pos *p) {
+    p->side ^= 1;
+    p->sig  ^= zside[0] ^ zside[1];
+}
+void nm_undo(Pos *p) {
+    nm_make(p);
+}
+
+/* ------------------------------------------------------------------ */
 /* attacks                                                            */
 /* ------------------------------------------------------------------ */
 

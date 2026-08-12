@@ -116,7 +116,22 @@
    through nnue_eval -> c_nn_eval -> `ev`) and the node-count drop (c_anodes ->
    `rn`); the scalar cpn_tab is still calibrated on the unchanged bench-1. The
    one deliberate estimate: for deeper searches the material build's added
-   alphabeta evals are uncharged (folded into the fitted base R, as always). */
+   alphabeta evals are uncharged (folded into the fitted base R, as always).
+
+   NMP (2026-08, branch `nmp`): null-move pruning in alphabeta (depth >= 4,
+   non-PV, not in check, side to move holds non-pawn material, eval >= beta:
+   search the opponent-to-move position at depth - 1 - (2 + depth/6), always a
+   REAL probe (never a bare qsearch); fail high -> cutoff). Bench 4 is
+   UNCHANGED at 382,982 (NMP needs depth >= 4, so it is inert in a depth-4
+   search) and bench 5 drops 1,688,724 -> 1,305,948 (-22.7%). No re-fit
+   needed, as with RFP: the weighted model auto-tracks the probe searches (they
+   are ordinary alphabeta/qsearch calls, charged at rn) and the one shared
+   RFP/NMP eval per gated node (nnue_eval -> c_nn_eval -> `ev`); the scalar
+   cpn_tab is still calibrated on the unchanged bench-1. Emulator per-node
+   speed is unchanged within noise (bench-5 NPS 14.09k vs RFP 14.04k), so the
+   -22.7% node cut is a straight ~23% wall-clock win. (A qsearch-probe NMP
+   pruned -33% but regressed pos 5 at depth 5; the sound real-probe version
+   keeps that position at +216.) */
 
 #include "engine.h"
 

@@ -43,6 +43,32 @@ static void qhist_update(Pos *p, u16 m, i16 delta) {
 #define RFP_DEPTH  7
 #define RFP_MARGIN 100
 
+/* null-move pruning: when the static eval already beats beta, the opponent's
+   best reply to a "pass" is searched at a reduced depth; if even that fails
+   high the position is winning enough that the real search can return the
+   null-move score as a cutoff. NMP_DEPTH is the minimum depth, NMP_RED the
+   base depth reduction (deep nodes reduce a bit more: + depth/6). The probe is
+   ALWAYS a real search (with these constants nd >= 1 for every qualifying
+   depth): a qsearch-level probe only sees the opponent's captures and can
+   blunder past a quiet defense, which the bench shows regressing (e.g. pos 5
+   at depth 5). The depth gate keeps probes at big-subtree nodes where a
+   successful cutoff pays for the failed ones. */
+#define NMP_DEPTH  4
+#define NMP_RED    2
+
+/* does the side to move hold any non-king, non-pawn piece? Null-move pruning
+   is unsound in pawn-less (zugzwang) endings where giving the move away can
+   actually hurt. Early-exit 64-square sweep; only reached after the eval has
+   already passed the eval >= beta gate. */
+static i16 has_np_material(Pos *p) {
+    i16 sq = 0, my = p->side ? 8 : 0;
+    for (; sq < 128; sq += (sq & 7) == 7 ? 9 : 1) {
+        i16 pc = p->board[sq];
+        if (pc && CO(pc) == my && TY(pc) != 6 && TY(pc) != 1) return 1;
+    }
+    return 0;
+}
+
 /* root move list + scores, reused across iterative-deepening iterations */
 static u16 root_m[256];
 static Score root_score[256];
@@ -126,15 +152,34 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
        is_attacked test can be skipped. */
     in_check = is_attacked(p, p->ks[p->side], p->side ^ 1);
 
-    /* reverse futility pruning. Skipped while in check (the eval is unreliable
-       with the king exposed), at PV nodes (their score becomes a true bound),
-       and at depth 0 (qsearch already stand-pats the leaf). On a hit, pop this
-       node's rep-path entry (pushed above) before returning. */
-    if (depth >= 1 && depth <= RFP_DEPTH && !in_check && beta - alpha == 1) {
-        Score eval = evaluate(p);
-        if (eval - depth * RFP_MARGIN >= beta) {
-            rep_n--;
-            return eval;
+    /* RFP + NMP share the cheap gates (shallow-ish, non-PV, not in check) and
+       both need the static eval, so compute it once. RFP: eval beats beta by a
+       depth-scaled margin -> return eval. NMP: eval already >= beta -> try a
+       reduced-depth search of the null-move position (opponent to move); if it
+       fails high the node is a cutoff. Both pop this node's rep-path entry
+       (pushed above) on the way out. */
+    {
+        i16 can_rfp = depth >= 1 && depth <= RFP_DEPTH;
+        i16 can_nmp = depth >= NMP_DEPTH && half + 1 < MAX_HALF;
+        if ((can_rfp || can_nmp) && !in_check && beta - alpha == 1) {
+            Score eval = evaluate(p);
+            if (can_rfp && eval - depth * RFP_MARGIN >= beta) {
+                rep_n--;
+                return eval;
+            }
+            if (can_nmp && eval >= beta && has_np_material(p)) {
+                i16 R = NMP_RED + depth / 6;
+                i16 nd = depth - 1 - R;             /* the null move spends a ply */
+                Score sc;
+                nm_make(p);
+                if (nd > 0) sc = -alphabeta(p, nd, -beta, -beta + 1, ply + 1, half + 1);
+                else        sc = -qsearch(p, -beta, -beta + 1, ply + 1, half + 1, MAX_QDEPTH);
+                nm_undo(p);
+                if (sc >= beta && !stop_now) {
+                    rep_n--;
+                    return sc;
+                }
+            }
         }
     }
 
