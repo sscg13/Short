@@ -135,7 +135,14 @@
     totals (was ~12-20% low). The material row (rm, cpn material) is UNCHANGED -
     not re-measured (NNUE is the default build; -DNO_NNUE is a dev-only flag).
     Mirror flips (c_flip -> nn_compute_persp) are still UNCHARGED, as before
-    (rare: 157/depth-1, ~19K/depth-5; the ~1-2% cost is absorbed in rn). */
+    (rare: 157/depth-1, ~19K/depth-5; the ~1-2% cost is absorbed in rn).
+
+    PLY-INDEXED ACCUMULATOR note (2026-08): the copy-make snapshots were replaced
+    by writing the child accumulator into nn_acc[ply+1] (undo = nn_ply--, no
+    memcpy), which cut the 8088 NNUE make+undo pair ~5% (43,408 -> 41,216 c88;
+    the 286 is ~flat). The nm/rf weights below were fit to the OLD pair, so they
+    now over-charge the 8088 delta path by ~5% (~1.5% of the total - absorbed in
+    rn at bench-1, but re-fit nm/rf (and rn) if depth extrapolation matters. */
 
 #include "engine.h"
 

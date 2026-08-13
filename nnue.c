@@ -15,12 +15,18 @@
  * left-right symmetric by construction (and the 32 king buckets fold e-h ->
  * a-d without losing information).
  *
- * Incremental: do_make() applies per-feature-row deltas to both accumulators;
- * nnue_make snapshots the pre-move accumulator onto a per-ply stack slot and
- * nnue_undo restores it (copy-make), so no delta record is kept. The big weight
- * matrix lives in a far segment on 16-bit. A king move that crosses the d/e file
- * boundary flips a POV's mirror flag (every piece re-indexes), so that POV is
- * recomputed from scratch instead of applying deltas.
+ * Incremental: do_make() applies per-feature-row deltas to both accumulators.
+ * PLY-INDEXED accumulator: nn_acc[ply][2][NNUE_N] is a stack of snapshots
+ * indexed by the search ply (33 x 256 B, the same footprint the copy-make
+ * snapshot stack used). nnue_make writes the child's accumulator FRESH into
+ * slot nn_ply+1 (dst[j] = src[j] + delta[j], or a full recompute for a mirror
+ * flip) and increments nn_ply; nnue_undo just decrements nn_ply - NO
+ * snapshot/restore memcpy is kept, so a make/undo pair costs one 64-element
+ * pass instead of copy-make's save+apply+restore. nnue_eval reads slot nn_ply.
+ * The big weight matrix lives in a far segment on 16-bit. A king move that
+ * crosses the d/e file boundary flips a POV's mirror flag (every piece
+ * re-indexes), so that POV is recomputed from scratch (into the new slot)
+ * instead of applying deltas.
  *
  * Feature layout (704 rows, one perspective, in king-normalized coordinates).
  * "own" = the perspective side, "enemy" = the other side. Squares are compact
@@ -81,8 +87,12 @@ extern const u8 nn_embedded_net_start[];
 extern const u8 nn_embedded_net_end[];
 #endif
 
-i16 nn_acc[2][NNUE_N];   /* current pre-activations, white POV / black POV
-                            (non-static so nnue_opt.asm can reference it) */
+i16 nn_acc[MAXPLY + 1][2][NNUE_N];  /* ply-indexed pre-activation stack:
+                                       [ply][POV][j]; nnue_make writes slot
+                                       nn_ply+1, nnue_undo decrements nn_ply
+                                       (non-static so nnue_opt.asm can ref it) */
+i16 nn_ply = 0;          /* current ply: index of the active accumulator slot,
+                            kept in sync with the board's make/undo depth */
 
 #if defined(__WATCOMC__) && !defined(__386__)
 /* hand-unrolled 64-element apply loops (nnue_opt.asm) for the 16-bit build:
@@ -91,9 +101,10 @@ void nn_apply_add(i16 persp, i16 row);
 void nn_apply_sub(i16 persp, i16 row);
 #define NNUE_ASM_APPLY 1
 
-/* batched make loops (nnue_opt.asm): one 64-element pass with a single
-   word-RMW per element. nn_make_move: acc += w1[to] - w1[from].
-   nn_make_cap:  acc += w1[to] - w1[from] - w1[cap]. */
+/* batched ply-indexed make loops (nnue_opt.asm): one 64-element copy+apply pass
+   writing slot nn_ply+1. nn_make_move: dst = src + w1[to] - w1[from].
+   nn_make_cap:  dst = src + w1[to] - w1[from] - w1[cap]. The src (slot nn_ply)
+   is read via the _nn_ply global; dst is always src + 256 bytes. */
 void nn_make_move(i16 persp, i16 to_row, i16 from_row);
 void nn_make_cap(i16 persp, i16 to_row, i16 from_row, i16 cap_row);
 #define NNUE_ASM_BATCH 1
@@ -110,23 +121,6 @@ Score nn_fwd_eval(i16 side);          /* hand-asm forward pass */
 #define NNUE_ASM_FWD 1
 #endif
 #endif
-
-/* copy-make accumulator stack: nnue_make snapshots the pre-move accumulator into
-   the current ply's slot before applying deltas, and nnue_undo restores it. Undo
-   is one 256-byte copy instead of reversing the applied (row, sign) deltas, so a
-   make/undo pair costs half the NNUE apply work. 33*2*64*2 = 8.4 KB near data;
-   nn_acc stays the live accumulator (the hand-asm apply/fwd loops reference it by
-   a fixed offset), so the stack is plain near memcpy on both builds. */
-static i16 nn_save[MAXPLY + 1][2][NNUE_N];
-static i16 nn_ply;
-
-static void nn_save_acc(i16 ply) {
-    memcpy(nn_save[ply], nn_acc, sizeof nn_acc);
-}
-
-static void nn_restore_acc(i16 ply) {
-    memcpy(nn_acc, nn_save[ply], sizeof nn_acc);
-}
 
 /* ------------------------------------------------------------------ */
 /* feature indexing                                                   */
@@ -185,14 +179,22 @@ static i16 nn_row(i16 persp, i16 pc, i16 sq88, i16 mirror) {
     return nn_rowtab[pc][c];
 }
 
-/* Batched feature-row apply (make path). nn_batch_addsub applies +w1[to] -
-   w1[from] in ONE pass (one word-RMW per element, both on the 16-bit asm path
-   and the scalar C oracle); nn_batch_cap applies +w1[to] - w1[from] -
-   w1[cap]. Bit-identical to sequential sub+add (i16 arithmetic mod 2^16),
-   so node counts are unchanged by construction. A negative row means the
-   piece has no feature (e.g. a pawn on the promotion rank) -> skip it. */
+/* Batched ply-indexed feature-row apply (make path). nn_batch_addsub writes
+   dst[j] = src[j] + w1[to][j] - w1[from][j] in ONE pass (src = slot nn_ply,
+   dst = slot nn_ply+1; the asm path or the scalar C oracle), and nn_batch_cap
+   writes dst[j] = src[j] + w1[to][j] - w1[from][j] - w1[cap][j]. Bit-identical
+   to the old in-place RMW (i16 arithmetic mod 2^16), so node counts are
+   unchanged by construction. A negative row means the piece has no feature
+   (e.g. a pawn on the promotion rank) - the delta is zero, but the child slot
+   STILL gets written, so the perspective is plain-copied to it. */
 static void nn_batch_addsub(i16 persp, i16 to_row, i16 from_row) {
-    if (to_row < 0 || from_row < 0) return;
+    i16 *dst = nn_acc[nn_ply + 1][persp];
+    const i16 *src = nn_acc[nn_ply][persp];
+    if (to_row < 0 || from_row < 0) {
+        i16 j;
+        for (j = 0; j < NNUE_N; j++) dst[j] = src[j];
+        return;
+    }
     PCOUNT(c_refresh);
 #ifdef NNUE_ASM_BATCH
     nn_make_move(persp, to_row, from_row);
@@ -201,13 +203,19 @@ static void nn_batch_addsub(i16 persp, i16 to_row, i16 from_row) {
         u16 b0 = (u16)to_row << 6, b1 = (u16)from_row << 6;
         i16 j;
         for (j = 0; j < NNUE_N; j++)
-            nn_acc[persp][j] += (i16)nn_w1[b0 + j] - (i16)nn_w1[b1 + j];
+            dst[j] = (i16)(src[j] + (i16)nn_w1[b0 + j] - (i16)nn_w1[b1 + j]);
     }
 #endif
 }
 
 static void nn_batch_cap(i16 persp, i16 to_row, i16 from_row, i16 cap_row) {
-    if (to_row < 0 || from_row < 0 || cap_row < 0) return;
+    i16 *dst = nn_acc[nn_ply + 1][persp];
+    const i16 *src = nn_acc[nn_ply][persp];
+    if (to_row < 0 || from_row < 0 || cap_row < 0) {
+        i16 j;
+        for (j = 0; j < NNUE_N; j++) dst[j] = src[j];
+        return;
+    }
     PCOUNT(c_refresh);
 #ifdef NNUE_ASM_BATCH
     nn_make_cap(persp, to_row, from_row, cap_row);
@@ -217,8 +225,8 @@ static void nn_batch_cap(i16 persp, i16 to_row, i16 from_row, i16 cap_row) {
         u16 b2 = (u16)cap_row << 6;
         i16 j;
         for (j = 0; j < NNUE_N; j++)
-            nn_acc[persp][j] += (i16)nn_w1[b0 + j] - (i16)nn_w1[b1 + j]
-                              - (i16)nn_w1[b2 + j];
+            dst[j] = (i16)(src[j] + (i16)nn_w1[b0 + j] - (i16)nn_w1[b1 + j]
+                          - (i16)nn_w1[b2 + j]);
     }
 #endif
 }
@@ -248,7 +256,7 @@ static void nn_compute(Pos *p, i16 out[2][NNUE_N]) {
 }
 
 void nnue_reset(Pos *p) {
-    nn_compute(p, nn_acc);
+    nn_compute(p, nn_acc[0]);       /* full recompute into slot 0 */
     nn_ply = 0;
 }
 
@@ -310,12 +318,15 @@ static void nn_castle_build(void) {
     }
 }
 
-/* apply the precomputed castle delta to one perspective (mirror unchanged) */
+/* apply the precomputed castle delta to one perspective (mirror unchanged):
+   copy+apply into the child slot (dst[j] = src[j] + delta[j]) */
 static void nn_castle_apply(i16 persp, i16 case_idx, i16 mover_col, i16 mirror) {
     i16 j;
     const i16 *d = cast_delta[case_idx][mover_col][mirror];
+    i16 *dst = nn_acc[nn_ply + 1][persp];
+    const i16 *src = nn_acc[nn_ply][persp];
     for (j = 0; j < NNUE_N; j++)
-        nn_acc[persp][j] += d[j];
+        dst[j] = (i16)(src[j] + d[j]);
 }
 
 void nnue_make(Pos *p, u16 m, Undo *u) {
@@ -328,10 +339,9 @@ void nnue_make(Pos *p, u16 m, Undo *u) {
     PCOUNT(c_nn_make);
     if (ispromo(m)) mover = (mover_col == 0) ? WP : BP;   /* it was a pawn */
 
-    /* snapshot the pre-move accumulator (copy-make: undo restores from the stack) */
-    nn_save_acc(nn_ply);
-
-    /* mirror flags before/after this move (only a king move can change them) */
+    /* mirror flags before/after this move (only a king move can change them).
+       Every perspective's delta (or full recompute) is written to the CHILD
+       slot nn_ply+1; the current slot stays intact as the undo restore point. */
     nn_mirrors(p, mpost);
     mpre[0] = (mover == WK) ? ((sq2c(from) & 7) >= 4) : mpost[0];
     mpre[1] = (mover == BK) ? ((7 - (sq2c(from) & 7)) >= 4) : mpost[1];
@@ -371,15 +381,14 @@ void nnue_make(Pos *p, u16 m, Undo *u) {
         }
     }
     for (persp = 0; persp < 2; persp++)
-        if (flip[persp]) nn_compute_persp(p, persp, nn_acc[persp]);
-    nn_ply++;
+        if (flip[persp]) nn_compute_persp(p, persp, nn_acc[nn_ply + 1][persp]);
+    nn_ply++;                     /* child slot is now the active accumulator */
 }
 
 void nnue_undo(Pos *p) {
     PCOUNT(c_nn_undo);
     (void)p;
-    if (nn_ply > 0) nn_ply--;
-    nn_restore_acc(nn_ply);   /* copy-make: no delta reversal, no recompute */
+    nn_ply--;                     /* the parent's slot is untouched */
 }
 
 /* ------------------------------------------------------------------ */
@@ -400,7 +409,7 @@ Score nnue_eval(Pos *p) {
            SWAP (acc[1] is the stm POV) and there is NO final negate - the score
            is already from the side to move's perspective. */
         for (j = 0; j < NNUE_N; j++) {
-            i16 a0 = nn_acc[0][j], a1 = nn_acc[1][j];
+            i16 a0 = nn_acc[nn_ply][0][j], a1 = nn_acc[nn_ply][1][j];
             i16 ws = nn_w2[j];                  /* stm weight */
             i16 wn = nn_w2[NNUE_N + j];         /* nstm weight */
             i16 as = (p->side == 0) ? a0 : a1;  /* stm activation */
@@ -479,23 +488,32 @@ void nnue_tables_init(void) {
     nn_castle_build();
 }
 
+/* load the net file directly into the static far arrays, STREAMING the sections
+   so NO temporary buffer is malloc'd. The 45 KB blob temp used to need a heap
+   block that a tight-memory 16-bit machine (e.g. the 80286 emulator @ 512 KB,
+   ~40 KB free) cannot spare. Same bytes land in the same arrays as
+   nnue_parse_blob, so the result is bit-identical. */
 int nnue_load(const char *path) {
     FILE *f = fopen(path, "rb");
-    u8 *buf;
-    i32 len, got;
-    int ok;
+    u8 hdr[12];
+    u16 feats, hN;
+    i32 w1sz = (i32)NNUE_FEATURES * NNUE_N;
     if (!f) return 0;
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 0; }
-    len = (i32)ftell(f);
-    if (len <= 0 || len > 200000L) { fclose(f); return 0; }
-    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return 0; }
-    buf = (u8 *)malloc((size_t)len);
-    if (!buf) { fclose(f); return 0; }
-    got = (i32)fread(buf, 1, (size_t)len, f);
+    if (fread(hdr, 1, 12, f) != 12) { fclose(f); return 0; }
+    if (hdr[0] != 'N' || hdr[1] != 'N' || hdr[2] != 'U' || hdr[3] != 'E') { fclose(f); return 0; }
+    if (hdr[4] != 1 || hdr[5] != 0) { fclose(f); return 0; }     /* version 1 */
+    feats = (u16)hdr[6] | ((u16)hdr[7] << 8);
+    hN    = (u16)hdr[8] | ((u16)hdr[9] << 8);
+    if (feats != NNUE_FEATURES || hN != NNUE_N) { fclose(f); return 0; }
+    if (fread(nn_w1, 1, (size_t)w1sz, f) != (size_t)w1sz) { fclose(f); return 0; }
+    if (fread(nn_b1, 1, (size_t)NNUE_N, f) != NNUE_N) { fclose(f); return 0; }
+    if (fread(nn_w2, 1, (size_t)NNUE_W2_SIZE, f) != NNUE_W2_SIZE) { fclose(f); return 0; }
+    if (fread(hdr, 1, 2, f) != 2) { fclose(f); return 0; }
+    nn_bias = (i16)((u16)(u8)hdr[0] | ((u16)(u8)hdr[1] << 8));
     fclose(f);
-    ok = (got == len) && nnue_parse_blob(buf, len);
-    free(buf);
-    return ok;
+    nnue_enabled = 1;
+    nnue_tables_init();
+    return 1;
 }
 
 /* try the file first (lets --nnue override the bundled net), then the
@@ -669,9 +687,9 @@ int nnue_selftest(const char *fen) {
         i16 rt = 0;   /* first-failure diagnostic flag */
         for (i = 0; i < n; i++) {
             Undo u;
-            memcpy(before, nn_acc, sizeof before);
+            memcpy(before, nn_acc[nn_ply], sizeof before);
             do_make(&pos, list[i], &u);
-            memcpy(incr, nn_acc, sizeof incr);
+            memcpy(incr, nn_acc[nn_ply], sizeof incr);
             nn_compute(&pos, fresh);
             if (memcmp(incr, fresh, sizeof incr) != 0) {
                 if (!rt) {
@@ -685,13 +703,13 @@ int nnue_selftest(const char *fen) {
                 fail++;
             }
             undo_move(&pos, list[i], &u);
-            if (memcmp(before, nn_acc, sizeof before) != 0) {
+            if (memcmp(before, nn_acc[nn_ply], sizeof before) != 0) {
                 if (!rt) {
                     i16 jj;
                     for (jj = 0; jj < 2 * NNUE_N; jj++)
-                        if (((i16 *)before)[jj] != nn_acc[jj >> 6][jj & 63]) break;
+                        if (((i16 *)before)[jj] != nn_acc[nn_ply][jj >> 6][jj & 63]) break;
                     printf("nn rt undo-fail move %d (mv=%04x): acc[%d/%d] before=%d after=%d\n",
-                           i, list[i], jj >> 6, jj & 63, ((i16 *)before)[jj], nn_acc[jj >> 6][jj & 63]);
+                           i, list[i], jj >> 6, jj & 63, ((i16 *)before)[jj], nn_acc[nn_ply][jj >> 6][jj & 63]);
                     rt = 1;
                 }
                 fail++;
