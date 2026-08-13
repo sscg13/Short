@@ -108,15 +108,34 @@
    the same per-node delta (the search-structure change is NNUE-independent).
    8086 est = 0.75x of the 8088 delta. Bench 4 = 653,046 (was 880,565).
 
-   RFP (2026-08, branch `rfp`): reverse futility pruning in alphabeta
-   (depth 1..7, non-PV, not in check: return eval when eval - 100*depth >=
-   beta) cuts bench 4 653,046 -> 382,982 but leaves bench 1 UNCHANGED at 13,458
-   (RFP needs depth >= 1, so a depth-1 search never fires it). No re-fit needed:
-   the weighted model auto-tracks the added alphabeta-node evals (they route
-   through nnue_eval -> c_nn_eval -> `ev`) and the node-count drop (c_anodes ->
-   `rn`); the scalar cpn_tab is still calibrated on the unchanged bench-1. The
-   one deliberate estimate: for deeper searches the material build's added
-   alphabeta evals are uncharged (folded into the fitted base R, as always). */
+    RFP (2026-08, branch `rfp`): reverse futility pruning in alphabeta
+    (depth 1..7, non-PV, not in check: return eval when eval - 100*depth >=
+    beta) cuts bench 4 653,046 -> 382,982 but leaves bench 1 UNCHANGED at 13,458
+    (RFP needs depth >= 1, so a depth-1 search never fires it). No re-fit needed:
+    the weighted model auto-tracks the added alphabeta-node evals (they route
+    through nnue_eval -> c_nn_eval -> `ev`) and the node-count drop (c_anodes ->
+    `rn`); the scalar cpn_tab is still calibrated on the unchanged bench-1. The
+    one deliberate estimate: for deeper searches the material build's added
+    alphabeta evals are uncharged (folded into the fitted base R, as always).
+
+    RE-MEASURE re-fit (2026-08, branch `nmp`): fresh sbench/nbench + bench 1 +
+    bench 2 on the emulators (8088 vm\xt @16 MHz, 80286 vm\atami @6 MHz) with the
+    NMP build. The search weights (att/gc/gq/mk/ps/tp/ts) re-verified within 2-5%.
+    The NNUE weights were ~1.5-1.8x STALE (the forward and the delta path had
+    drifted from the old nbench numbers): fresh eval 35,360 / 10,296 cyc, make+undo
+    pair 43,408 / 13,674 (vs 19,328 / 6,588 and the old charge ~31,900 / ~10,700).
+    With the old weights the model UNDER-predicted the measured bench-2 total by
+    ~7%; the fresh weights agree within ~1.6% (bench 1: 1.976e9 c88 / 0.641e9 c286
+    @13,458 nodes; bench 2: 2.227e9 c286 @46,032 nodes). nm+rf set from the nbench
+    pair minus the sbench board pair - only their SUM is measured (c_nn_make ~=
+    c_refresh ~= 2x makes, so the nm/rf split does not move the total); ev from
+    nbench eval. gm set to the fresh full-drain cost (charged only at the 8 root
+    calls - negligible). rn re-fit so bench-1 reproduces the fresh totals: rn 2,516
+    (286) / 5,855 (8088). The scalar cpn_tab NNUE row re-derived from the same
+    totals (was ~12-20% low). The material row (rm, cpn material) is UNCHANGED -
+    not re-measured (NNUE is the default build; -DNO_NNUE is a dev-only flag).
+    Mirror flips (c_flip -> nn_compute_persp) are still UNCHARGED, as before
+    (rare: 157/depth-1, ~19K/depth-5; the ~1-2% cost is absorbed in rn). */
 
 #include "engine.h"
 
@@ -135,9 +154,9 @@ static i16 vperiod_started; /* first period not yet granted */
 /* scalar cycles/node, NNUE / material (16-bit build) */
 #ifndef VCLOCK
 static const i32 cpn_tab[3][2] = {
-    { 41948L,  23802L },   /* VCPU_80286  (PVS re-fit: -504 cyc/node) */
-    { 117108L, 76064L },   /* VCPU_8088   (PVS re-fit: -1422 cyc/node) */
-    { 91198L,  51198L },   /* VCPU_8086 (estimate) */
+    { 47600L,  23802L },   /* VCPU_80286  (RE-MEASURE re-fit: bench-1 0.641e9/13458) */
+    { 146800L, 76064L },   /* VCPU_8088   (RE-MEASURE re-fit: bench-1 1.976e9/13458) */
+    { 114300L, 51198L },   /* VCPU_8086 (estimate, 0.779x of the 8088 row) */
 };
 #endif
 
@@ -146,23 +165,21 @@ static i64 vbudget_cyc;   /* weighted cycle budget for the current move */
 
 typedef struct { i32 att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm, tp, ts; } VW;
 static const VW vw_tab[3] = {
-    /*   att    ps     gc     gq      gm    mk    nm   rf    ev     rn      rm      tp    ts */
-    {  2316,   102, 16890, 18258, 46818, 1956, 1000, 2400,  6588,   8040,   8723,   594,  492 }, /* 80286 */
-    {  6368,   272, 46880, 54912, 137680, 6144, 3000, 6800, 19328,  36185,  31934,  1968, 1808 }, /* 8088 */
-    {  4776,   204, 35160, 41184, 103260, 4608, 2250, 5100, 14496,  27139,  23951,  1476, 1356 }, /* 8086 est */
+    /*   att    ps     gc     gq      gm     mk    nm   rf    ev     rn      rm      tp    ts */
+    {  2292,   102, 16608, 18942, 169038, 1944, 1400, 3493, 10296,   2516,   8723,   612,  510 }, /* 80286 */
+    {  6576,   816, 46128, 54560, 608192, 6176, 4500, 11028, 35360,   5855,  31934,  2032, 1744 }, /* 8088 */
+    {  4932,   612, 34596, 40920, 456144, 4632, 3375,  8271, 26520,   4391,  23951,  1524, 1308 }, /* 8086 est */
 };
-/* Re-fit (2026-08, TT): att/gc/gq/gm/mk/ps/tp/ts are fresh sbench measurements
-   on the uninstrumented 16-bit build (8088 @16 / 286 @6 MHz). mk and ps were
-   ~4x / ~2.5x STALE (the incremental-Zobrist cost folded into make/undo was
-   never re-fit). nm/rf/ev kept from the nbench measurements (re-verify: the
-   rn/rm per-CPU ratio is not fully consistent). rn/rm re-fit to the SHIPPED
-   (no-counter) bench-1 totals, so the model predicts the real engine's NPS.
-   Re-fit (2026-08, quiet-history): the MG_QUIETS selection-sort cost lands in
-   the per-node base, so rn/rm += the measured delta (+1326 c286 / +9686 c88);
-   the material base rm gets the same delta (the sort never touches NNUE).
-   Re-fit (2026-08, PVS): the zero-window search + fail-soft qsearch changes the
-   node count AND the per-node cost; rn/rm += the measured bench-1 delta
-   (-504 c286 / -1422 c88) so the model reproduces the new totals. */
+/* RE-MEASURE re-fit (2026-08, branch nmp): all weights are FRESH emulator
+   measurements with the NMP build. Search weights from sbench (averaged over the
+   8 bench positions, 8088 @16 / 286 @6 MHz): att/gc/gq/mk/ps/tp/ts re-verified
+   within 2-5% of the previous table. NNUE weights from nbench: ev = forward pass;
+   nm+rf = (make+undo pair minus the sbench board pair)/2 - only the SUM is
+   measured, the split (nm:rf ~= 1:2.4) is carried over from the old table and
+   does not move the total since c_nn_make ~= c_refresh ~= 2x makes. gm = the full
+   staged-drain cost (charged only at the 8 root gen_moves calls). rn re-fit so
+   bench-1 reproduces the fresh totals (1.976e9 c88 / 0.641e9 c286 @ 13,458 nodes);
+   rm (material base) UNCHANGED - not re-measured. 8086 = 0.75x of the 8088 row. */
 
 static i64 vclock_cyc(void) {
     const VW *w = &vw_tab[vcpu_model];
