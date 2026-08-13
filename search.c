@@ -103,20 +103,25 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
     /* 50-move rule: 100 half-moves without a pawn move or capture is a draw */
     if (half >= MAX_HALF) { rep_n--; return 0; }
 
-    /* transposition table (A/B: move-ordering only). The stored move is tried
-       first (MG_TT stage); the stored score/bound is NOT used for cutoffs or
-       window tightening, isolating the TT-move-ordering effect from the score
-       reuse. */
+    /* transposition table. The probe is shared between the move-ordering use
+       (the stored move, if its from-square still holds a piece of the side to
+       move, is tried first in the MG_TT stage) and the cutoff use. A stored
+       result with depth >= this node's depth is trusted ONLY at a non-PV node
+       (zero window: beta == alpha+1): EXACT returns the score outright, and a
+       matching LOWER/UPPER bound cuts off against beta/alpha. PV nodes are
+       exempt so a bound never truncates the principal variation's exact score. */
     {
         u16 tmv = 0;
         Score tsc = 0;
         i16 tfl = 0, tdep = 0;
         if (tt_probe(p, ply, &tmv, &tsc, &tfl, &tdep)) {
-            /* only trust the stored move if its from-square holds a piece of
-               the side to move (a stale/corrupt entry must never enter the
-               search; the legality filter below would otherwise accept it) */
             if (tmv && CO(p->board[mfrom(tmv)]) == (p->side ? 8 : 0))
                 ttm = tmv;
+            if (beta - alpha == 1 && tdep >= depth) {
+                if (tfl == TT_EXACT) { rep_n--; return tsc; }
+                if (tfl == TT_LOWER && tsc >= beta) { rep_n--; return tsc; }
+                if (tfl == TT_UPPER && tsc <= alpha) { rep_n--; return tsc; }
+            }
         }
     }
 
