@@ -163,6 +163,8 @@ extern i16 post_on;
 /* ---- search.c ---- */
 void do_make(Pos *p, u16 m, Undo *u);
 void undo_move(Pos *p, u16 m, Undo *u);
+void nm_make(Pos *p);            /* null-move make: side flip + Zobrist side toggle */
+void nm_undo(Pos *p);            /* null-move undo (same op: XOR is self-inverse) */
 i16 is_attacked(Pos *p, i16 sq, i16 by);
 i16 sq_on_king_line(Pos *p, i16 sq, i16 s);
 i16 gen_moves(Pos *p, u16 *list);

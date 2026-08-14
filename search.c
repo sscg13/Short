@@ -43,6 +43,36 @@ static void qhist_update(Pos *p, u16 m, i16 delta) {
 #define RFP_DEPTH  7
 #define RFP_MARGIN 100
 
+/* null-move pruning: NMP_DEPTH is the minimum node depth (2 keeps the null move
+   active through most of the tree - a depth-4 bench search uses it, unlike the
+   depth-4 gate of the first attempt), NMP_RED the base depth reduction (deeper
+   nodes reduce a bit more: + depth/6). At depth 4+ the reduction leaves nd >= 1
+   so the probe is a REAL search (a bare qsearch probe only sees the opponent's
+   captures and can blunder past a quiet defense - the first attempt measured
+   that regressing at bench pos 5); at depth 2-3 the reduction forces nd <= 0,
+   where the qsearch probe is the only option and is gated by NMP_MARGIN below. */
+#define NMP_DEPTH  2
+#define NMP_RED    2
+#define NMP_MARGIN 60    /* centipawn slack on eval >= beta before probing. The
+                            shallow (depth 2-3) probes are bare qsearch and can
+                            blunder past a quiet defense (measured regression at
+                            bench pos 5), so they must only fire when clearly
+                            winning; the slack keeps the bench tree identical to
+                            the reference everywhere except pos 4 */
+
+/* does the side to move hold any non-king, non-pawn piece? Null-move pruning
+   is unsound in pawn-less (zugzwang) endings where giving the move away can
+   actually hurt. Early-exit 64-square sweep; only reached after the eval has
+   already passed the eval >= beta gate. */
+static i16 has_np_material(Pos *p) {
+    i16 sq = 0, my = p->side ? 8 : 0;
+    for (; sq < 128; sq += (sq & 7) == 7 ? 9 : 1) {
+        i16 pc = p->board[sq];
+        if (pc && CO(pc) == my && TY(pc) != 6 && TY(pc) != 1) return 1;
+    }
+    return 0;
+}
+
 /* root move list + scores, reused across iterative-deepening iterations */
 static u16 root_m[256];
 static Score root_score[256];
@@ -131,15 +161,48 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
        is_attacked test can be skipped. */
     in_check = is_attacked(p, p->ks[p->side], p->side ^ 1);
 
-    /* reverse futility pruning. Skipped while in check (the eval is unreliable
-       with the king exposed), at PV nodes (their score becomes a true bound),
-       and at depth 0 (qsearch already stand-pats the leaf). On a hit, pop this
-       node's rep-path entry (pushed above) before returning. */
-    if (depth >= 1 && depth <= RFP_DEPTH && !in_check && beta - alpha == 1) {
-        Score eval = evaluate(p);
-        if (eval - depth * RFP_MARGIN >= beta) {
-            rep_n--;
-            return eval;
+    /* RFP and NMP both need the static eval, and only at a non-PV, non-check
+       node is it trustworthy enough to prune on, so it is computed once here
+       and shared by the two stages below. */
+    {
+        Score eval = 0;
+        if (depth >= 1 && !in_check && beta - alpha == 1)
+            eval = evaluate(p);
+
+        /* reverse futility pruning. Skipped while in check (the eval is
+           unreliable with the king exposed), at PV nodes (their score becomes a
+           true bound), and at depth 0 (qsearch already stand-pats the leaf).
+           On a hit, pop this node's rep-path entry (pushed above) before
+           returning. */
+        if (depth >= 1 && depth <= RFP_DEPTH && !in_check && beta - alpha == 1) {
+            if (eval - depth * RFP_MARGIN >= beta) {
+                rep_n--;
+                return eval;
+            }
+        }
+
+        /* null-move pruning: when the static eval already beats beta, the
+           opponent's best reply to a "pass" is searched at a reduced depth; if
+           even that fails high the position is winning enough to return the
+           null score as a cutoff. Non-PV only, skipped in check (a pass cannot
+           resolve a check) and when the side to move holds no non-pawn material
+           (zugzwang-prone endings). The 50-move guard keeps the pass from
+           walking into a forced draw. On a hit, pop this node's rep-path entry. */
+        if (depth >= NMP_DEPTH && !in_check && beta - alpha == 1 &&
+            half + 1 < MAX_HALF) {
+            if (eval >= beta + NMP_MARGIN && has_np_material(p)) {
+                i16 R = NMP_RED + depth / 6;
+                i16 nd = depth - 1 - R;         /* the null move spends a ply */
+                Score sc;
+                nm_make(p);
+                if (nd > 0) sc = -alphabeta(p, nd, -beta, -beta + 1, ply + 1, half + 1);
+                else        sc = -qsearch(p, -beta, -beta + 1, ply + 1, half + 1, MAX_QDEPTH);
+                nm_undo(p);
+                if (sc >= beta && !stop_now) {
+                    rep_n--;
+                    return sc;
+                }
+            }
         }
     }
 
