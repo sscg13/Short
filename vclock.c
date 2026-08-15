@@ -164,7 +164,21 @@
      1,347,275 (-13.1% vs the 1,549,445 TT-cutoff baseline). Scores match the
      reference on 7/8 bench positions (pos 4 only: 152 -> 270). No re-fit: the
      probes are ordinary alphabeta/qsearch calls (rn/qn) and the shared RFP/NMP
-     eval routes through nnue_eval -> c_nn_eval -> `ev`. */
+     eval routes through nnue_eval -> c_nn_eval -> `ev`.
+
+     LMR note (2026-08, branch `lmr`): late move reductions in the alphabeta
+     move loop. The reduction comes from a static precomputed table lmr_tab
+     (R = int(0.75 + ln(d)*ln(m)/2), 2 KB const in DGROUP) - a compile-time
+     constant, so gcc and the 16-bit build agree bit-for-bit with no runtime
+     log(). Gates: node depth >= 3, legal-move # >= 4, non-PV (zero window),
+     not in check, quiet only (mfl == 0 && cap empty), reduced depth clamped to
+     >= 1 (a qsearch probe on a quiet move only sees captures - the NMP lesson).
+     Bench 1 UNCHANGED at 13,458 (depth 1 never fires LMR); bench 4/5 drop
+     367,867 -> 358,845 and 1,347,275 -> 1,022,907 (the ~24% bench-5 drop is the
+     point). No re-fit: LMR only reuses existing primitives (rn/qn via ordinary
+     alphabeta calls, table reads are free) and the node-count drop is tracked
+     by c_anodes -> rn; bench-1 (the scalar cpn calibration) is untouched. */
+
 
 #include "engine.h"
 
