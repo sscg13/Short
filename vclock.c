@@ -137,12 +137,34 @@
     Mirror flips (c_flip -> nn_compute_persp) are still UNCHARGED, as before
     (rare: 157/depth-1, ~19K/depth-5; the ~1-2% cost is absorbed in rn).
 
-    PLY-INDEXED ACCUMULATOR note (2026-08): the copy-make snapshots were replaced
-    by writing the child accumulator into nn_acc[ply+1] (undo = nn_ply--, no
-    memcpy), which cut the 8088 NNUE make+undo pair ~5% (43,408 -> 41,216 c88;
-    the 286 is ~flat). The nm/rf weights below were fit to the OLD pair, so they
-    now over-charge the 8088 delta path by ~5% (~1.5% of the total - absorbed in
-    rn at bench-1, but re-fit nm/rf (and rn) if depth extrapolation matters. */
+     PLY-INDEXED ACCUMULATOR note (2026-08): the copy-make snapshots were replaced
+     by writing the child accumulator into nn_acc[ply+1] (undo = nn_ply--, no
+     memcpy), which cut the 8088 NNUE make+undo pair ~5% (43,408 -> 41,216 c88;
+     the 286 is ~flat). The nm/rf weights below were fit to the OLD pair, so they
+     now over-charge the 8088 delta path by ~5% (~1.5% of the total - absorbed in
+     rn at bench-1, but re-fit nm/rf (and rn) if depth extrapolation matters.
+
+     TT CUTOFFS note (2026-08, branch `tt-cutoff`, main a212243): TT probes now
+     also return EXACT/bound cutoffs at non-PV (zero-window) nodes when the
+     stored depth >= the node depth (PV nodes keep move-ordering only). Bench 1
+     is UNCHANGED at 13,458 (no transpositions at depth 1); bench 4/5 drop
+     382,982 -> 356,316 and 1,688,724 -> 1,549,445. No re-fit: the model tracks
+     the probe (tp) and store (ts) calls and the node-count drops; the cutoffs
+     add no new primitive.
+
+     NMP retry note (2026-08, branch `nmp-again`): null-move pruning in alphabeta
+     between RFP and the move loop. NMP_DEPTH 2 (active at depth >= 2, so bench 4
+     exercises it - the first attempt's depth-4 gate left bench 4 unchanged),
+     NMP_RED 2 + depth/6, non-PV, not in check, side to move holds non-pawn
+     material, eval >= beta + 60 (the slack keeps the shallow qsearch probes from
+     the quiet-defense blunder that regressed bench pos 5 in the first attempt's
+     qsearch probe). Depth 4+ probes are real searches (nd >= 1); depth 2-3 probe
+     by qsearch (nd <= 0). Bench 1 unchanged at 13,458 (NMP needs depth >= 2);
+     bench 4 = 367,867 (+3.2% - shallow probes cost a little), bench 5 =
+     1,347,275 (-13.1% vs the 1,549,445 TT-cutoff baseline). Scores match the
+     reference on 7/8 bench positions (pos 4 only: 152 -> 270). No re-fit: the
+     probes are ordinary alphabeta/qsearch calls (rn/qn) and the shared RFP/NMP
+     eval routes through nnue_eval -> c_nn_eval -> `ev`. */
 
 #include "engine.h"
 
