@@ -202,9 +202,22 @@
      re-searches fire constantly; 100 -> 601,965; 150 -> 583,167; 200 ->
      583,013, no further gain). Mate scores never aspirate (full window keeps
      the exact line). Bench 1 unchanged at 9,960 (no aspiration at depth 1);
-     bench 4 = 190,540 (-11% vs 214,093), bench 5 = 583,167 (-13% vs 672,833).
-     No re-fit: the re-searches are ordinary alphabeta calls (rn/qn) - only
-     the per-depth loop cost changes. */
+      bench 4 = 190,540 (-11% vs 214,093), bench 5 = 583,167 (-13% vs 672,833).
+      No re-fit: the re-searches are ordinary alphabeta calls (rn/qn) - only
+      the per-depth loop cost changes.
+
+     LMP note (2026-08, branch `lmp`): late move pruning in alphabeta. A quiet
+     move at a shallow (depth <= LMP_DEPTH 3) non-PV, non-check node is skipped
+     without searching once move_count passes depth^2 + depth + 4 legal moves
+     (thresholds 6/10/16 at depth 1/2/3). The move is never even made: the gate
+     doubles as the fast-path legality condition (not in check, non-king, from-
+     square off the mover king's lines), so no is_attacked test runs and
+     move_count (legal moves searched) stays consistent. The TT move, both
+     killers and the qhist-ranked moves all search before the threshold, so only
+     the low-history tail is pruned. Bench 1 unchanged at 9,960 (the depth-1
+     root has no interior nodes); bench 4 = 158,510 (-17% vs 190,540), bench 5 =
+     525,615 (-10% vs 583,167). No re-fit: a pruned move costs only the gate
+     checks (no make/undo, no alphabeta call). */
 
 
 #include "engine.h"

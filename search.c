@@ -84,6 +84,17 @@ static void qhist_update(Pos *p, u16 m, i16 delta) {
    window so the loop terminates without i16 delta overflow. */
 #define ASP_DELTA 150
 
+/* late move pruning. At a shallow (depth <= LMP_DEPTH) non-PV node a quiet
+   move that appears late in the move list is skipped without searching: the
+   move ordering puts the plausible moves first, and a late quiet rarely beats
+   the running alpha at these depths. The threshold (depth^2 + depth + 4) is
+   the count of legal moves already searched: 6/10/16 at depth 1/2/3. The move
+   is never even made - the gate doubles as the fast-path legality condition
+   (not in check, non-king, from-square off the mover king's lines), so no
+   is_attacked test is needed and move_count (legal moves searched) stays
+   consistent. Gates mirror LMR: quiet only, zero window. */
+#define LMP_DEPTH 3
+
 static const u8 lmr_tab[LMR_TD][LMR_TM] = {
     { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 },
     { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 },
@@ -356,6 +367,16 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
             pc = p->board[mfrom(m)];                 /* moving piece, before the make */
             if (!pc || CO(pc) != (p->side ? 8 : 0)) continue;  /* not our piece: skip
                                                                   (guards a bogus TT move) */
+            /* LMP: a late quiet move at a shallow non-PV node is skipped without
+               searching. The gate's fast-path conditions guarantee legality, so
+               the move is never made and move_count (legal moves searched) stays
+               consistent. */
+            if (mfl(m) == 0 && p->board[mto(m)] == EMPTY
+                && depth >= 1 && depth <= LMP_DEPTH && beta - alpha == 1
+                && !in_check && TY(pc) != 6
+                && !sq_on_king_line(p, mfrom(m), p->side)
+                && move_count >= depth * depth + depth + 4)
+                continue;
             do_make(p, m, &u);
             us = p->side ^ 1;                        /* mover */
             /* Legality: if not in check, a non-king, non-EP move from a square off
