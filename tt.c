@@ -64,6 +64,28 @@ static i16 tt_index(Sig key) {
     return (i16)((w[0] ^ w[1] ^ w[2] ^ w[3]) & TT_MASK);
 }
 
+/* Mate-score conversion between the search's ROOT-relative encoding and the
+   entry's NODE-relative encoding. The search scores a position by the ply of
+   the MATED LEAF: a node at ply P with mate distance d stores/returns
+   +-(MATE - (P + d)) (the sign says who mates; P+d is the leaf's ply), and the
+   root prefers the shortest mate via the larger magnitude. The entry stores
+   the exact node-relative score +-(MATE - d): the distance d is a property of
+   the POSITION, not the path, so it is ply-independent and no ply needs to be
+   stored. Translating back at the probe's own ply +-(MATE - d - P2) =
+   +-(MATE - (P2 + d)) yields the correct root-relative score for that position
+   reached at any ply. */
+static Score tt_score_to_node(Score s, i16 ply) {   /* root-rel -> node-rel */
+    if (s >= MATE - MAXPLY) return (Score)(s + ply);
+    if (s <= -MATE + MAXPLY) return (Score)(s - ply);
+    return s;
+}
+
+static Score tt_score_from_node(Score s, i16 ply) { /* node-rel -> root-rel */
+    if (s >= MATE - MAXPLY) return (Score)(s - ply);
+    if (s <= -MATE + MAXPLY) return (Score)(s + ply);
+    return s;
+}
+
 /* empty the table (bench positions, xboard new/setboard) */
 void tt_clear(void) {
     i16 i;
@@ -77,9 +99,9 @@ void tt_clear(void) {
     }
 }
 
-/* probe: 1 on a hit. Fills the stored move/score/flag/depth. The score is
-   converted from the node-relative mate encoding back to root-relative at the
-   caller's ply; bounds/ordering decisions are left to the caller. */
+/* probe: 1 on a hit. Fills the stored move/score/flag/depth. The stored
+   node-relative mate score is translated back to root-relative at the caller's
+   ply; bounds/ordering decisions are left to the caller. */
 i16 tt_probe(Pos *p, i16 ply, u16 *move_out, Score *score_out,
              i16 *flag_out, i16 *depth_out) {
     TTEnt *e = &tt_table[tt_index(p->sig)];
@@ -87,11 +109,8 @@ i16 tt_probe(Pos *p, i16 ply, u16 *move_out, Score *score_out,
     PCOUNT(c_tt_probe);
 
     if (e->info != 0 && e->key == p->sig) {
-        Score s = e->score;
-        if (s >= MATE - MAXPLY) s = (Score)(s - ply);       /* mate -> root-rel */
-        else if (s <= -MATE + MAXPLY) s = (Score)(s + ply);
         *move_out = e->move;
-        *score_out = s;
+        *score_out = tt_score_from_node(e->score, ply);
         *flag_out = TT_FLAG(e->info);
         *depth_out = TT_DEPTH(e->info);
         return 1;
@@ -101,7 +120,7 @@ i16 tt_probe(Pos *p, i16 ply, u16 *move_out, Score *score_out,
 
 /* store the node result. Replaces the slot iff the new depth is >= the stored
    one (equal depth replaces so an EXACT/bound update wins). Mate scores are
-   converted from root-relative to node-relative (the fromTT/toTT convention). */
+   converted from the search's root-relative to the node-relative encoding. */
 void tt_store(Pos *p, u16 move, i16 depth, Score score, i16 flag, i16 ply) {
     TTEnt *e = &tt_table[tt_index(p->sig)];
 
@@ -109,8 +128,7 @@ void tt_store(Pos *p, u16 move, i16 depth, Score score, i16 flag, i16 ply) {
 
     if (depth < TT_DEPTH(e->info)) return;         /* keep the deeper entry */
     if (depth > 63) depth = 63;
-    if (score >= MATE - MAXPLY) score = (Score)(score + ply);   /* -> node-rel */
-    else if (score <= -MATE + MAXPLY) score = (Score)(score - ply);
+    score = tt_score_to_node(score, ply);
     e->key = p->sig;
     e->move = move;
     e->score = score;
