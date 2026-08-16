@@ -73,6 +73,17 @@ static void qhist_update(Pos *p, u16 m, i16 delta) {
 #define LMR_TD    32    /* lmr_tab rows: node depth 0..31 (row 31 saturates) */
 #define LMR_TM    64    /* lmr_tab cols: moves already searched 0..63 (col 63 saturates) */
 
+/* aspiration windows: from depth >= 2 the root search confines itself to a
+   window of +-ASP_DELTA cp around the previous depth's score. A fail (the
+   search result lands at or outside the window - with fail-soft that means
+   the true value is outside) widens the window by doubling delta and re-searches.
+   A window that contains any root move's exact value must contain the exact
+   root value (the argmax), so an in-window result is always exact - the
+   fallback re-searches are just wasted nodes. Mate scores never aspirate (the
+   full window preserves the exact mate line) and the >4096 cap forces the full
+   window so the loop terminates without i16 delta overflow. */
+#define ASP_DELTA 150
+
 static const u8 lmr_tab[LMR_TD][LMR_TM] = {
     { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 },
     { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 },
@@ -451,50 +462,73 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
 
 void search_root(Pos *p, i16 maxdepth) {
     i16 d, i;
+    Score prev = -INF;
     root_n = gen_moves(p, root_m);
     for (i = 0; i < root_n; i++) root_score[i] = 0;
     if (nnue_ensure_default()) { nnue_reset(p); nnue_active = 1; }
     for (d = 1; d <= maxdepth; d++) {
-        Score alpha = -INF, beta = INF;
-        Score bestscore = -INF;
+        Score asp_lo = -INF, asp_hi = INF, bestscore = -INF, bsc = -INF;
+        u16 bm = 0;
+        i16 delta = ASP_DELTA;
         i16 bf = 0, bt = 0;
         clock_t t0, t1;
         double secs;
 
+        if (d >= 2 && prev > -(MATE - MAXPLY) && prev < MATE - MAXPLY) {
+            asp_lo = prev - delta;
+            asp_hi = prev + delta;
+        }
         nodes_search = 0;
         t0 = clock();
         rep_n = 0;
-        sort_root();
-        {
-            i16 first = 1;                 /* PVS: first root move gets the full window */
-            for (i = 0; i < root_n; i++) {
-                Undo u;
-                i16 us;
-                Score score;
-                do_make(p, root_m[i], &u);
-                us = p->side ^ 1;
-                if (!is_attacked(p, p->ks[us], p->side)) {
-                    i16 pc = p->board[mfrom(root_m[i])];   /* moving piece, before the make */
-                    i16 is_cap = (u.cap != EMPTY) || (mfl(root_m[i]) == MF_EP);
-                    i16 child_half = (TY(pc) == 1 || is_cap) ? 0 : g_half + 1;
-                    if (first) {
-                        first = 0;
-                        score = -alphabeta(p, d - 1, -beta, -alpha, 1, child_half);
-                    } else {
-                        score = -alphabeta(p, d - 1, -alpha - 1, -alpha, 1, child_half);
-                        if (score > alpha && score < beta)
+        for (;;) {
+            Score alpha = asp_lo, beta = asp_hi;
+            sort_root();
+            bsc = -INF;
+            {
+                i16 first = 1;         /* PVS: first root move gets the full window */
+                for (i = 0; i < root_n; i++) {
+                    Undo u;
+                    i16 us;
+                    Score score;
+                    do_make(p, root_m[i], &u);
+                    us = p->side ^ 1;
+                    if (!is_attacked(p, p->ks[us], p->side)) {
+                        i16 pc = p->board[mfrom(root_m[i])];   /* moving piece, before the make */
+                        i16 is_cap = (u.cap != EMPTY) || (mfl(root_m[i]) == MF_EP);
+                        i16 child_half = (TY(pc) == 1 || is_cap) ? 0 : g_half + 1;
+                        if (first) {
+                            first = 0;
                             score = -alphabeta(p, d - 1, -beta, -alpha, 1, child_half);
+                        } else {
+                            score = -alphabeta(p, d - 1, -alpha - 1, -alpha, 1, child_half);
+                            if (score > alpha && score < beta)
+                                score = -alphabeta(p, d - 1, -beta, -alpha, 1, child_half);
+                        }
+                        root_score[i] = score;
+                        if (score > bsc) { bsc = score; bm = root_m[i]; }
+                        if (score > alpha) alpha = score;
+                        undo_move(p, root_m[i], &u);
+                        if (alpha >= beta) break;
+                    } else {
+                        undo_move(p, root_m[i], &u);
                     }
-                    root_score[i] = score;
-                    if (score > bestscore) { bestscore = score; bf = mfrom(root_m[i]); bt = mto(root_m[i]); }
-                    if (score > alpha) alpha = score;
-                    undo_move(p, root_m[i], &u);
-                    if (alpha >= beta) break;
-                } else {
-                    undo_move(p, root_m[i], &u);
                 }
             }
+            if (root_n == 0) break;
+            if (bsc > asp_lo && bsc < asp_hi) break;
+            if (bsc <= asp_lo) {
+                asp_lo -= delta;
+                if (asp_lo < -INF) asp_lo = -INF;
+            } else {
+                asp_hi += delta;
+                if (asp_hi > INF) asp_hi = INF;
+            }
+            if (delta > 4096) { asp_lo = -INF; asp_hi = INF; }
+            else delta *= 2;
         }
+        prev = bestscore = bsc;
+        bf = mfrom(bm); bt = mto(bm);
         t1 = clock();
         secs = (double)(t1 - t0) / (double)CLOCKS_PER_SEC;
         printf("depth %2d  score %5d  move %02X%02X  %8ld nodes  %7.2fs\n",
@@ -532,60 +566,83 @@ static void print_move(u16 m) {
 u16 think(Pos *p, i16 maxdepth) {
     i16 d, i;
     u16 bestm = 0;
+    Score prev = -INF;
     i32 t0 = (i32)clock();
     dbgf("think begin maxdepth=%d deadline=%ld\n", maxdepth, (long)deadline);
     root_n = gen_moves(p, root_m);
     for (i = 0; i < root_n; i++) root_score[i] = 0;
     if (nnue_ensure_default()) { nnue_reset(p); nnue_active = 1; }
     for (d = 1; d <= maxdepth; d++) {
-        Score alpha = -INF, beta = INF, bsc = -INF;
+        Score asp_lo = -INF, asp_hi = INF, bsc = -INF;
         u16 bm = 0;
+        i16 delta = ASP_DELTA;
         pv_len[0] = 0;
         if (deadline > 0 && (long)clock() >= deadline) break;
         if (vtime_mode && vclock_budget_hit()) break;
+        if (d >= 2 && prev > -(MATE - MAXPLY) && prev < MATE - MAXPLY) {
+            asp_lo = prev - delta;
+            asp_hi = prev + delta;
+        }
         nodes_search = 0;
         stop_now = 0;
         rep_n = 0;
-        sort_root();
-        {
-            i16 first = 1;                 /* PVS: first root move gets the full window */
-            for (i = 0; i < root_n; i++) {
-                Undo u;
-                i16 us;
-                Score score;
-                do_make(p, root_m[i], &u);
-                us = p->side ^ 1;
-                if (!is_attacked(p, p->ks[us], p->side)) {
-                    i16 pc = p->board[mfrom(root_m[i])];   /* moving piece, before the make */
-                    i16 is_cap = (u.cap != EMPTY) || (mfl(root_m[i]) == MF_EP);
-                    i16 child_half = (TY(pc) == 1 || is_cap) ? 0 : g_half + 1;
-                    if (first) {
-                        first = 0;
-                        score = -alphabeta(p, d - 1, -beta, -alpha, 1, child_half);
-                    } else {
-                        score = -alphabeta(p, d - 1, -alpha - 1, -alpha, 1, child_half);
-                        if (score > alpha && score < beta)
+        for (;;) {
+            Score alpha = asp_lo, beta = asp_hi;
+            sort_root();
+            bsc = -INF;
+            {
+                i16 first = 1;         /* PVS: first root move gets the full window */
+                for (i = 0; i < root_n; i++) {
+                    Undo u;
+                    i16 us;
+                    Score score;
+                    do_make(p, root_m[i], &u);
+                    us = p->side ^ 1;
+                    if (!is_attacked(p, p->ks[us], p->side)) {
+                        i16 pc = p->board[mfrom(root_m[i])];   /* moving piece, before the make */
+                        i16 is_cap = (u.cap != EMPTY) || (mfl(root_m[i]) == MF_EP);
+                        i16 child_half = (TY(pc) == 1 || is_cap) ? 0 : g_half + 1;
+                        if (first) {
+                            first = 0;
                             score = -alphabeta(p, d - 1, -beta, -alpha, 1, child_half);
-                    }
-                    root_score[i] = score;
-                    if (score > bsc) {
-                        bsc = score;
-                        bm = root_m[i];
-                        pv[0][0] = root_m[i];              /* root move + the child line */
-                        {
-                            i16 pl = pv_len[1], k;
-                            for (k = 0; k < pl && k < MAXPLY - 1; k++) pv[0][k + 1] = pv[1][k];
-                            pv_len[0] = (pl >= MAXPLY) ? MAXPLY : pl + 1;
+                        } else {
+                            score = -alphabeta(p, d - 1, -alpha - 1, -alpha, 1, child_half);
+                            if (score > alpha && score < beta)
+                                score = -alphabeta(p, d - 1, -beta, -alpha, 1, child_half);
                         }
-                    }
-                    if (score > alpha) alpha = score;
-                    undo_move(p, root_m[i], &u);
-                    if (alpha >= beta) break;
-                } else undo_move(p, root_m[i], &u);
-                if (stop_now) break;
+                        root_score[i] = score;
+                        if (score > bsc) {
+                            bsc = score;
+                            bm = root_m[i];
+                            pv[0][0] = root_m[i];          /* root move + the child line */
+                            {
+                                i16 pl = pv_len[1], k;
+                                for (k = 0; k < pl && k < MAXPLY - 1; k++) pv[0][k + 1] = pv[1][k];
+                                pv_len[0] = (pl >= MAXPLY) ? MAXPLY : pl + 1;
+                            }
+                        }
+                        if (score > alpha) alpha = score;
+                        undo_move(p, root_m[i], &u);
+                        if (alpha >= beta) break;
+                    } else undo_move(p, root_m[i], &u);
+                    if (stop_now) break;
+                }
             }
+            if (stop_now) break;
+            if (root_n == 0) break;
+            if (bsc > asp_lo && bsc < asp_hi) break;
+            if (bsc <= asp_lo) {
+                asp_lo -= delta;
+                if (asp_lo < -INF) asp_lo = -INF;
+            } else {
+                asp_hi += delta;
+                if (asp_hi > INF) asp_hi = INF;
+            }
+            if (delta > 4096) { asp_lo = -INF; asp_hi = INF; }
+            else delta *= 2;
         }
         if (stop_now) break;
+        prev = bsc;
         bestm = bm;
         if (post_on) {
             /* CECP §10 thinking output: ply score time(cs) nodes [*seldepth *speed *tbhits] pv.
@@ -670,7 +727,7 @@ int bench(int depth) {
     for (i = 0; i < BENCH_N; i++) {
         Pos p;
         i32 pos_nodes = 0;
-        Score bestscore = -INF;
+        Score bestscore = -INF, prev = -INF;
         i16 bf = 0, bt = 0;
         clock_t t0, t1;
         double secs;
@@ -686,40 +743,61 @@ int bench(int depth) {
 
         t0 = clock();
         for (d = 1; d <= depth; d++) {
-            Score alpha = -INF, beta = INF, bsc = -INF;
+            Score asp_lo = -INF, asp_hi = INF, bsc = -INF;
             u16 bm = 0;
+            i16 delta = ASP_DELTA;
+            if (d >= 2 && prev > -(MATE - MAXPLY) && prev < MATE - MAXPLY) {
+                asp_lo = prev - delta;
+                asp_hi = prev + delta;
+            }
             nodes_search = 0;
             rep_n = 0;
             stop_now = 0;
-            sort_root();
-            {
-                i16 first = 1;                 /* PVS: first root move gets the full window */
-                for (k = 0; k < root_n; k++) {
-                    Undo u;
-                    i16 us;
-                    Score score;
-                    do_make(&p, root_m[k], &u);
-                    us = p.side ^ 1;
-                    if (!is_attacked(&p, p.ks[us], p.side)) {
-                        i16 pc = p.board[mfrom(root_m[k])];
-                        i16 is_cap = (u.cap != EMPTY) || (mfl(root_m[k]) == MF_EP);
-                        i16 child_half = (TY(pc) == 1 || is_cap) ? 0 : g_half + 1;
-                        if (first) {
-                            first = 0;
-                            score = -alphabeta(&p, d - 1, -beta, -alpha, 1, child_half);
-                        } else {
-                            score = -alphabeta(&p, d - 1, -alpha - 1, -alpha, 1, child_half);
-                            if (score > alpha && score < beta)
+            for (;;) {
+                Score alpha = asp_lo, beta = asp_hi;
+                sort_root();
+                bsc = -INF;
+                {
+                    i16 first = 1;         /* PVS: first root move gets the full window */
+                    for (k = 0; k < root_n; k++) {
+                        Undo u;
+                        i16 us;
+                        Score score;
+                        do_make(&p, root_m[k], &u);
+                        us = p.side ^ 1;
+                        if (!is_attacked(&p, p.ks[us], p.side)) {
+                            i16 pc = p.board[mfrom(root_m[k])];
+                            i16 is_cap = (u.cap != EMPTY) || (mfl(root_m[k]) == MF_EP);
+                            i16 child_half = (TY(pc) == 1 || is_cap) ? 0 : g_half + 1;
+                            if (first) {
+                                first = 0;
                                 score = -alphabeta(&p, d - 1, -beta, -alpha, 1, child_half);
-                        }
-                        root_score[k] = score;
-                        if (score > bsc) { bsc = score; bm = root_m[k]; }
-                        if (score > alpha) alpha = score;
-                        undo_move(&p, root_m[k], &u);
-                        if (alpha >= beta) break;
-                    } else undo_move(&p, root_m[k], &u);
+                            } else {
+                                score = -alphabeta(&p, d - 1, -alpha - 1, -alpha, 1, child_half);
+                                if (score > alpha && score < beta)
+                                    score = -alphabeta(&p, d - 1, -beta, -alpha, 1, child_half);
+                            }
+                            root_score[k] = score;
+                            if (score > bsc) { bsc = score; bm = root_m[k]; }
+                            if (score > alpha) alpha = score;
+                            undo_move(&p, root_m[k], &u);
+                            if (alpha >= beta) break;
+                        } else undo_move(&p, root_m[k], &u);
+                    }
                 }
+                if (root_n == 0) break;
+                if (bsc > asp_lo && bsc < asp_hi) break;
+                if (bsc <= asp_lo) {
+                    asp_lo -= delta;
+                    if (asp_lo < -INF) asp_lo = -INF;
+                } else {
+                    asp_hi += delta;
+                    if (asp_hi > INF) asp_hi = INF;
+                }
+                if (delta > 4096) { asp_lo = -INF; asp_hi = INF; }
+                else delta *= 2;
             }
+            prev = bsc;
             pos_nodes += nodes_search;
             if (d == depth) { bestscore = bsc; bf = mfrom(bm); bt = mto(bm); }
         }
@@ -757,7 +835,8 @@ int bench(int depth) {
 /* profile: same 8-position suite as bench(), but resets the call/     */
 /* feature counters first and reports a cost breakdown after. Depth    */
 /* defaults to 4; identical search semantics to bench() so node counts */
-/* stay the same (911,306 at depth 4 with the TT). Builds need -DPROFILE. */
+/* stay the same (bench 4 with the TT; aspiration is applied too).     */
+/* Builds need -DPROFILE.                                              */
 /* ------------------------------------------------------------------ */
 int profile(int depth) {
     i16 i, d, k;
@@ -783,6 +862,7 @@ int profile(int depth) {
     for (i = 0; i < BENCH_N; i++) {
         Pos p;
         i32 pos_nodes = 0;
+        Score prev = -INF;
         i32 s_an = c_anodes, s_qn = c_qnodes, s_nm = c_nextmove;
         i32 s_mk = c_make, s_uc = c_undo, s_gm = c_gen_moves, s_gc = c_gen_caps, s_gq = c_gen_quiets;
         i32 s_nn = c_nn_make, s_nu = c_nn_undo, s_ev = c_nn_eval, s_rf = c_refresh;
@@ -799,38 +879,60 @@ int profile(int depth) {
         if (nnue_ensure_default()) { nnue_reset(&p); nnue_active = 1; }
 
         for (d = 1; d <= depth; d++) {
-            Score alpha = -INF, beta = INF;
+            Score asp_lo = -INF, asp_hi = INF, bsc = -INF;
+            i16 delta = ASP_DELTA;
+            if (d >= 2 && prev > -(MATE - MAXPLY) && prev < MATE - MAXPLY) {
+                asp_lo = prev - delta;
+                asp_hi = prev + delta;
+            }
             nodes_search = 0;
             rep_n = 0;
             stop_now = 0;
-            sort_root();
-            {
-                i16 first = 1;                 /* PVS: first root move gets the full window */
-                for (k = 0; k < root_n; k++) {
-                    Undo u;
-                    i16 us;
-                    Score score;
-                    do_make(&p, root_m[k], &u);
-                    us = p.side ^ 1;
-                    if (!is_attacked(&p, p.ks[us], p.side)) {
-                        i16 pc = p.board[mfrom(root_m[k])];
-                        i16 is_cap = (u.cap != EMPTY) || (mfl(root_m[k]) == MF_EP);
-                        i16 child_half = (TY(pc) == 1 || is_cap) ? 0 : g_half + 1;
-                        if (first) {
-                            first = 0;
-                            score = -alphabeta(&p, d - 1, -beta, -alpha, 1, child_half);
-                        } else {
-                            score = -alphabeta(&p, d - 1, -alpha - 1, -alpha, 1, child_half);
-                            if (score > alpha && score < beta)
+            for (;;) {
+                Score alpha = asp_lo, beta = asp_hi;
+                sort_root();
+                bsc = -INF;
+                {
+                    i16 first = 1;         /* PVS: first root move gets the full window */
+                    for (k = 0; k < root_n; k++) {
+                        Undo u;
+                        i16 us;
+                        Score score;
+                        do_make(&p, root_m[k], &u);
+                        us = p.side ^ 1;
+                        if (!is_attacked(&p, p.ks[us], p.side)) {
+                            i16 pc = p.board[mfrom(root_m[k])];
+                            i16 is_cap = (u.cap != EMPTY) || (mfl(root_m[k]) == MF_EP);
+                            i16 child_half = (TY(pc) == 1 || is_cap) ? 0 : g_half + 1;
+                            if (first) {
+                                first = 0;
                                 score = -alphabeta(&p, d - 1, -beta, -alpha, 1, child_half);
-                        }
-                        root_score[k] = score;
-                        if (score > alpha) alpha = score;
-                        undo_move(&p, root_m[k], &u);
-                        if (alpha >= beta) break;
-                    } else undo_move(&p, root_m[k], &u);
+                            } else {
+                                score = -alphabeta(&p, d - 1, -alpha - 1, -alpha, 1, child_half);
+                                if (score > alpha && score < beta)
+                                    score = -alphabeta(&p, d - 1, -beta, -alpha, 1, child_half);
+                            }
+                            root_score[k] = score;
+                            if (score > bsc) bsc = score;
+                            if (score > alpha) alpha = score;
+                            undo_move(&p, root_m[k], &u);
+                            if (alpha >= beta) break;
+                        } else undo_move(&p, root_m[k], &u);
+                    }
                 }
+                if (root_n == 0) break;
+                if (bsc > asp_lo && bsc < asp_hi) break;
+                if (bsc <= asp_lo) {
+                    asp_lo -= delta;
+                    if (asp_lo < -INF) asp_lo = -INF;
+                } else {
+                    asp_hi += delta;
+                    if (asp_hi > INF) asp_hi = INF;
+                }
+                if (delta > 4096) { asp_lo = -INF; asp_hi = INF; }
+                else delta *= 2;
             }
+            prev = bsc;
             pos_nodes += nodes_search;
         }
         nnue_active = 0;
@@ -952,3 +1054,4 @@ int sbench(void) {
            (long)(ttpr * 1000 / (2000 * BENCH_N)), (long)(ttst * 1000 / (2000 * BENCH_N)));
     return 0;
 }
+
