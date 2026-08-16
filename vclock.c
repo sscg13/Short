@@ -179,16 +179,17 @@
      alphabeta calls, table reads are free) and the node-count drop is tracked
      by c_anodes -> rn; bench-1 (the scalar cpn calibration) is untouched.
 
-     ReLU^2 eval note (2026-08): the v2 net blob (version 2) adds a second
-     activation family: w1 x256, act = clamp(acc,0,255), term = (act^2*w2)>>9
+     ReLU^2 eval note (2026-08): the NNUE blob is now the single ReLU^2
+     architecture (v2): w1 x256, act = clamp(acc,0,255), term = (act^2*w2)>>9
      (pre-shifted in the forward table to fit i16; NNUE_ACT2_SHIFT 9 keeps w2
      at x64 and the final scale at 1.0 = 256 cp - the total is log2(64*256^2/
-     256) = 14 bits). The v2 16-bit forward is the generated nn_fwd_eval2_
-     (same cost class as v1's nn_fwd_eval_ - actually slightly CHEAPER: no
-     shift-only +/-128 sat path, every term is one table load), so the ev/qn
-     weights need NO re-fit. The scalar oracle and asm are bit-identical
-     (bench-verified on the v2 net: bench 5 = 637,928 vs 1,022,907 for v1 -
-     the tree differs because the eval differs, not the timing model). */
+     256) = 14 bits; the old linear-clamp v1 is deprecated and removed). The
+     16-bit forward is the generated nn_fwd_eval_ (every term is one table
+     load - no shift-only +/-128 sat path), so the ev/qn weights need NO
+     re-fit. The scalar oracle and asm are bit-identical (bench-verified on
+     the v2 net: bench 5 = 672,833 with the duplicate-killer fix vs 1,022,907
+     for the old v1 net - the tree differs because the eval differs, not the
+     timing model). */
 
 
 #include "engine.h"

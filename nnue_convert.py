@@ -25,7 +25,7 @@ trainer's "bullet" padding are ignored):
 
 ENGINE BLOB (what the engine loads, little-endian):
     bytes  0..3   magic "NNUE"
-          4..5   version u16 = 1 (linear clamp) or 2 (ReLU^2)
+          4..5   version u16 = 2 (ReLU^2 - the only supported architecture)
           6..7   features u16 = 704
           8..9   N u16
          10..11  reserved u16 = 0
@@ -34,15 +34,12 @@ ENGINE BLOB (what the engine loads, little-endian):
                   w2:  2N signed bytes
                   bias: i16
 
-Versions (see NNUE.md):
-    1 = feature transformer x128, symmetric clamp [-128,128], term = w2*act
-    2 = feature transformer x256, ReLU clamp [0,255], term = (act^2 * w2) >> 8
-        (the squared product is pre-shifted in the forward table so it fits i16;
-        the output scale stays 1.0 = 256 cp = out >> 5)
+The engine architecture (see NNUE.md): feature transformer x256,
+act = clamp(acc, 0, 255), forward term = (act^2 * w2) >> NNUE_ACT2_SHIFT (9);
+the output scale stays 1.0 = 256 cp = out >> 5.
 
 Usage:
-    python nnue_convert.py short-hl64.nnue chess.net            # version 1
-    python nnue_convert.py short-v2.nnue chess-v2.net --v2      # version 2
+    python nnue_convert.py short-v2.nnue chess-v2.net
 """
 
 import argparse
@@ -88,10 +85,10 @@ def read_trainer(path):
     return w1, b1, w2, bias
 
 
-def write_net(path, w1, b1, w2, bias, version=1):
+def write_net(path, w1, b1, w2, bias):
     with open(path, "wb") as f:
         f.write(MAGIC)
-        f.write(struct.pack("<HHHH", version, 704, 64, 0))
+        f.write(struct.pack("<HHHH", 2, 704, 64, 0))   # v2 ReLU^2
         f.write(w1)
         f.write(b1)
         f.write(w2)
@@ -100,13 +97,10 @@ def write_net(path, w1, b1, w2, bias, version=1):
 
 def main():
     ap = argparse.ArgumentParser(description="fold 768 trainer net -> 704 engine blob")
-    ap.add_argument("src", help="raw 768 trainer file (short-hl64.nnue)")
-    ap.add_argument("dst", help="output engine blob (chess.net)")
-    ap.add_argument("--v2", action="store_true",
-                    help="write a version-2 blob (ReLU^2 activation, feature "
-                         "transformer x256, pre-shifted act^2*w2 table)")
+    ap.add_argument("src", help="raw 768 trainer file (short-v2.nnue)")
+    ap.add_argument("dst", help="output engine blob (chess-v2.net)")
     args = ap.parse_args()
-    src, dst, v2 = args.src, args.dst, args.v2
+    src, dst = args.src, args.dst
     w1, b1, w2, bias = read_trainer(src)
 
     rows = [None] * 704
@@ -115,9 +109,8 @@ def main():
         rows[r] = t * 64 + sq
     w1_out = b"".join(w1[r * 64:(r + 1) * 64] for r in rows)
 
-    write_net(dst, w1_out, b1, w2, bias, version=2 if v2 else 1)
-    print(f"{src}: folded 768 -> 704, wrote {dst} "
-          f"({'v2 ReLU^2' if v2 else 'v1 linear'} "
+    write_net(dst, w1_out, b1, w2, bias)
+    print(f"{src}: folded 768 -> 704, wrote {dst} (v2 ReLU^2 "
           f"{len(w1_out)} + {len(b1)} + {len(w2)} + 2 + 12 bytes, bias={bias})")
 
 

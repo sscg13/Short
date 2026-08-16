@@ -145,7 +145,86 @@ static void sort_root(void) {
 /* alpha-beta search                                                  */
 /* ------------------------------------------------------------------ */
 
-static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd);
+/* ------------------------------------------------------------------ */
+/* quiescence search                                                  */
+/* ------------------------------------------------------------------ */
+
+/* Stand-pat alpha-beta over captures only, ordered by MVV-LVA (reuses the staged
+   generator in caps-only mode). Called at every alpha-beta horizon (depth 0) so the
+   eval is stable and material wins/losses don't hide behind the horizon.
+   If the side to move is in check, stand-pat is invalid: generate ALL legal moves
+   (full staged generator) to find evasions, and score a mate properly.
+   Returns the score from the side-to-move's point of view (negamax). */
+static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd) {
+    MGen mg;
+    u16 m;
+    i16 in_check, legal = 0;
+    Score stand, best = -INF;    /* fail-soft: return the true best found, even
+                                    outside [alpha,beta] - gives the caller a
+                                    tighter bound than a fail-hard clamp would. */
+
+    PCOUNT(c_qnodes);
+    nodes_search++;
+    vtotal_nodes++;
+    if ((nodes_search & 0x3FF) == 0 && deadline > 0 && (long)clock() >= deadline)
+        stop_now = 1;
+    if (vtime_mode && vclock_budget_hit())
+        stop_now = 1;
+    pv_len[ply] = 0;                             /* qsearch is a leaf: no continuation
+                                                    (cleared before the early returns so a
+                                                    direct child can't copy stale lines) */
+    if (stop_now) return evaluate(p);
+    if (qd <= 0) return evaluate(p);             /* ply budget spent: static eval */
+    if (ply >= MAXPLY - 4) return evaluate(p);   /* stay clear of movebuf aux rows */
+    if (half >= MAX_HALF) return 0;
+    in_check = is_attacked(p, p->ks[p->side], p->side ^ 1);    if (!in_check) {
+        stand = evaluate(p);
+        best = stand;                            /* fail-soft baseline = stand-pat */
+        if (stand >= beta) return stand;         /* stand-pat cutoff */
+        if (stand > alpha) alpha = stand;
+    }
+
+    if (in_check) mgen_init(p, &mg, ply, 0, 0, 0);  /* all legal evasions */
+    else          mgen_init_q(p, &mg, ply);          /* captures only, MVV-LVA */
+
+    while ((m = next_move(p, &mg)) != 0) {
+        Undo u;
+        i16 us, pc, is_cap, child_half, legal_move = 0;
+        Score score;
+        if (stop_now) break;                     /* abort: stop trying moves at this node */
+        pc = p->board[mfrom(m)];
+        if (!pc || CO(pc) != (p->side ? 8 : 0)) continue;  /* not our piece: skip */
+        do_make(p, m, &u);
+        us = p->side ^ 1;
+        if (!in_check && TY(pc) != 6 && mfl(m) != MF_EP &&
+            !sq_on_king_line(p, mfrom(m), us))
+            legal_move = 1;
+        else if (!is_attacked(p, p->ks[us], p->side))
+            legal_move = 1;
+        if (legal_move) {
+            legal = 1;
+            is_cap = (u.cap != EMPTY) || (mfl(m) == MF_EP);
+            child_half = (TY(pc) == 1 || is_cap) ? 0 : half + 1;
+            score = -qsearch(p, -beta, -alpha, ply + 1, child_half, qd - 1);
+            undo_move(p, m, &u);
+            if (score > best) best = score;      /* fail-soft: track the best move */
+            if (score > alpha) {
+                alpha = score;
+                if (alpha >= beta) break;         /* beta cutoff */
+            }
+        } else {
+            undo_move(p, m, &u);
+        }
+    }
+
+    if (!legal && in_check)
+        return -(MATE - ply);                    /* mated in the qsearch */
+    return best;                                 /* fail-soft */
+}
+
+/* ------------------------------------------------------------------ */
+/* alpha-beta search                                                  */
+/* ------------------------------------------------------------------ */
 
 static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 half) {
     MGen mg;
@@ -262,6 +341,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
             Undo u;
             i16 us, pc, is_cap, child_half, legal_move = 0;
             Score score, alpha0 = alpha;         /* window this move is searched against */
+            if (stop_now) break;                 /* abort: stop trying moves at this node */
             pc = p->board[mfrom(m)];                 /* moving piece, before the make */
             if (!pc || CO(pc) != (p->side ? 8 : 0)) continue;  /* not our piece: skip
                                                                   (guards a bogus TT move) */
@@ -332,8 +412,12 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                        the cutoff, the more reliable the move, so it dominates. */
                     if (mfl(m) == 0 && u.cap == EMPTY) {
                         i16 dd = depth * depth;
-                        killers[ply][1] = killers[ply][0];
-                        killers[ply][0] = m;
+                        if (m != killers[ply][0]) {  /* a move already in killer slot 0 must
+                                                        not be duplicated into slot 1 - the
+                                                        MG_KILLERS stage would return it twice */
+                            killers[ply][1] = killers[ply][0];
+                            killers[ply][0] = m;
+                        }
                         qhist_update(p, m, dd);
                     }
                     break;                            /* beta cutoff */
@@ -351,8 +435,10 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
 
     if (rep_n > 0) rep_n--;                  /* pop this node */
     if (!legal) {
-        /* mate scores: -(MATE - ply) so the root prefers the SHORTEST mate */
-        Score r = is_attacked(p, p->ks[p->side], p->side ^ 1) ? (Score)-(MATE - ply) : 0;
+        /* mate scores: -(MATE - ply) so the root prefers the SHORTEST mate.
+           in_check was computed at the top of this node (is_attacked on the
+           stm king) and is unchanged by the move loop. */
+        Score r = in_check ? (Score)-(MATE - ply) : 0;
         if (!stop_now) tt_store(p, 0, depth, r, TT_EXACT, ply);
         return r;
     }
@@ -361,82 +447,6 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
         tt_store(p, bestmove, depth, best, flag, ply);
     }
     return best;
-}
-
-/* ------------------------------------------------------------------ */
-/* quiescence search                                                  */
-/* ------------------------------------------------------------------ */
-
-/* Stand-pat alpha-beta over captures only, ordered by MVV-LVA (reuses the staged
-   generator in caps-only mode). Called at every alpha-beta horizon (depth 0) so the
-   eval is stable and material wins/losses don't hide behind the horizon.
-   If the side to move is in check, stand-pat is invalid: generate ALL legal moves
-   (full staged generator) to find evasions, and score a mate properly.
-   Returns the score from the side-to-move's point of view (negamax). */
-static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd) {
-    MGen mg;
-    u16 m;
-    i16 in_check, legal = 0;
-    Score stand, best = -INF;    /* fail-soft: return the true best found, even
-                                    outside [alpha,beta] - gives the caller a
-                                    tighter bound than a fail-hard clamp would. */
-
-    PCOUNT(c_qnodes);
-    nodes_search++;
-    vtotal_nodes++;
-    if ((nodes_search & 0x3FF) == 0 && deadline > 0 && (long)clock() >= deadline)
-        stop_now = 1;
-    if (vtime_mode && vclock_budget_hit())
-        stop_now = 1;
-    if (stop_now) return evaluate(p);
-    if (qd <= 0) return evaluate(p);             /* ply budget spent: static eval */
-    if (ply >= MAXPLY - 4) return evaluate(p);   /* stay clear of movebuf aux rows */
-    if (half >= MAX_HALF) return 0;
-    pv_len[ply] = 0;                             /* qsearch is a leaf: no continuation */
-
-    in_check = is_attacked(p, p->ks[p->side], p->side ^ 1);
-    if (!in_check) {
-        stand = evaluate(p);
-        best = stand;                            /* fail-soft baseline = stand-pat */
-        if (stand >= beta) return stand;         /* stand-pat cutoff */
-        if (stand > alpha) alpha = stand;
-    }
-
-    if (in_check) mgen_init(p, &mg, ply, 0, 0, 0);  /* all legal evasions */
-    else          mgen_init_q(p, &mg, ply);          /* captures only, MVV-LVA */
-
-    while ((m = next_move(p, &mg)) != 0) {
-        Undo u;
-        i16 us, pc, is_cap, child_half, legal_move = 0;
-        Score score;
-        pc = p->board[mfrom(m)];
-        if (!pc || CO(pc) != (p->side ? 8 : 0)) continue;  /* not our piece: skip */
-        do_make(p, m, &u);
-        us = p->side ^ 1;
-        if (!in_check && TY(pc) != 6 && mfl(m) != MF_EP &&
-            !sq_on_king_line(p, mfrom(m), us))
-            legal_move = 1;
-        else if (!is_attacked(p, p->ks[us], p->side))
-            legal_move = 1;
-        if (legal_move) {
-            legal = 1;
-            is_cap = (u.cap != EMPTY) || (mfl(m) == MF_EP);
-            child_half = (TY(pc) == 1 || is_cap) ? 0 : half + 1;
-            score = -qsearch(p, -beta, -alpha, ply + 1, child_half, qd - 1);
-            undo_move(p, m, &u);
-            if (score > best) best = score;      /* fail-soft: track the best move */
-            if (score > alpha) {
-                alpha = score;
-                if (alpha >= beta) break;         /* beta cutoff */
-            }
-        } else {
-            undo_move(p, m, &u);
-        }
-    }
-
-    if (!legal && in_check)
-        return -(MATE - ply);                    /* mated in the qsearch */
-    return best;                                 /* fail-soft */
 }
 
 void search_root(Pos *p, i16 maxdepth) {
@@ -649,9 +659,10 @@ int bench(int depth) {
     if (depth > 20) depth = 20;
     deadline = 0;                                /* keep the search timing-independent */
     stop_now = 0;
-#ifdef VCLOCK
-    vclock_reset();                              /* zero the weighted counters for the whole suite */
-#endif
+    /* zero the per-move vclock state too (always present, not just under
+       VCLOCK): a stale vmax_nodes from a prior virtual-time game in the same
+       process would otherwise trip stop_now mid-bench and break determinism. */
+    vclock_reset();
 
 #ifndef VCLOCK
     b0 = clock();
@@ -758,6 +769,7 @@ int profile(int depth) {
     if (depth > 20) depth = 20;
     deadline = 0;                                /* keep the search timing-independent */
     stop_now = 0;
+    vclock_reset();   /* clear a stale virtual-time budget like bench() does */
 
     c_anodes = c_qnodes = c_nextmove = 0;
     c_make = c_undo = c_gen_moves = c_gen_caps = c_gen_quiets = 0;

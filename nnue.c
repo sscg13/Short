@@ -44,9 +44,6 @@
 
 i16 nnue_enabled = 0;
 i16 nnue_active = 0;
-i16 nnue_arch = 0;    /* 0 = v1 (symmetric clamp [-128,128], w1 x128, term w2*act);
-                         1 = v2 (ReLU clamp [0,255], w1 x256, term (act^2*w2)>>8).
-                         Set from the blob version at load. */
 
 #if defined(PROFILE) || defined(VCLOCK)
 i32 c_nn_make = 0;              /* nnue_make entries */
@@ -113,14 +110,14 @@ void nn_make_cap(i16 persp, i16 to_row, i16 from_row, i16 cap_row);
 #define NNUE_ASM_BATCH 1
 
 /* per-slot forward product tables (nnue_opt.asm, NNUE_OPTIMIZATION.md §5):
-   fwd[p][j][a+128] = w2[p*64+j] * a  for a in [-128,127]. Built at net load so
-   the forward multiply becomes one word load + one shl. ONE 64 KB far array
+   fwd[p][j][a] = (a^2 * w2[p*64+j]) >> NNUE_ACT2_SHIFT  for a in [0,255]
+   (the ReLU^2 activation, pre-shifted so every entry fits i16). Built at net
+   load so the forward multiply becomes one word load. ONE 64 KB far array
    holding both perspectives so the linker CANNOT reorder them: the asm fwd
    reads fwd[0] at offset 0 and fwd[1] at +32768 of the same segment (a single
    2D declaration makes that layout guaranteed). */
 i16 _far nn_fwd[2][NNUE_N][256];
-Score nn_fwd_eval(i16 side);          /* hand-asm forward pass, v1 (linear clamp) */
-Score nn_fwd_eval2(i16 side);         /* generated asm forward pass, v2 (ReLU^2) */
+Score nn_fwd_eval(i16 side);          /* generated asm forward pass (ReLU^2) */
 #ifndef NNUE_DISABLE_ASM_FWD
 #define NNUE_ASM_FWD 1
 #endif
@@ -402,48 +399,30 @@ void nnue_undo(Pos *p) {
 Score nnue_eval(Pos *p) {
     PCOUNT(c_nn_eval);
 #ifdef NNUE_ASM_FWD
-    return nnue_arch ? nn_fwd_eval2(p->side) : nn_fwd_eval(p->side);
+    return nn_fwd_eval(p->side);
 #else
     {
         i32 out = nn_bias;
         i16 j;
-        /* stm/nstm: acc[0] is the white POV, acc[1] the black POV. The net is
-           side-to-move-aware (the trainer always treats the side to move as
-           "white" in feature space), so when black is to move the weight roles
-           SWAP (acc[1] is the stm POV) and there is NO final negate - the score
-           is already from the side to move's perspective. */
-        if (nnue_arch) {
-            /* v2 ReLU^2: act = clamp(acc,0,255); term = (act^2*w2)>>8. The
-               squared pre-activation (max 255^2*127 ~ 8.26M) is pre-shifted so
-               the forward table still fits i16; out stays i32 and the final
-               >>5 (1.0 = 256 cp) is unchanged. */
-            for (j = 0; j < NNUE_N; j++) {
-                i16 a0 = nn_acc[nn_ply][0][j], a1 = nn_acc[nn_ply][1][j];
-                i16 ws = nn_w2[j];                  /* stm weight */
-                i16 wn = nn_w2[NNUE_N + j];         /* nstm weight */
-                i16 as = (p->side == 0) ? a0 : a1;  /* stm activation */
-                i16 an = (p->side == 0) ? a1 : a0;  /* nstm activation */
-                i32 xs = (as < 0) ? 0 : (as > 255 ? 255 : as);
-                i32 xn = (an < 0) ? 0 : (an > 255 ? 255 : an);
-                out += (xs * xs * ws) >> NNUE_ACT2_SHIFT;
-                out += (xn * xn * wn) >> NNUE_ACT2_SHIFT;
-            }
-        } else {
-            for (j = 0; j < NNUE_N; j++) {
-                i16 a0 = nn_acc[nn_ply][0][j], a1 = nn_acc[nn_ply][1][j];
-                i16 ws = nn_w2[j];                  /* stm weight */
-                i16 wn = nn_w2[NNUE_N + j];         /* nstm weight */
-                i16 as = (p->side == 0) ? a0 : a1;  /* stm activation */
-                i16 an = (p->side == 0) ? a1 : a0;  /* nstm activation */
-
-                if (as >= 128)       out += (i32)(ws << 7);
-                else if (as <= -128) out -= (i32)(ws << 7);
-                else                 out += (i32)(as * ws);
-
-                if (an >= 128)       out += (i32)(wn << 7);
-                else if (an <= -128) out -= (i32)(wn << 7);
-                else                 out += (i32)(an * wn);
-            }
+        /* ReLU^2: act = clamp(acc, 0, 255); term = (act^2 * w2) >> 8. The
+           squared pre-activation (max 255^2*127 ~ 8.26M) is pre-shifted so the
+           forward table still fits i16; out stays i32 and the final >>5
+           (1.0 = 256 cp) is unchanged. stm/nstm: acc[0] is the white POV,
+           acc[1] the black POV. The net is side-to-move-aware (the trainer
+           always treats the side to move as "white" in feature space), so when
+           black is to move the weight roles SWAP (acc[1] is the stm POV) and
+           there is NO final negate - the score is already from the side to
+           move's perspective. */
+        for (j = 0; j < NNUE_N; j++) {
+            i16 a0 = nn_acc[nn_ply][0][j], a1 = nn_acc[nn_ply][1][j];
+            i16 ws = nn_w2[j];                  /* stm weight */
+            i16 wn = nn_w2[NNUE_N + j];         /* nstm weight */
+            i16 as = (p->side == 0) ? a0 : a1;  /* stm activation */
+            i16 an = (p->side == 0) ? a1 : a0;  /* nstm activation */
+            i32 xs = (as < 0) ? 0 : (as > 255 ? 255 : as);
+            i32 xn = (an < 0) ? 0 : (an > 255 ? 255 : an);
+            out += (xs * xs * ws) >> NNUE_ACT2_SHIFT;
+            out += (xn * xn * wn) >> NNUE_ACT2_SHIFT;
         }
         return (Score)(out >> NNUE_SCALE_SHIFT);
     }
@@ -455,36 +434,20 @@ Score nnue_eval(Pos *p) {
 /* ------------------------------------------------------------------ */
 
 #ifdef NNUE_ASM_FWD
-/* fill fwd[p][j][a] for a = 0..255 from the current nn_w2. v1 (nnue_arch==0):
-   fwd[p][j][a+128] = w2[p*64+j] * (a-128) (index = act+128). v2 (nnue_arch==1):
-   fwd[p][j][a] = (a^2 * w2[p*64+j]) >> 8 (index = act in [0,255]; the squared
-   product is pre-shifted so every entry fits i16 - max 255^2*127>>8 = 32258).
-   Entries are consecutive +w, so this is 32k far word stores, one-time. */
+/* fill fwd[p][j][a] = (a^2 * w2[p*64+j]) >> NNUE_ACT2_SHIFT for a = 0..255 from
+   the current nn_w2 (index = act in [0,255]). The squared product is
+   pre-shifted so every entry fits i16 (max 255^2*127>>9 = 16129). Entries are
+   32k far word stores, one-time. */
 static void nn_fwd_build(void) {
     i16 j, a;
-    if (!nnue_arch) {
-        for (j = 0; j < NNUE_N; j++) {
-            i16 w0 = nn_w2[j];
-            i16 w1 = nn_w2[NNUE_N + j];
-            i16 v0 = (i16)(-128 * w0);
-            i16 v1 = (i16)(-128 * w1);
-            for (a = 0; a < 256; a++) {
-                nn_fwd[0][j][a] = v0;
-                nn_fwd[1][j][a] = v1;
-                v0 = (i16)(v0 + w0);
-                v1 = (i16)(v1 + w1);
-            }
-        }
-    } else {
-        for (j = 0; j < NNUE_N; j++) {
-            i16 w0 = nn_w2[j];
-            i16 w1 = nn_w2[NNUE_N + j];
-            for (a = 0; a < 256; a++) {
-                i32 p0 = (i32)a * a * w0;
-                i32 p1 = (i32)a * a * w1;
-                nn_fwd[0][j][a] = (i16)(p0 >> NNUE_ACT2_SHIFT);
-                nn_fwd[1][j][a] = (i16)(p1 >> NNUE_ACT2_SHIFT);
-            }
+    for (j = 0; j < NNUE_N; j++) {
+        i16 w0 = nn_w2[j];
+        i16 w1 = nn_w2[NNUE_N + j];
+        for (a = 0; a < 256; a++) {
+            i32 p0 = (i32)a * a * w0;
+            i32 p1 = (i32)a * a * w1;
+            nn_fwd[0][j][a] = (i16)(p0 >> NNUE_ACT2_SHIFT);
+            nn_fwd[1][j][a] = (i16)(p1 >> NNUE_ACT2_SHIFT);
         }
     }
 }
@@ -500,9 +463,8 @@ static int nnue_parse_blob(const u8 *p, i32 len) {
     ver   = (u16)p[4] | ((u16)p[5] << 8);
     feats = (u16)p[6] | ((u16)p[7] << 8);
     hN    = (u16)p[8] | ((u16)p[9] << 8);
-    if (ver < 1 || ver > 2) return 0;                   /* v1 linear, v2 ReLU^2 */
+    if (ver != 2) return 0;                        /* v2 ReLU^2 is the only format */
     if (feats != NNUE_FEATURES || hN != NNUE_N) return 0;
-    nnue_arch = (ver == 2) ? 1 : 0;
     memcpy(nn_w1, p + 12, (size_t)w1sz);
     memcpy(nn_b1, p + 12 + w1sz, (size_t)NNUE_N);
     memcpy(nn_w2, p + 12 + w1sz + NNUE_N, (size_t)NNUE_W2_SIZE);
@@ -544,9 +506,8 @@ int nnue_load(const char *path) {
     ver   = (u16)hdr[4] | ((u16)hdr[5] << 8);
     feats = (u16)hdr[6] | ((u16)hdr[7] << 8);
     hN    = (u16)hdr[8] | ((u16)hdr[9] << 8);
-    if (ver < 1 || ver > 2) { fclose(f); return 0; }    /* v1 linear, v2 ReLU^2 */
+    if (ver != 2) { fclose(f); return 0; }       /* v2 ReLU^2 is the only format */
     if (feats != NNUE_FEATURES || hN != NNUE_N) { fclose(f); return 0; }
-    nnue_arch = (ver == 2) ? 1 : 0;
     if (fread(nn_w1, 1, (size_t)w1sz, f) != (size_t)w1sz) { fclose(f); return 0; }
     if (fread(nn_b1, 1, (size_t)NNUE_N, f) != NNUE_N) { fclose(f); return 0; }
     if (fread(nn_w2, 1, (size_t)NNUE_W2_SIZE, f) != NNUE_W2_SIZE) { fclose(f); return 0; }
@@ -583,9 +544,10 @@ int nnue_ensure_loaded(const char *path) {
 #endif
 
 /* ensure the default net is loaded; idempotent, so it is safe to call at every
-   search entry point (bench/think/search_root/profile) to make NNUE the default */
+   search entry point (bench/think/search_root/profile) to make NNUE the default.
+   The default is the v2 ReLU^2 blob (matches the Makefile's EVALFILE default). */
 int nnue_ensure_default(void) {
-    return nnue_ensure_loaded("chess.net");
+    return nnue_ensure_loaded("chess-v2.net");
 }
 
 /* ------------------------------------------------------------------ */

@@ -204,7 +204,11 @@ static void xb_go(void) {
         if (remaining_ms > TIME_MARGIN_MS + 100 && budget > remaining_ms - TIME_MARGIN_MS)
             budget = remaining_ms - TIME_MARGIN_MS;
         if (budget < 100) budget = 100;
-        deadline = (i32)clock() + budget - TIME_MARGIN_MS;
+        /* deadline is in clock() ticks; budget/TIME_MARGIN_MS are ms, so scale
+           by CLOCKS_PER_SEC/1000 (a no-op where CLOCKS_PER_SEC == 1000, exact
+           on Linux gcc where it is 1,000,000 - otherwise a 3 s move would
+           abort after ~3 ms there). */
+        deadline = (i32)(clock() + (long)(budget - TIME_MARGIN_MS) * CLOCKS_PER_SEC / 1000);
         dbgf("go: side=%d st=%d time_cs=%ld level=%d+%d budget=%ld deadline=%ld\n",
              gpos.side, xb_st, (long)xb_time_cs, xb_level_mps, xb_level_inc,
              (long)budget, (long)deadline);
