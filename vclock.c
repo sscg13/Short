@@ -189,7 +189,22 @@
      re-fit. The scalar oracle and asm are bit-identical (bench-verified on
      the v2 net: bench 5 = 672,833 with the duplicate-killer fix vs 1,022,907
      for the old v1 net - the tree differs because the eval differs, not the
-     timing model). */
+     timing model).
+
+     Aspiration note (2026-08, branch `aspiration-windows`): the root iterative
+     deepening confines each depth >= 2 search to a window of +-ASP_DELTA cp
+     around the previous depth's score; a fail (bsc lands at/outside the window
+     - with fail-soft the true value is outside) doubles delta and re-searches.
+     A window containing any root move's exact value must contain the exact
+     root value, so an in-window result is exact and re-searches are wasted
+     nodes only. ASP_DELTA 150 is the knee of the bench-5 curve (40 -> 1,078,710
+     nodes - the NNUE eval swings >80cp between shallow depths so 40/80/160
+     re-searches fire constantly; 100 -> 601,965; 150 -> 583,167; 200 ->
+     583,013, no further gain). Mate scores never aspirate (full window keeps
+     the exact line). Bench 1 unchanged at 9,960 (no aspiration at depth 1);
+     bench 4 = 190,540 (-11% vs 214,093), bench 5 = 583,167 (-13% vs 672,833).
+     No re-fit: the re-searches are ordinary alphabeta calls (rn/qn) - only
+     the per-depth loop cost changes. */
 
 
 #include "engine.h"
