@@ -195,15 +195,23 @@ int xboard_main(void);
    One-hot 704-feature net (12 piece types, king file folded to a-d, pawns on
    48 squares), 704 -> 2N -> 1 with the two perspectives sharing one weight
    matrix. Weights are i8 and live far on the 16-bit target (see NNUE.md).
-   Quantization (trainer contract): accumulator x128, clamp(pre,-1,1) ->
-   [-128,128] with the +/-128 extremes shift-only, w2 x64, bias x8192 in i16;
-   score = out >> NNUE_SCALE_SHIFT (5), where the trainer outputs 1.0 = 256 cp. */
+   Blob version 1 (linear): accumulator x128, clamp(pre,-1,1) -> [-128,128]
+   with the +/-128 extremes shift-only, w2 x64, bias x8192 in i16;
+   score = out >> NNUE_SCALE_SHIFT (5), where the trainer outputs 1.0 = 256 cp.
+   Blob version 2 (ReLU^2): accumulator x256, act = clamp(acc,0,255), the
+   forward table stores (act^2 * w2) >> NNUE_ACT2_SHIFT. w2 stays x64 and the
+   bias stays x8192, so the total is log2(64 * 256^2 / 256) = 14 bits: the
+   pre-shift is 9 (NOT 8 - 8 would over-size the output 2x). It also keeps the
+   table magnitudes identical to v1 (max 255^2*127>>9 = 16129) and still fits
+   i16. score = out >> 5 (1.0 = 256 cp) unchanged. */
 #define NNUE_FEATURES    704
 #define NNUE_N           64
 #define NNUE_SCALE_SHIFT 5    /* out >> 5 = centipawns (trainer: 1.0 net output = 256 cp) */
+#define NNUE_ACT2_SHIFT  9    /* v2 forward table pre-shift: (act^2*w2)>>9 = w2 x64, 1.0 = 256 cp */
 #define NNUE_W1_SIZE     45056L  /* NNUE_FEATURES * NNUE_N, long so 16-bit ints don't wrap */
 #define NNUE_W2_SIZE     128     /* 2 * NNUE_N */
 extern i16 nnue_enabled;     /* a net is loaded */
+extern i16 nnue_arch;        /* 0 = v1 linear clamp, 1 = v2 ReLU^2 (blob version) */
 extern i16 nnue_active;      /* incremental accumulators are live (during search) */
 void nnue_reset(Pos *p);
 void nnue_make(Pos *p, u16 m, Undo *u);
