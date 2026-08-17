@@ -9,4 +9,7 @@ run.bat
 *.nnue
 *.net
 __pycache__/
-trainer/
+# trainer: track only the source (.py/.cpp); nets, data, binaries, and scratch stay out
+trainer/*
+!trainer/*.py
+!trainer/*.cpp

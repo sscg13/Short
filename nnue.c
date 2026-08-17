@@ -545,9 +545,16 @@ int nnue_ensure_loaded(const char *path) {
 
 /* ensure the default net is loaded; idempotent, so it is safe to call at every
    search entry point (bench/think/search_root/profile) to make NNUE the default.
-   The default is the v2 ReLU^2 blob (matches the Makefile's EVALFILE default). */
+   The gcc default is the embedded blob (Makefile's EVALFILE default, currently
+   chess-v2-finetune.net - the path below is ignored there). The 16-bit build has
+   no embedded net and ships the net as the FAT 8.3 blob CHESS.NET on the emulator
+   floppies (chess-v2-finetune.net is not a valid 8.3 name, so it loads chess.net). */
 int nnue_ensure_default(void) {
-    return nnue_ensure_loaded("chess-v2.net");
+#if defined(__WATCOMC__)
+    return nnue_ensure_loaded("chess.net");
+#else
+    return nnue_ensure_loaded("chess-v2-finetune.net");
+#endif
 }
 
 /* ------------------------------------------------------------------ */
