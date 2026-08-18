@@ -834,6 +834,7 @@ int main(int argc, char **argv) {
 
     mvv_build();   /* one-time MVV-LVA table (dedicated init) */
     zob_init();    /* one-time Zobrist key tables (dedicated init) */
+    lmr_build();   /* one-time LMR log table (dedicated init) */
 
     /* NNUE net: `chess --nnue file ...` overrides the default net. The default is
        the EMBEDDED net on the gcc build (OpenBench embeds the trained net via

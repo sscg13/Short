@@ -182,6 +182,7 @@ u16 think(Pos *p, i16 maxdepth);
    strictly below any stored value so no valid quiet is ever skipped. */
 #define QH_MAX 30000
 extern i16 qhist[2][6][64];
+void lmr_build(void);             /* one-time LMR log-table generator (dedicated init) */
 int bench(int depth);
 int profile(int depth);
 int sbench(void);
