@@ -182,6 +182,16 @@ u16 think(Pos *p, i16 maxdepth);
    strictly below any stored value so no valid quiet is ever skipped. */
 #define QH_MAX 30000
 extern i16 qhist[2][6][64];
+
+/* capture-history move-ordering table: same [side][moving piece type-1]
+   [to-square compact] shape as qhist, but for captures/promotions. It REPLACES
+   the LVA (least-valuable-attacker) term of MVV-LVA: a capture's selection
+   score is mval[victim]*16 + chist[...] (MVV stays dominant; the learned
+   bonus refines within - and can cross one - victim tier). 2*6*64 i16 = 1536 B
+   near, same size as qhist. Values are bonus/penalty sums clamped to +-CH_MAX
+   (much smaller than QH_MAX so the victim material still rules the sort). */
+#define CH_MAX 4096
+extern i16 chist[2][6][64];
 void lmr_build(void);             /* one-time LMR log-table generator (dedicated init) */
 int bench(int depth);
 int profile(int depth);

@@ -491,31 +491,24 @@ i16 gen_moves(Pos *p, u16 *list) {
 /* ------------------------------------------------------------------ */
 
 #define MG_TT      0   /* transposition-table move (empty for now) */
-#define MG_CAPS    1   /* captures/promotions, MVV-LVA selection */
+#define MG_CAPS    1   /* captures/promotions, MVV + capture-history selection */
 #define MG_KILLERS 2   /* two quiet killers */
 #define MG_QUIETS  3   /* remaining quiets (as generated) */
 #define MG_DONE    4
 
-#define PROMO_BONUS 16000   /* promotions sort ahead of every capture; int16-safe */
+#define PROMO_BONUS 16000   /* promotions get a large bonus (int16-safe) */
 
-/* MVV-LVA: victim material * 16 - attacker type. Promotions get a bonus.
-   The score depends ONLY on the (victim type, attacker type) pair, so a
-   tiny 8x8 table (128 B) precomputes it once instead of a per-move score
-   buffer or the mval*16 arithmetic on every selection pass. */
-static i16 mvv_tab[8][8];
-
-static void mvv_build(void) {
-    i16 v, a;
-    for (v = 0; v < 8; v++)
-        for (a = 0; a < 8; a++)
-            mvv_tab[v][a] = mval[v] * 16 - a;
-}
-
-static i16 mvv_lva(Pos *p, u16 m) {
+/* capture/promotion selection score: MVV (victim material * 16) PLUS the
+   capture-history bonus - the LVA (least-valuable-attacker) tiebreak of
+   MVV-LVA is REPLACED by the learned chist table (search.c), so among captures
+   of the same victim the one that has proven best in the game sorts first.
+   CH_MAX keeps the history from swamping the victim material except across one
+   victim tier; promotions keep their bonus. */
+static i16 cap_score(Pos *p, u16 m) {
     i16 victim = 0, s;
     if (mfl(m) == MF_EP) victim = 1;                       /* captured pawn */
     else if (p->board[mto(m)]) victim = TY(p->board[mto(m)]);
-    s = mvv_tab[victim][TY(p->board[mfrom(m)])];
+    s = mval[victim] * 16 + chist[p->side][TY(p->board[mfrom(m)]) - 1][(m >> 6) & 0x3F];
     if (ispromo(m)) s += PROMO_BONUS;
     return s;
 }
@@ -581,7 +574,7 @@ void mgen_init(Pos *p, MGen *g, i16 ply, u16 k0, u16 k1, u16 ttm) {
     g->caps_only = 0;
 }
 
-/* quiescence init: captures only (MVV-LVA), no killers/quiets */
+/* quiescence init: captures only (MVV + capture history), no killers/quiets */
 void mgen_init_q(Pos *p, MGen *g, i16 ply) {
     (void)p;
     g->list = movebuf[ply];
@@ -613,7 +606,7 @@ again:
             for (i = g->idx; i < g->n; i++) {
                 i16 s;
                 if (g->list[i] == g->ttm) continue;       /* already tried */
-                s = mvv_lva(p, g->list[i]);
+                s = cap_score(p, g->list[i]);
                 if (s > bscore) { bscore = s; best = i; }
             }
             if (best < 0) break;
@@ -832,9 +825,9 @@ int main(int argc, char **argv) {
     clock_t t0, t1;
     double secs;
 
-    mvv_build();   /* one-time MVV-LVA table (dedicated init) */
     zob_init();    /* one-time Zobrist key tables (dedicated init) */
     lmr_build();   /* one-time LMR log table (dedicated init) */
+    /* capture history (chist) is zero-initialized static data - no build call */
 
     /* NNUE net: `chess --nnue file ...` overrides the default net. The default is
        the EMBEDDED net on the gcc build (OpenBench embeds the trained net via

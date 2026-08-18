@@ -23,12 +23,23 @@ static u16 killers[MAXPLY][2];          /* two killer moves per ply (quiet only)
 
 i16 qhist[2][6][64];   /* quiet-history: side, piece-type-1, to-square-compact */
 
+i16 chist[2][6][64];   /* capture-history: side, moving-piece-type-1, to-square-compact */
+
 /* bonus/penalty for a quiet move's history slot, clamped to +-QH_MAX */
 static void qhist_update(Pos *p, u16 m, i16 delta) {
     i16 *h = &qhist[p->side][TY(p->board[mfrom(m)]) - 1][(m >> 6) & 0x3F];
     i16 v = *h + delta;
     if (v >  QH_MAX) v =  QH_MAX;
     if (v < -QH_MAX) v = -QH_MAX;
+    *h = v;
+}
+
+/* bonus/penalty for a capture/promotion's history slot, clamped to +-CH_MAX */
+static void chist_update(Pos *p, u16 m, i16 delta) {
+    i16 *h = &chist[p->side][TY(p->board[mfrom(m)]) - 1][(m >> 6) & 0x3F];
+    i16 v = *h + delta;
+    if (v >  CH_MAX) v =  CH_MAX;
+    if (v < -CH_MAX) v = -CH_MAX;
     *h = v;
 }
 
@@ -107,7 +118,7 @@ static const u16 lmr_ln[64] = {
    computed in Q24 as 3*2^22 (0.75) + (lnQ[d]*lnQ[m]) >> 1 (ln(d)*ln(m)/2),
    then shifted down: R = int(0.75 + ln(d)*ln(m)/2). The Q12 product fits i32
    (max 16970^2 = 287,980,900). Call once at startup (main runs it with
-   zob_init()/mvv_build()); deterministic on gcc AND the 16-bit build. */
+   zob_init()); deterministic on gcc AND the 16-bit build. */
 void lmr_build(void) {
     i32 d, m;
     for (d = 0; d < LMR_TD; d++)
@@ -158,9 +169,10 @@ static void sort_root(void) {
 /* quiescence search                                                  */
 /* ------------------------------------------------------------------ */
 
-/* Stand-pat alpha-beta over captures only, ordered by MVV-LVA (reuses the staged
-   generator in caps-only mode). Called at every alpha-beta horizon (depth 0) so the
-   eval is stable and material wins/losses don't hide behind the horizon.
+/* Stand-pat alpha-beta over captures only, ordered by MVV + capture history
+   (reuses the staged generator in caps-only mode). Called at every alpha-beta
+   horizon (depth 0) so the eval is stable and material wins/losses don't hide
+   behind the horizon.
    If the side to move is in check, stand-pat is invalid: generate ALL legal moves
    (full staged generator) to find evasions, and score a mate properly.
    Returns the score from the side-to-move's point of view (negamax). */
@@ -194,7 +206,7 @@ static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd)
     }
 
     if (in_check) mgen_init(p, &mg, ply, 0, 0, 0);  /* all legal evasions */
-    else          mgen_init_q(p, &mg, ply);          /* captures only, MVV-LVA */
+    else          mgen_init_q(p, &mg, ply);          /* captures only, MVV + cap history */
 
     while ((m = next_move(p, &mg)) != 0) {
         Undo u;
@@ -418,9 +430,10 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                 if (alpha >= beta) {
                     /* killer + history: a true quiet (no promo/ep/castle flag, empty
                        target) that caused the cutoff gets a depth^2 bonus; the deeper
-                       the cutoff, the more reliable the move, so it dominates. */
+                       the cutoff, the more reliable the move, so it dominates. A
+                       capture (incl. EP) that cut off gets the same bonus in chist. */
+                    i16 dd = depth * depth;
                     if (mfl(m) == 0 && u.cap == EMPTY) {
-                        i16 dd = depth * depth;
                         if (m != killers[ply][0]) {  /* a move already in killer slot 0 must
                                                         not be duplicated into slot 1 - the
                                                         MG_KILLERS stage would return it twice */
@@ -428,13 +441,19 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                             killers[ply][0] = m;
                         }
                         qhist_update(p, m, dd);
+                    } else if (u.cap != EMPTY || mfl(m) == MF_EP) {
+                        chist_update(p, m, dd);
                     }
                     break;                            /* beta cutoff */
                 } else if (score <= alpha0) {
                     /* fail low: a quiet that failed to beat its window is penalized
-                       (symmetric depth^2), so it sorts behind unsearched quiets. */
+                       (symmetric depth^2), so it sorts behind unsearched quiets. A
+                       capture that failed to beat the window is penalized the same
+                       way in chist, so it sorts behind unsearched captures. */
                     if (mfl(m) == 0 && u.cap == EMPTY)
                         qhist_update(p, m, -(i16)(depth * depth));
+                    else if (u.cap != EMPTY || mfl(m) == MF_EP)
+                        chist_update(p, m, -(i16)(depth * depth));
                 }
             } else {
                 undo_move(p, m, &u);
@@ -734,6 +753,7 @@ int bench(int depth) {
         g_sigs_n = 0;                            /* no game-history repetitions */
         memset(killers, 0, sizeof killers);
         memset(qhist, 0, sizeof qhist);
+        memset(chist, 0, sizeof chist);
         tt_clear();                              /* no cross-position TT reuse */
         root_n = gen_moves(&p, root_m);
         for (k = 0; k < root_n; k++) root_score[k] = 0;
@@ -871,6 +891,7 @@ int profile(int depth) {
         g_sigs_n = 0;                            /* no game-history repetitions */
         memset(killers, 0, sizeof killers);
         memset(qhist, 0, sizeof qhist);
+        memset(chist, 0, sizeof chist);
         tt_clear();                              /* no cross-position TT reuse */
         root_n = gen_moves(&p, root_m);
         for (k = 0; k < root_n; k++) root_score[k] = 0;

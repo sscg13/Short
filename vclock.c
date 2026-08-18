@@ -204,7 +204,31 @@
      the exact line). Bench 1 unchanged at 9,960 (no aspiration at depth 1);
      bench 4 = 190,540 (-11% vs 214,093), bench 5 = 583,167 (-13% vs 672,833).
      No re-fit: the re-searches are ordinary alphabeta calls (rn/qn) - only
-     the per-depth loop cost changes. */
+     the per-depth loop cost changes.
+
+     CAPTURE-HISTORY note (2026-08, branch `capture-history`): the MVV-LVA
+     ordering of the MG_CAPS stage (next_move) is replaced by MVV + capture
+     history: cap_score = mval[victim]*16 + chist[side][moving-piece-1][to]
+     (chist[2][6][64] i16 = 1536 B near, clamped to +-CH_MAX 4096, updated
+     like qhist: +depth^2 on a beta cutoff, -depth^2 on a fail-low). The LVA
+     `- attacker` tiebreak is gone; the mvv_tab[8][8] table, mvv_build() and
+     mvv_lva() are removed. Unlike the quiet-history change this DOES move
+     bench 1: qsearch (depth-0) is captures-only, so its stand-pat cutoffs
+     depend on the capture order. New bench totals (finetune net): bench 1
+     10,037 -> 11,200, bench 4 170,669 -> 174,822, bench 5 543,787 -> 553,645.
+     RE-FIT (2026-08, analytical - NOT emulator-measured): the bench-1 profile
+     (gcc `profile 1`, counters below) at 11,200 nodes x the fixed per-call
+     weights gives the new totals; rn absorbs only the capture-selection delta
+     (chist 3D read + mval*16 vs the old 2D mvv_tab read, ~0.5 scan-iters/node
+     x ~10/30/22 cyc = +5/+16/+12 c286/c88/c8086 per node). New totals: 535.6e6
+     c286 / 1652.0e6 c88 / 1239.0e6 c8086 @ 11,200 nodes -> rn 2521/5871/4403
+     and cpn_tab NNUE 47824/147503/110627. The 8086 row was re-derived from the
+     vw_tab 0.75x weights (the old 114,300 was 0.779x, inconsistent). The
+     material row and the per-call weights are untouched (dev-only flag / no
+     primitive changed). The bench-1 tree change and the finetune-net change
+     (13,458 -> 10,037 nodes) are BOTH auto-tracked by the counters, so the
+     weighted model needs only this rn nudge; a fresh 86Box emulator bench-1
+     (vm\xt @16 MHz, vm\atami @6 MHz) is the definitive re-check. */
 
 
 #include "engine.h"
@@ -224,9 +248,9 @@ static i16 vperiod_started; /* first period not yet granted */
 /* scalar cycles/node, NNUE / material (16-bit build) */
 #ifndef VCLOCK
 static const i32 cpn_tab[3][2] = {
-    { 47600L,  23802L },   /* VCPU_80286  (RE-MEASURE re-fit: bench-1 0.641e9/13458) */
-    { 146800L, 76064L },   /* VCPU_8088   (RE-MEASURE re-fit: bench-1 1.976e9/13458) */
-    { 114300L, 51198L },   /* VCPU_8086 (estimate, 0.779x of the 8088 row) */
+    { 47824L,  23802L },   /* VCPU_80286  (CAPTURE-HISTORY re-fit: bench-1 535.6e6/11200) */
+    { 147503L, 76064L },   /* VCPU_8088   (CAPTURE-HISTORY re-fit: bench-1 1652.0e6/11200) */
+    { 110627L, 51198L },   /* VCPU_8086 (from the 0.75x vw_tab row, same bench-1 profile) */
 };
 #endif
 
@@ -236,9 +260,9 @@ static i64 vbudget_cyc;   /* weighted cycle budget for the current move */
 typedef struct { i32 att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm, tp, ts; } VW;
 static const VW vw_tab[3] = {
     /*   att    ps     gc     gq      gm     mk    nm   rf    ev     rn      rm      tp    ts */
-    {  2292,   102, 16608, 18942, 169038, 1944, 1400, 3493, 10296,   2516,   8723,   612,  510 }, /* 80286 */
-    {  6576,   816, 46128, 54560, 608192, 6176, 4500, 11028, 35360,   5855,  31934,  2032, 1744 }, /* 8088 */
-    {  4932,   612, 34596, 40920, 456144, 4632, 3375,  8271, 26520,   4391,  23951,  1524, 1308 }, /* 8086 est */
+    {  2292,   102, 16608, 18942, 169038, 1944, 1400, 3493, 10296,   2521,   8723,   612,  510 }, /* 80286 */
+    {  6576,   816, 46128, 54560, 608192, 6176, 4500, 11028, 35360,   5871,  31934,  2032, 1744 }, /* 8088 */
+    {  4932,   612, 34596, 40920, 456144, 4632, 3375,  8271, 26520,   4403,  23951,  1524, 1308 }, /* 8086 est */
 };
 /* RE-MEASURE re-fit (2026-08, branch nmp): all weights are FRESH emulator
    measurements with the NMP build. Search weights from sbench (averaged over the
