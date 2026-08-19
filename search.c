@@ -23,7 +23,7 @@ static u16 killers[MAXPLY][2];          /* two killer moves per ply (quiet only)
 
 i16 qhist[2][6][64];   /* quiet-history: side, piece-type-1, to-square-compact */
 
-i16 chist[2][6][64];   /* capture-history: side, moving-piece-type-1, to-square-compact */
+i16 chist[2][6][64];   /* capture-history: side, victim-piece-type-1, to-square-compact */
 
 /* bonus/penalty for a quiet move's history slot, clamped to +-QH_MAX */
 static void qhist_update(Pos *p, u16 m, i16 delta) {
@@ -34,13 +34,21 @@ static void qhist_update(Pos *p, u16 m, i16 delta) {
     *h = v;
 }
 
-/* bonus/penalty for a capture/promotion's history slot, clamped to +-CH_MAX */
+/* reward a capture (incl. EP/promo) that caused a beta cutoff. Keyed by the
+   VICTIM's type and the to-square (the captured piece's square), so every
+   attacker of that victim on that square shares the bucket. Decay update
+   h += bonus - h*|bonus|/CH_MAX: the bonus scales down as the value grows, so
+   the value self-bounds at +-CH_MAX instead of slamming to a binary cap after
+   a few deep cutoffs (the -5 Elo failure mode of the old clamped version). */
 static void chist_update(Pos *p, u16 m, i16 delta) {
-    i16 *h = &chist[p->side][TY(p->board[mfrom(m)]) - 1][(m >> 6) & 0x3F];
-    i16 v = *h + delta;
-    if (v >  CH_MAX) v =  CH_MAX;
-    if (v < -CH_MAX) v = -CH_MAX;
-    *h = v;
+    i16 victim, d;
+    i16 *h;
+    if (mfl(m) == MF_EP) victim = 1;                       /* captured pawn */
+    else victim = TY(p->board[mto(m)]);
+    if (victim < 1 || victim > 6) return;
+    h = &chist[p->side][victim - 1][(m >> 6) & 0x3F];
+    d = (i16)((i32)delta - (i32)*h * (delta < 0 ? -delta : delta) / CH_MAX);
+    *h = (i16)((i32)*h + d);
 }
 
 #define MAX_QDEPTH 8    /* longest capture chain past the search leaf; guards against
@@ -447,13 +455,14 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                     break;                            /* beta cutoff */
                 } else if (score <= alpha0) {
                     /* fail low: a quiet that failed to beat its window is penalized
-                       (symmetric depth^2), so it sorts behind unsearched quiets. A
-                       capture that failed to beat the window is penalized the same
-                       way in chist, so it sorts behind unsearched captures. */
+                       (symmetric depth^2), so it sorts behind unsearched quiets.
+                       Captures are NOT penalized: a capture that fails to beat the
+                       window is often still a fine move (the position is already
+                       winning), so repeatedly demoting it just shuffles good
+                       captures down - the original design's penalty was a measured
+                       regression. */
                     if (mfl(m) == 0 && u.cap == EMPTY)
                         qhist_update(p, m, -(i16)(depth * depth));
-                    else if (u.cap != EMPTY || mfl(m) == MF_EP)
-                        chist_update(p, m, -(i16)(depth * depth));
                 }
             } else {
                 undo_move(p, m, &u);

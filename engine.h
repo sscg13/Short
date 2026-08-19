@@ -183,13 +183,16 @@ u16 think(Pos *p, i16 maxdepth);
 #define QH_MAX 30000
 extern i16 qhist[2][6][64];
 
-/* capture-history move-ordering table: same [side][moving piece type-1]
-   [to-square compact] shape as qhist, but for captures/promotions. It REPLACES
-   the LVA (least-valuable-attacker) term of MVV-LVA: a capture's selection
-   score is mval[victim]*16 + chist[...] (MVV stays dominant; the learned
-   bonus refines within - and can cross one - victim tier). 2*6*64 i16 = 1536 B
-   near, same size as qhist. Values are bonus/penalty sums clamped to +-CH_MAX
-   (much smaller than QH_MAX so the victim material still rules the sort). */
+/* capture-history move-ordering table, VICTIM-keyed: [side][victim piece
+   type-1][to-square compact] - the square holds the captured piece, so the
+   bucket is shared by every attacker of that victim on that square (the
+   learned "capturing {type} on {square} works/fails" signal transfers across
+   pieces). A capture's selection score is mval[victim]*6 + chist[...] (the
+   victim material keeps its MVV priority; the learned bonus refines within -
+   and can cross - victim tiers, like Stockfish's capture history). 2*6*64 i16
+   = 1536 B near, same size as qhist. Values are smoothed by a decay update
+   (h += bonus - h*|bonus|/CH_MAX, self-bounding at +-CH_MAX, no hard clamp to
+   a binary cap), rewarded on a beta cutoff only. */
 #define CH_MAX 4096
 extern i16 chist[2][6][64];
 void lmr_build(void);             /* one-time LMR log-table generator (dedicated init) */

@@ -208,28 +208,36 @@
 
      CAPTURE-HISTORY note (2026-08, branch `capture-history`): the MVV-LVA
      ordering of the MG_CAPS stage (next_move) is replaced by MVV + capture
-     history: cap_score = mval[victim]*16 + chist[side][moving-piece-1][to]
-     (chist[2][6][64] i16 = 1536 B near, clamped to +-CH_MAX 4096, updated
-     like qhist: +depth^2 on a beta cutoff, -depth^2 on a fail-low). The LVA
-     `- attacker` tiebreak is gone; the mvv_tab[8][8] table, mvv_build() and
-     mvv_lva() are removed. Unlike the quiet-history change this DOES move
-     bench 1: qsearch (depth-0) is captures-only, so its stand-pat cutoffs
-     depend on the capture order. New bench totals (finetune net): bench 1
-     10,037 -> 11,200, bench 4 170,669 -> 174,822, bench 5 543,787 -> 553,645.
+     history: cap_score = mval[victim]*6 + chist[side][victim-1][to]
+     (chist[2][6][64] i16 = 1536 B near, self-bounding at +-CH_MAX 4096 via a
+     decay update h += bonus - h*|bonus|/CH_MAX, rewarded on a beta cutoff
+     only - no fail-low penalty). The LVA `- attacker` tiebreak is gone; the
+     mvv_tab[8][8] table, mvv_build() and mvv_lva() are removed. The FIRST
+     design (moving-piece key, mval*16, hard clamp +-CH_MAX, symmetric fail-low
+     penalty) measured -5.06+-11.43 Elo (OpenBench test 2039, LLR -2.27 rejected)
+     and was redesigned to this victim-keyed form. Unlike the quiet-history
+     change this DOES move bench 1: qsearch (depth-0) is captures-only, so its
+     stand-pat cutoffs depend on the capture order. Current bench totals
+     (finetune net): bench 1 11,200, bench 4 173,600, bench 5 564,720.
+     NOTE: the victim-keyed cap_score must guard victim >= 1 before indexing
+     chist - a QUIET promotion push (to an empty square) has victim 0, and
+     victim-1 = -1 read out of bounds (gcc read garbage and DIVERGED from the
+     16-bit build at bench pos 2: 173,458 vs 173,600; the fix made them match).
      RE-FIT (2026-08, analytical - NOT emulator-measured): the bench-1 profile
      (gcc `profile 1`, counters below) at 11,200 nodes x the fixed per-call
      weights gives the new totals; rn absorbs only the capture-selection delta
-     (chist 3D read + mval*16 vs the old 2D mvv_tab read, ~0.5 scan-iters/node
+     (chist 3D read + mval*6 vs the old 2D mvv_tab read, ~0.5 scan-iters/node
      x ~10/30/22 cyc = +5/+16/+12 c286/c88/c8086 per node). New totals: 535.6e6
      c286 / 1652.0e6 c88 / 1239.0e6 c8086 @ 11,200 nodes -> rn 2521/5871/4403
      and cpn_tab NNUE 47824/147503/110627. The 8086 row was re-derived from the
      vw_tab 0.75x weights (the old 114,300 was 0.779x, inconsistent). The
      material row and the per-call weights are untouched (dev-only flag / no
-     primitive changed). The bench-1 tree change and the finetune-net change
-     (13,458 -> 10,037 nodes) are BOTH auto-tracked by the counters, so the
-     weighted model needs only this rn nudge; a fresh 86Box emulator bench-1
-     (vm\xt @16 MHz, vm\atami @6 MHz) is the definitive re-check. */
-
+     primitive changed). The bench-1 tree is IDENTICAL between the two
+     capture-history designs (11,200 nodes, same profile counters), so this
+     calibration holds for both; only the deeper (bench 4/5) tree differs.
+     The weighted model auto-tracks that via the counters. A fresh 86Box
+     emulator bench-1 (vm\xt @16 MHz, vm\atami @6 MHz) is the definitive
+     re-check. */
 
 #include "engine.h"
 

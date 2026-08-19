@@ -498,17 +498,26 @@ i16 gen_moves(Pos *p, u16 *list) {
 
 #define PROMO_BONUS 16000   /* promotions get a large bonus (int16-safe) */
 
-/* capture/promotion selection score: MVV (victim material * 16) PLUS the
+/* capture/promotion selection score: MVV (victim material * 6) PLUS the
    capture-history bonus - the LVA (least-valuable-attacker) tiebreak of
-   MVV-LVA is REPLACED by the learned chist table (search.c), so among captures
-   of the same victim the one that has proven best in the game sorts first.
-   CH_MAX keeps the history from swamping the victim material except across one
-   victim tier; promotions keep their bonus. */
+   MVV-LVA is REPLACED by the learned chist table (search.c), keyed by the
+   victim's type and the captured square, so among captures of the same victim
+   the attacker/square proven best in the game sorts first. The small *6
+   multiplier (the original *16 let a hot pawn capture outrank a neutral
+   bishop capture - a measured regression) keeps the victim material primary
+   while letting the history reorder within a tier; CH_MAX 4096 stays safely
+   below one victim step (100) so history can cross at most one tier.
+   Promotions keep their bonus. A QUIET promotion push (to an empty square)
+   has no victim: it keeps the promotion bonus and an mval[0] material term
+   with NO chist read (indexing chist by victim-1 = -1 would read out of
+   bounds - a real determinism break between the gcc and 16-bit builds). */
 static i16 cap_score(Pos *p, u16 m) {
     i16 victim = 0, s;
     if (mfl(m) == MF_EP) victim = 1;                       /* captured pawn */
     else if (p->board[mto(m)]) victim = TY(p->board[mto(m)]);
-    s = mval[victim] * 16 + chist[p->side][TY(p->board[mfrom(m)]) - 1][(m >> 6) & 0x3F];
+    s = mval[victim] * 6;
+    if (victim >= 1)
+        s += chist[p->side][victim - 1][(m >> 6) & 0x3F];
     if (ispromo(m)) s += PROMO_BONUS;
     return s;
 }
