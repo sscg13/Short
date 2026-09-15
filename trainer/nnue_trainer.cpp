@@ -54,8 +54,12 @@ struct Net {
 };
 
 struct QuantizedNet {
-    std::vector<int8_t> w1;
-    std::vector<int8_t> b1;
+    // w1/b1 hold i8-quantized VALUES stored as i16 so the forward accumulates
+    // in native i16 lanes without widening. Sums are bounded by
+    // 33 * 127 = 4191 < 32767 (bias + MAX_ACTIVE features), so i16 can never
+    // overflow and matches the engine's i16 pre-activation representation.
+    std::vector<uint16_t> w1;  // [FEATURES][HIDDEN], feature-major
+    std::vector<uint16_t> b1;  // [HIDDEN]
     std::vector<int8_t> w2;
     int16_t bias = 0;
 
@@ -99,14 +103,13 @@ static int quant_i16(float x) {
 }
 
 static int arithmetic_shift(int value, int shift) {
-    if (value >= 0) return value >> shift;
-    return -((-value + ((1 << shift) - 1)) >> shift);
+    return value >> shift;
 }
 
 static QuantizedNet quantize_net(const Net& net) {
     QuantizedNet q;
-    for (size_t i = 0; i < q.w1.size(); ++i) q.w1[i] = int8_t(quant_i8(net.w1[i]));
-    for (size_t i = 0; i < q.b1.size(); ++i) q.b1[i] = int8_t(quant_i8(net.b1[i]));
+    for (size_t i = 0; i < q.w1.size(); ++i) q.w1[i] = uint16_t(int16_t(quant_i8(net.w1[i])));
+    for (size_t i = 0; i < q.b1.size(); ++i) q.b1[i] = uint16_t(int16_t(quant_i8(net.b1[i])));
     for (size_t i = 0; i < q.w2.size(); ++i) q.w2[i] = int8_t(quant_i8(net.w2[i]));
     q.bias = int16_t(quant_i16(net.bias));
     return q;
@@ -244,13 +247,18 @@ static Forward forward(const Record& r, const Net& net, const ActiveFeatures& f,
     if (qat) {
         if (!qnet) throw std::runtime_error("QAT forward requires quantized weights");
         for (int p = 0; p < PERSPECTIVES; ++p) {
+            // Feature-outer accumulation over contiguous i16 rows: no widening
+            // uops, and the 4-ymm accumulator is a plausible register resident.
+            uint16_t acc[HIDDEN];
+            for (int j = 0; j < HIDDEN; ++j) acc[j] = qnet->b1[j];
+            for (int k = 0; k < f.count[p]; ++k) {
+                const uint16_t* row = qnet->w1.data() + size_t(f.rows[p][k]) * HIDDEN;
+                for (int j = 0; j < HIDDEN; ++j) acc[j] += row[j];
+            }
             for (int j = 0; j < HIDDEN; ++j) {
-                int a = qnet->b1[j];
-                for (int k = 0; k < f.count[p]; ++k)
-                    a += qnet->w1[f.rows[p][k] * HIDDEN + j];
-                int act = std::max(0, std::min(255, a));
+                int a = int16_t(acc[j]);
                 out.acc[p][j] = float(a);
-                out.act[p][j] = float(act);
+                out.act[p][j] = float(std::max(0, std::min(255, a)));
             }
         }
         int stm = r.stm ? 1 : 0;
@@ -267,12 +275,15 @@ static Forward forward(const Record& r, const Net& net, const ActiveFeatures& f,
         return out;
     }
     for (int p = 0; p < PERSPECTIVES; ++p) {
+        float acc[HIDDEN];
+        for (int j = 0; j < HIDDEN; ++j) acc[j] = net.b1[j];
+        for (int k = 0; k < f.count[p]; ++k) {
+            const float* row = &net.w1[size_t(f.rows[p][k]) * HIDDEN];
+            for (int j = 0; j < HIDDEN; ++j) acc[j] += row[j];
+        }
         for (int j = 0; j < HIDDEN; ++j) {
-            float a = net.b1[j];
-            for (int k = 0; k < f.count[p]; ++k)
-                a += net.w1[f.rows[p][k] * HIDDEN + j];
-            out.acc[p][j] = a;
-            out.act[p][j] = std::max(0.0f, std::min(255.0f, a));
+            out.acc[p][j] = acc[j];
+            out.act[p][j] = std::max(0.0f, std::min(255.0f, acc[j]));
         }
     }
     int stm = r.stm ? 1 : 0;
@@ -317,43 +328,80 @@ static float process_record(const Record& record, const Net& net,
                             const QuantizedNet* qnet) {
     ActiveFeatures f = features(record);
     Forward y = forward(record, net, f, qat, qnet);
-    float qf = score_probability(y.score);
-    float pf = score_probability(float(record.score));
+    // The probability and its derivative share the same two sigmoids, so both
+    // score values are sigmoidized exactly once each.
+    float qs = (y.score - SCORE_OFFSET) / SCORE_SCALE;
+    float qs_m = (-y.score - SCORE_OFFSET) / SCORE_SCALE;
+    float sqs = sigmoid(qs);
+    float sqs_m = sigmoid(qs_m);
+    float qf = 0.5f * (1.0f + sqs - sqs_m);
+    float ts = float(record.score);
+    float pf = 0.5f * (1.0f + sigmoid((ts - SCORE_OFFSET) / SCORE_SCALE) -
+                       sigmoid((-ts - SCORE_OFFSET) / SCORE_SCALE));
     float result = 0.5f * float(record.result);
     float target = params.lambda * pf + (1.0f - params.lambda) * result;
     float error = qf - target;
     float abs_error = std::fabs(error);
-    float loss = std::pow(abs_error, params.pow_exp);
-    if (abs_error == 0.0f) return loss;
+    float loss;
+    if (abs_error == 0.0f) return 0.0f;
 
-    float dloss_dq = params.pow_exp * std::pow(abs_error, params.pow_exp - 1.0f);
+    float dloss_dq;
+    if (params.pow_exp == 2.5f) {
+        float ae_15 = abs_error * std::sqrt(abs_error);
+        loss = abs_error * ae_15;
+        dloss_dq = params.pow_exp * ae_15;
+    } else {
+        loss = std::pow(abs_error, params.pow_exp);
+        dloss_dq = params.pow_exp * std::pow(abs_error, params.pow_exp - 1.0f);
+    }
     if (error < 0.0f) dloss_dq = -dloss_dq;
-    float q = (y.score - SCORE_OFFSET) / SCORE_SCALE;
-    float qm = (-y.score - SCORE_OFFSET) / SCORE_SCALE;
-    float dprob_dscore = 0.5f / SCORE_SCALE *
-        (sigmoid(q) * (1.0f - sigmoid(q)) + sigmoid(qm) * (1.0f - sigmoid(qm)));
+    float dprob_dscore =
+        0.5f / SCORE_SCALE * (sqs * (1.0f - sqs) + sqs_m * (1.0f - sqs_m));
     float draw = dloss_dq * dprob_dscore / OUTPUT_SHIFT;
     grads.bias += draw;
 
     int stm = record.stm ? 1 : 0;
+    const float* w2_float = net.w2.data();
+    const int8_t* w2_q = qat && qnet ? qnet->w2.data() : nullptr;
+    // Division by a power of two equals multiplication by its exact inverse,
+    // so these hoists do not change the results beyond association order.
+    const float inv512 = 1.0f / 512.0f;
+    const float inv256 = 1.0f / 256.0f;
     float dacc[PERSPECTIVES][HIDDEN];
     for (int p = 0; p < PERSPECTIVES; ++p) {
         int w2_base = (p == stm) ? 0 : HIDDEN;
-        for (int j = 0; j < HIDDEN; ++j) {
-            float a = y.act[p][j];
-            float w = qat ? float(qnet->w2[w2_base + j])
-                          : net.w2[w2_base + j];
-            grads.w2[w2_base + j] += draw * a * a / 512.0f;
-            dacc[p][j] = (y.acc[p][j] <= 0.0f || y.acc[p][j] >= 255.0f)
-                ? 0.0f : draw * (2.0f * a * w / 512.0f);
-            grads.b1[j] += dacc[p][j];
+        const float* act = y.act[p];
+        const float* acc = y.acc[p];
+        float* da = dacc[p];
+        float* gb1 = grads.b1.data();
+        float* gw2r = grads.w2.data() + w2_base;
+        // Take the qat select and i8->f32 widen out of the hot loop.
+        float w2row[HIDDEN];
+        if (w2_q) {
+            const int8_t* wq = w2_q + w2_base;
+            for (int j = 0; j < HIDDEN; ++j) w2row[j] = float(wq[j]);
+        } else {
+            const float* wf = w2_float + w2_base;
+            for (int j = 0; j < HIDDEN; ++j) w2row[j] = wf[j];
         }
-        // Each feature row is contiguous in the feature-major w1 layout.
-        // Walking rows outside the hidden loop avoids 64 strided writes per
-        // active feature and lets the compiler vectorize this short copy-add.
+        const float* wr = w2row;
+        for (int j = 0; j < HIDDEN; ++j) {
+            float a = act[j];
+            gw2r[j] += draw * a * a * inv512;
+            bool live = (acc[j] > 0.0f) & (acc[j] < 255.0f);
+            float d = draw * (a * wr[j]) * inv256;
+            da[j] = live ? d : 0.0f;
+            gb1[j] += da[j];
+        }
+    }
+    // Pass 3 scatters dacc into the feature-major w1 gradient rows; each row
+    // update is a short restricted copy-add the compiler can vectorize.
+    for (int p = 0; p < PERSPECTIVES; ++p) {
+        const float* da = dacc[p];
+        const int* rows = f.rows[p];
         for (int k = 0; k < f.count[p]; ++k) {
-            float* row = &grads.w1[f.rows[p][k] * HIDDEN];
-            for (int j = 0; j < HIDDEN; ++j) row[j] += dacc[p][j];
+            float* row = grads.w1.data() + size_t(rows[k]) * HIDDEN;
+            for (int j = 0; j < HIDDEN; ++j) row[j] += da[j];
         }
     }
     return loss;
@@ -370,8 +418,17 @@ public:
         stopping_ = false;
         local_grads_.resize(count);
         local_loss_.assign(count, 0.0f);
+        uint64_t gen;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            gen = generation_;
+        }
+        // Pass the starting generation by value: workers never write
+        // generation_, and no dispatch can happen until this function
+        // returns, so every thread begins consistently behind the next
+        // dispatch regardless of when its body actually starts running.
         for (int i = 0; i < count; ++i)
-            workers_.emplace_back(&WorkerPool::worker, this, i);
+            workers_.emplace_back(&WorkerPool::worker, this, i, gen);
     }
 
     int thread_count() const { return int(workers_.size()); }
@@ -414,8 +471,7 @@ private:
         stopping_ = false;
     }
 
-    void worker(int id) {
-        uint64_t seen = 0;
+    void worker(int id, uint64_t seen) {
         for (;;) {
             const Record* records;
             size_t count;

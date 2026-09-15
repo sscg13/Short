@@ -137,7 +137,18 @@
     Mirror flips (c_flip -> nn_compute_persp) are still UNCHARGED, as before
     (rare: 157/depth-1, ~19K/depth-5; the ~1-2% cost is absorbed in rn).
 
-     PLY-INDEXED ACCUMULATOR note (2026-08): the copy-make snapshots were replaced
+   CURRENT 86BOX RE-MEASURE (2026-08-29): repaired the image packer and rebuilt
+   clean 720K/1.2M disks from the current profile binary. The previous packer
+   silently left vm\xt on an old executable (it only built unused xt360), used a
+   stale FreeDOS directory layout, and failed to write the sectors/cluster BPB
+   byte for the AT image. Fresh profile 1 runs are 89.14 s / 79.37 s on 8088
+   @16 MHz / 80286 @6 MHz, both 10,037 nodes, or 142,100 / 47,446 cycles/node.
+   Search primitive measurements were refreshed with sbench; the profile-fitted
+   per-node bases below absorb the NNUE timer's host-bound forward-pass result.
+   The NNUE scalar rows are measured profile totals, not extrapolations from the
+   old successful emulator run.
+
+   PLY-INDEXED ACCUMULATOR note (2026-08): the copy-make snapshots were replaced
      by writing the child accumulator into nn_acc[ply+1] (undo = nn_ply--, no
      memcpy), which cut the 8088 NNUE make+undo pair ~5% (43,408 -> 41,216 c88;
      the 286 is ~flat). The nm/rf weights below were fit to the OLD pair, so they
@@ -224,8 +235,8 @@ static i16 vperiod_started; /* first period not yet granted */
 /* scalar cycles/node, NNUE / material (16-bit build) */
 #ifndef VCLOCK
 static const i32 cpn_tab[3][2] = {
-    { 47600L,  23802L },   /* VCPU_80286  (RE-MEASURE re-fit: bench-1 0.641e9/13458) */
-    { 146800L, 76064L },   /* VCPU_8088   (RE-MEASURE re-fit: bench-1 1.976e9/13458) */
+    { 47446L,  23802L },   /* VCPU_80286: 79.37 s * 6 MHz / 10037 nodes */
+    { 142100L, 76064L },   /* VCPU_8088:  89.14 s * 16 MHz / 10037 nodes */
     { 114300L, 51198L },   /* VCPU_8086 (estimate, 0.779x of the 8088 row) */
 };
 #endif
@@ -236,20 +247,18 @@ static i64 vbudget_cyc;   /* weighted cycle budget for the current move */
 typedef struct { i32 att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm, tp, ts; } VW;
 static const VW vw_tab[3] = {
     /*   att    ps     gc     gq      gm     mk    nm   rf    ev     rn      rm      tp    ts */
-    {  2292,   102, 16608, 18942, 169038, 1944, 1400, 3493, 10296,   2516,   8723,   612,  510 }, /* 80286 */
-    {  6576,   816, 46128, 54560, 608192, 6176, 4500, 11028, 35360,   5855,  31934,  2032, 1744 }, /* 8088 */
-    {  4932,   612, 34596, 40920, 456144, 4632, 3375,  8271, 26520,   4391,  23951,  1524, 1308 }, /* 8086 est */
+    {  2316,     0, 16890, 18810, 170268, 1977, 1488, 3570, 10296,   1342,   8723,   654,  534 }, /* 80286 */
+    {  6576,     0, 47232, 54192, 610048, 6336, 4261,10227, 35360,   3050,  31934,  2240, 1856 }, /* 8088 */
+    {  4932,     0, 35424, 40644, 457536, 4752, 3196, 7670, 26520,   2288,  23951,  1680, 1392 }, /* 8086 est */
 };
-/* RE-MEASURE re-fit (2026-08, branch nmp): all weights are FRESH emulator
-   measurements with the NMP build. Search weights from sbench (averaged over the
-   8 bench positions, 8088 @16 / 286 @6 MHz): att/gc/gq/mk/ps/tp/ts re-verified
-   within 2-5% of the previous table. NNUE weights from nbench: ev = forward pass;
-   nm+rf = (make+undo pair minus the sbench board pair)/2 - only the SUM is
-   measured, the split (nm:rf ~= 1:2.4) is carried over from the old table and
-   does not move the total since c_nn_make ~= c_refresh ~= 2x makes. gm = the full
-   staged-drain cost (charged only at the 8 root gen_moves calls). rn re-fit so
-   bench-1 reproduces the fresh totals (1.976e9 c88 / 0.641e9 c286 @ 13,458 nodes);
-   rm (material base) UNCHANGED - not re-measured. 8086 = 0.75x of the 8088 row. */
+/* CURRENT 86BOX RE-MEASURE (2026-08-29): sbench values are converted by the
+   configured MHz; make10k is a make+undo pair, hence /2 for mk. The NNUE
+   nbench timer is not a usable cross-CPU cycle source under the host-bound
+   interpreter (its eval/delta outputs do not preserve their expected ratio),
+   so the existing ev value is retained and nm+rf is refreshed from the delta
+   minus board pair using the historical 1:2.4 split. rn is fitted separately
+   to the fresh profile totals: 1.42624e9 cycles (8088) / 0.47622e9 cycles
+   (80286), at 10,037 nodes. rm is unchanged; 8086 remains a 0.75x estimate. */
 
 static i64 vclock_cyc(void) {
     const VW *w = &vw_tab[vcpu_model];
