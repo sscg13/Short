@@ -247,9 +247,9 @@ static i64 vbudget_cyc;   /* weighted cycle budget for the current move */
 typedef struct { i32 att, ps, gc, gq, gm, mk, nm, rf, ev, ev8, rn, rm, tp, ts; } VW;
 static const VW vw_tab[3] = {
     /*   att    ps     gc     gq      gm     mk    nm   rf   ev1   ev8     rn      rm      tp    ts */
-    {  2316,     0, 16890, 18810, 170268, 1977, 1488, 3570, 5436,  5436,   1342,   8723,   654,  534 }, /* 80286 */
-    {  6576,     0, 47232, 54192, 610048, 6336, 4261,10227,17136, 17136,   3050,  31934,  2240, 1856 }, /* 8088 */
-    {  4932,     0, 35424, 40644, 457536, 4752, 3196, 7670,12852, 12852,   2288,  23951,  1680, 1392 }, /* 8086 est */
+    {  2316,     0, 16890, 18810, 170268, 1977, 1488, 3570, 5436, 10464,   1342,   8723,   654,  534 }, /* 80286 */
+    {  6576,     0, 47232, 54192, 610048, 6336, 4261,10227,17136, 28560,   3050,  31934,  2240, 1856 }, /* 8088 */
+    {  4932,     0, 35424, 40644, 457536, 4752, 3196, 7670,12852, 21420,   2288,  23951,  1680, 1392 }, /* 8086 est */
 };
 /* CURRENT 86BOX RE-MEASURE (2026-08-29): sbench values are converted by the
    configured MHz; make10k is a make+undo pair, hence /2 for mk. The NNUE
@@ -264,9 +264,8 @@ static const VW vw_tab[3] = {
    make/undo control reproducing its historical cost, gives forward eval
    ev1/ev8 = 5436/10464 cycles on the 6 MHz 80286 and 17136/28560 on the
    16 MHz 8088. The 8086 row remains the documented 0.75x 8088 estimate.
-   For strength testing, ev8 is temporarily charged at ev1 cost so the v3 net
-   receives equal modeled thinking time; the measured costs above remain the
-   reference for restoring hardware-accurate time control after the test. */
+   Select by the loaded blob's output-head count so v2 and v3 time controls
+   charge their measured, different assembly paths. */
 
 static i64 vclock_cyc(void) {
     const VW *w = &vw_tab[vcpu_model];
