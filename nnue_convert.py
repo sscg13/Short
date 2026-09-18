@@ -85,18 +85,23 @@ def read_trainer(path):
     return w1, b1, w2, bias
 
 
-def write_net(path, w1, b1, w2, bias):
+def write_net(path, w1, b1, w2, bias, output_buckets):
     with open(path, "wb") as f:
         f.write(MAGIC)
-        f.write(struct.pack("<HHHH", 2, 704, 64, 0))   # v2 ReLU^2
+        if output_buckets == 1:
+            f.write(struct.pack("<HHHH", 2, 704, 64, 0))   # v2 ReLU^2
+        else:
+            f.write(struct.pack("<HHHH", 3, 704, 64, output_buckets))
         f.write(w1)
         f.write(b1)
-        f.write(w2)
-        f.write(struct.pack("<h", bias))
+        f.write(w2 * output_buckets)
+        f.write(struct.pack(f"<{output_buckets}h", *([bias] * output_buckets)))
 
 
 def main():
     ap = argparse.ArgumentParser(description="fold 768 trainer net -> 704 engine blob")
+    ap.add_argument("--output-buckets", type=int, choices=(1, 8), default=1,
+                    help="write one output (v2) or replicate it into eight v3 buckets")
     ap.add_argument("src", help="raw 768 trainer file (short-v2.nnue)")
     ap.add_argument("dst", help="output engine blob (chess-v2.net)")
     args = ap.parse_args()
@@ -109,9 +114,10 @@ def main():
         rows[r] = t * 64 + sq
     w1_out = b"".join(w1[r * 64:(r + 1) * 64] for r in rows)
 
-    write_net(dst, w1_out, b1, w2, bias)
-    print(f"{src}: folded 768 -> 704, wrote {dst} (v2 ReLU^2 "
-          f"{len(w1_out)} + {len(b1)} + {len(w2)} + 2 + 12 bytes, bias={bias})")
+    write_net(dst, w1_out, b1, w2, bias, args.output_buckets)
+    version = 2 if args.output_buckets == 1 else 3
+    print(f"{src}: folded 768 -> 704, wrote {dst} (v{version} ReLU^2, "
+          f"output_buckets={args.output_buckets}, bias={bias})")
 
 
 if __name__ == "__main__":
