@@ -15,6 +15,8 @@ FEATURES = 704
 HIDDEN = 64
 OUTPUT_BUCKETS = 8
 OUTPUT_STRIDE = 2 * HIDDEN
+W2_MIN = -64
+W2_MAX = 63
 RECORD_SIZE = 40
 HEADER_SIZE = 16
 PARAM_COUNT = FEATURES * HIDDEN + HIDDEN + OUTPUT_BUCKETS * OUTPUT_STRIDE + OUTPUT_BUCKETS
@@ -50,14 +52,14 @@ def export_net(weights, path):
     weights = weights.detach().cpu()
     w1 = signed_bytes(weights[:W1_END], -128, 127)
     b1 = signed_bytes(weights[W1_END:B1_END], -128, 127)
-    w2 = signed_bytes(weights[B1_END:W2_END], -128, 127)
+    w2 = signed_bytes(weights[B1_END:W2_END], W2_MIN, W2_MAX)
     biases = round_away_from_zero(weights[W2_END:BIAS_END]).clamp(-32768, 32767)
     biases = [int(value) for value in biases.cpu().tolist()]
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
     temp = output.with_suffix(output.suffix + ".tmp")
     with open(temp, "wb") as target:
-        target.write(struct.pack("<4sHHHH", b"NNUE", 3, FEATURES, HIDDEN, OUTPUT_BUCKETS))
+        target.write(struct.pack("<4sHHHH", b"NNUE", 4, FEATURES, HIDDEN, OUTPUT_BUCKETS))
         target.write(w1)
         target.write(b1)
         target.write(w2)
@@ -72,7 +74,7 @@ def save_checkpoint(path, weights, optimizer, generator, next_epoch, args,
     output.parent.mkdir(parents=True, exist_ok=True)
     temp = output.with_suffix(output.suffix + ".tmp")
     state = {
-        "format": "short-nnue-trainer-v1",
+        "format": "short-nnue-trainer-v2-narrow-w2",
         "weights": weights.detach().cpu(),
         "optimizer": optimizer.state_dict(),
         "generator_state": generator.get_state(),
@@ -96,7 +98,7 @@ def save_checkpoint(path, weights, optimizer, generator, next_epoch, args,
 def load_checkpoint(path, args, final_lr):
     """Load and validate state whose schedule continues under this command."""
     state = torch.load(path, map_location="cpu", weights_only=True)
-    if state.get("format") != "short-nnue-trainer-v1":
+    if state.get("format") != "short-nnue-trainer-v2-narrow-w2":
         raise ValueError(f"unsupported training checkpoint: {path}")
     expected = {
         "epochs": args.epochs,
@@ -127,7 +129,8 @@ def load_checkpoint(path, args, final_lr):
 def clamp_quantized_ranges_(weights):
     """Keep the QAT parameters in the exact ranges representable by the net."""
     with torch.no_grad():
-        weights[:W2_END].clamp_(-128.0, 127.0)
+        weights[:B1_END].clamp_(-128.0, 127.0)
+        weights[B1_END:W2_END].clamp_(W2_MIN, W2_MAX)
         weights[W2_END:BIAS_END].clamp_(-32768.0, 32767.0)
 
 
@@ -139,7 +142,7 @@ def load_net(path):
         raise ValueError(f"unsupported net header: {path}")
     if version == 2 and reserved == 0:
         buckets = 1
-    elif version == 3 and reserved == OUTPUT_BUCKETS:
+    elif version in (3, 4) and reserved == OUTPUT_BUCKETS:
         buckets = OUTPUT_BUCKETS
     else:
         raise ValueError(f"unsupported net header: {path}")
@@ -158,6 +161,8 @@ def load_net(path):
     if buckets == 1:
         w2 = w2.repeat(OUTPUT_BUCKETS)
         biases = biases.repeat(OUTPUT_BUCKETS)
+    if version != 4:
+        w2 = w2 * 0.5
     return torch.cat((w1, b1, w2, biases)).to(torch.float32)
 
 
@@ -263,7 +268,10 @@ def main():
                         help="resume full-precision weights, optimizer, RNG, and epoch schedule")
     parser.add_argument("--snapshot-every", type=int, default=0,
                         help="export an epoch-numbered checkpoint every N epochs")
-    parser.add_argument("--init-net", default=None, help="optional v2 net to fine-tune")
+    parser.add_argument("--init-net", default=None,
+                        help="optional v2/v3/v4 net to initialize or fine-tune")
+    parser.add_argument("--evaluate-only", action="store_true",
+                        help="report validation loss for the initialized net without training")
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=4096)
     parser.add_argument("--chunk-records", type=int, default=1_048_576,
@@ -319,6 +327,21 @@ def main():
         weights = initial_weights(args.init_net, args.seed)
     weights.requires_grad_(True)
     gradients = torch.empty_like(weights)
+    if args.evaluate_only:
+        if not val_count:
+            parser.error("--evaluate-only requires a nonzero validation split")
+        started = time.perf_counter()
+        with torch.no_grad():
+            val_loss = run_sequential_range(
+                records, train_count, val_count, weights, gradients,
+                args.batch_size, args.lambda_value
+            )
+        elapsed = time.perf_counter() - started
+        print(f"records={count} validation={val_count} parameters={PARAM_COUNT} "
+              f"lambda={args.lambda_value} threads={args.threads}")
+        print(f"validation={val_loss:.9g} seconds={elapsed:.1f} "
+              f"positions_per_second={val_count / elapsed:.0f}")
+        return
     optimizer = torch.optim.AdamW([weights], lr=args.lr, weight_decay=args.weight_decay)
     if checkpoint is not None:
         optimizer.load_state_dict(checkpoint["optimizer"])

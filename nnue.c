@@ -5,8 +5,9 @@
  *   sharing ONE weight matrix, plus a shared N-wide layer-1 bias ->
  *   symmetric clamp clamp(pre,-1,1) at accumulator quantization 128 (the
  *   +/-128 extremes are shift-only: 128*w = w<<7) -> one or eight sets of
- *   2N i8 output weights (x64) plus i16 output bias (x8192) -> raw score
- *   (>> NNUE_SCALE_SHIFT = cp). Blob v3 selects one of eight classic
+ *   2N i8 output weights plus i16 output bias (x8192) -> raw score
+ *   (>> NNUE_SCALE_SHIFT = cp). Blob v4 uses x32 output weights restricted
+ *   to [-64,63] and selects one of eight classic
  *   material-count buckets: min(7, (occupied-1)/4). Blob v2 remains supported.
  *
  * The black POV is the white POV of the position rotated 180 degrees with
@@ -64,7 +65,8 @@ i8 nn_w1[NNUE_W1_SIZE];
 i8 nn_b1[NNUE_N];   /* layer-1 bias (per hidden neuron, shared by both POVs) */
 i8 nn_w2[NNUE_W2_SIZE];
 i16 nn_bias[NNUE_BUCKETS]; /* per-bucket output bias, quantized at 128*64 */
-i16 nn_output_buckets = 1; /* loaded blob: 1 (v2) or NNUE_BUCKETS (v3) */
+i16 nn_output_buckets = 1; /* loaded blob: 1 (v2) or NNUE_BUCKETS (v4) */
+i16 nn_w2_shift = NNUE_ACT2_SHIFT; /* v2 x64 or v4 x32 product scale */
 
 #if !defined(__WATCOMC__)
 /* Embed the net into the binary (gcc build: OpenBench runs the bare binary, so
@@ -119,18 +121,13 @@ void nn_make_cap(i16 persp, i16 to_row, i16 from_row, i16 cap_row);
    holding both perspectives so the linker CANNOT reorder them: the asm fwd
    reads fwd[0] at offset 0 and fwd[1] at +32768 of the same segment (a single
    2D declaration makes that layout guaranteed). */
-/* The v2 per-slot table and v3 universal table are mutually exclusive at
+/* The v2 per-slot table and v4 signed universal table are mutually exclusive at
    runtime, so overlay them. Keeping two 64 KB arrays breaks the calibrated
    512 KB DOS machines; this union retains the original memory footprint. */
 u16 _far nn_table[2][NNUE_N][256];
 
-/* Blob-v3 universal product view. Row m-1 holds magnitude m (1..128).
-   Bits 0..14 hold floor(a^2*m/512); bit 15 records a non-zero remainder so
-   the asm can reproduce arithmetic right shift for negative weights exactly:
-   floor(-x/512) = -floor(x/512) - (x%512 != 0). One table serves every slot
-   and bucket; unlike per-head nn_fwd replication it costs only 64 KB. */
 Score nn_fwd_eval(i16 side);          /* generated asm forward pass (ReLU^2) */
-Score nn_fwd_eval8(i16 side, i16 bucket); /* generated table-driven 8-bucket forward */
+Score nn_fwd_eval8(i16 side, i16 bucket); /* blob-v4 signed-table narrow forward */
 #ifndef NNUE_DISABLE_ASM_FWD
 #define NNUE_ASM_FWD 1
 #endif
@@ -438,8 +435,8 @@ static Score nn_eval_scalar(i16 side, i16 bucket) {
             i16 an = (side == 0) ? a1 : a0;  /* nstm activation */
             i32 xs = (as < 0) ? 0 : (as > 255 ? 255 : as);
             i32 xn = (an < 0) ? 0 : (an > 255 ? 255 : an);
-            out += (xs * xs * ws) >> NNUE_ACT2_SHIFT;
-            out += (xn * xn * wn) >> NNUE_ACT2_SHIFT;
+            out += (xs * xs * ws) >> nn_w2_shift;
+            out += (xn * xn * wn) >> nn_w2_shift;
         }
         return (Score)(out >> NNUE_SCALE_SHIFT);
 }
@@ -478,17 +475,17 @@ static void nn_fwd_build(void) {
     }
 }
 
-/* Build the bucket-independent magnitude table used by nn_fwd_eval8. The high
-   flag bit preserves the negative-product rounding information that would be
-   lost by merely negating a positive shifted product. */
-static void nn_prod_build(void) {
-    i16 m, a;
-    for (m = 1; m <= 128; m++) {
+/* Blob v4's 128 signed weights (-64..63) fit directly in one 64 KB table:
+   row w+64 stores the exact signed (a^2*w)>>8 result. Unlike the v3 magnitude
+   table this needs no runtime sign branch or packed remainder correction. */
+static void nn_prod_build_narrow(void) {
+    i16 w, a;
+    for (w = -64; w <= 63; w++) {
+        i16 row = w + 64;
         for (a = 0; a < 256; a++) {
-            i32 product = (i32)a * a * m;
-            u16 packed = (u16)(product >> NNUE_ACT2_SHIFT);
-            if (product & ((1 << NNUE_ACT2_SHIFT) - 1)) packed |= 0x8000U;
-            nn_table[(m - 1) >> 6][(m - 1) & 63][a] = packed;
+            i32 product = (i32)a * a * w;
+            nn_table[row >> 6][row & 63][a] =
+                (u16)(i16)(product >> NNUE_ACT2_SHIFT_NARROW);
         }
     }
 }
@@ -507,7 +504,8 @@ static int nnue_parse_blob(const u8 *p, i32 len) {
     hN    = (u16)p[8] | ((u16)p[9] << 8);
     bucket_field = (u16)p[10] | ((u16)p[11] << 8);
     if (ver == 2 && bucket_field == 0) buckets = 1;
-    else if (ver == 3 && bucket_field == NNUE_BUCKETS) buckets = NNUE_BUCKETS;
+    else if (ver == 4 && bucket_field == NNUE_BUCKETS)
+        buckets = NNUE_BUCKETS;
     else return 0;
     if (feats != NNUE_FEATURES || hN != NNUE_N) return 0;
     w2sz = (i32)buckets * NNUE_W2_STRIDE;
@@ -517,11 +515,17 @@ static int nnue_parse_blob(const u8 *p, i32 len) {
     memcpy(nn_b1, p + 12 + w1sz, (size_t)NNUE_N);
     at = 12 + w1sz + NNUE_N;
     memcpy(nn_w2, p + at, (size_t)w2sz);
+    if (ver == 4) {
+        i32 i;
+        for (i = 0; i < w2sz; i++)
+            if (nn_w2[i] < -64 || nn_w2[i] > 63) return 0;
+    }
     at += w2sz;
     for (b = 0; b < buckets; b++)
         nn_bias[b] = (i16)((u16)(u8)p[at + b * 2]
                     | ((u16)(u8)p[at + b * 2 + 1] << 8));
     nn_output_buckets = buckets;
+    nn_w2_shift = (ver == 4) ? NNUE_ACT2_SHIFT_NARROW : NNUE_ACT2_SHIFT;
     nnue_enabled = 1;
     nnue_tables_init();
     return 1;
@@ -538,7 +542,7 @@ void nnue_tables_init(void) {
     nn_rowtab_build();
 #ifdef NNUE_ASM_FWD
     if (nn_output_buckets == 1) nn_fwd_build();
-    else nn_prod_build();
+    else nn_prod_build_narrow();
 #endif
     nn_castle_build();
 }
@@ -563,19 +567,26 @@ int nnue_load(const char *path) {
     hN    = (u16)hdr[8] | ((u16)hdr[9] << 8);
     bucket_field = (u16)hdr[10] | ((u16)hdr[11] << 8);
     if (ver == 2 && bucket_field == 0) buckets = 1;
-    else if (ver == 3 && bucket_field == NNUE_BUCKETS) buckets = NNUE_BUCKETS;
+    else if (ver == 4 && bucket_field == NNUE_BUCKETS)
+        buckets = NNUE_BUCKETS;
     else { fclose(f); return 0; }
     if (feats != NNUE_FEATURES || hN != NNUE_N) { fclose(f); return 0; }
     w2sz = (i32)buckets * NNUE_W2_STRIDE;
     if (fread(nn_w1, 1, (size_t)w1sz, f) != (size_t)w1sz) { fclose(f); return 0; }
     if (fread(nn_b1, 1, (size_t)NNUE_N, f) != NNUE_N) { fclose(f); return 0; }
     if (fread(nn_w2, 1, (size_t)w2sz, f) != (size_t)w2sz) { fclose(f); return 0; }
+    if (ver == 4) {
+        i32 i;
+        for (i = 0; i < w2sz; i++)
+            if (nn_w2[i] < -64 || nn_w2[i] > 63) { fclose(f); return 0; }
+    }
     for (b = 0; b < buckets; b++) {
         if (fread(hdr, 1, 2, f) != 2) { fclose(f); return 0; }
         nn_bias[b] = (i16)((u16)(u8)hdr[0] | ((u16)(u8)hdr[1] << 8));
     }
     fclose(f);
     nn_output_buckets = buckets;
+    nn_w2_shift = (ver == 4) ? NNUE_ACT2_SHIFT_NARROW : NNUE_ACT2_SHIFT;
     nnue_enabled = 1;
     nnue_tables_init();
     return 1;
@@ -732,9 +743,10 @@ int nnue_selftest(const char *fen) {
         for (z = 0; z < (i32)NNUE_N; z++)
             nn_b1[z] = (i8)((((i32)z * 17 + 3) & 255) - 128);
         for (z = 0; z < (i32)NNUE_W2_SIZE; z++)
-            nn_w2[z] = (i8)((((i32)z * 11 + 5) & 255) - 128);
+            nn_w2[z] = (i8)((((i32)z * 11 + 5) & 127) - 64);
         for (z = 0; z < NNUE_BUCKETS; z++) nn_bias[z] = (i16)(1000 + z * 17);
         nn_output_buckets = NNUE_BUCKETS;
+        nn_w2_shift = NNUE_ACT2_SHIFT_NARROW;
         nnue_enabled = 1;
         nnue_tables_init();
     }
@@ -798,8 +810,8 @@ int nnue_selftest(const char *fen) {
 #ifdef NNUE_ASM_FWD
     if (nn_output_buckets == NNUE_BUCKETS) {
         i16 bucket, side, j;
-        /* Exercise all heads, both POV orderings, clamps, signs, and remainder
-           correction against the scalar oracle. Restore the real accumulator
+        /* Exercise all heads, both POV orderings, clamps, and signed table rows
+           against the scalar oracle. Restore the real accumulator
            afterwards so the reported eval remains the requested position. */
         memcpy(before, nn_acc[nn_ply], sizeof before);
         for (j = 0; j < NNUE_N; j++) {

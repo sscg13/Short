@@ -34,9 +34,10 @@ ENGINE BLOB (what the engine loads, little-endian):
                   w2:  2N signed bytes
                   bias: i16
 
-The engine architecture (see NNUE.md): feature transformer x256,
-act = clamp(acc, 0, 255), forward term = (act^2 * w2) >> NNUE_ACT2_SHIFT (9);
-the output scale stays 1.0 = 256 cp = out >> 5.
+The engine architecture (see NNUE.md): feature transformer x256. A one-output
+v2 blob keeps the source x64 weights and uses (act^2*w2)>>9. An eight-output
+v4 blob requantizes them to x32 in [-64,63] and uses (act^2*w2)>>8. The real
+output scale remains 1.0 = 256 cp = out >> 5.
 
 Usage:
     python nnue_convert.py short-v2.nnue chess-v2.net
@@ -86,12 +87,20 @@ def read_trainer(path):
 
 
 def write_net(path, w1, b1, w2, bias, output_buckets):
+    if output_buckets == 8:
+        wide = struct.unpack(f"<{len(w2)}b", w2)
+        narrow = []
+        for value in wide:
+            value = ((value + 1) // 2 if value >= 0
+                     else -((-value + 1) // 2))
+            narrow.append(max(-64, min(63, value)))
+        w2 = struct.pack(f"<{len(narrow)}b", *narrow)
     with open(path, "wb") as f:
         f.write(MAGIC)
         if output_buckets == 1:
             f.write(struct.pack("<HHHH", 2, 704, 64, 0))   # v2 ReLU^2
         else:
-            f.write(struct.pack("<HHHH", 3, 704, 64, output_buckets))
+            f.write(struct.pack("<HHHH", 4, 704, 64, output_buckets))
         f.write(w1)
         f.write(b1)
         f.write(w2 * output_buckets)
@@ -101,7 +110,7 @@ def write_net(path, w1, b1, w2, bias, output_buckets):
 def main():
     ap = argparse.ArgumentParser(description="fold 768 trainer net -> 704 engine blob")
     ap.add_argument("--output-buckets", type=int, choices=(1, 8), default=1,
-                    help="write one output (v2) or replicate it into eight v3 buckets")
+                    help="write one output (v2) or narrow/replicate it into eight v4 buckets")
     ap.add_argument("src", help="raw 768 trainer file (short-v2.nnue)")
     ap.add_argument("dst", help="output engine blob (chess-v2.net)")
     args = ap.parse_args()
@@ -115,7 +124,7 @@ def main():
     w1_out = b"".join(w1[r * 64:(r + 1) * 64] for r in rows)
 
     write_net(dst, w1_out, b1, w2, bias, args.output_buckets)
-    version = 2 if args.output_buckets == 1 else 3
+    version = 2 if args.output_buckets == 1 else 4
     print(f"{src}: folded 768 -> 704, wrote {dst} (v{version} ReLU^2, "
           f"output_buckets={args.output_buckets}, bias={bias})")
 

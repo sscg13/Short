@@ -1,4 +1,4 @@
-// nnue_trainer.cpp - record loader, eight-head v3 forward pass, and gradients.
+// nnue_trainer.cpp - record loader, narrow eight-head v4 forward pass, and gradients.
 //
 // This is deliberately dependency-free.  The future pybind/torch wrapper can
 // hand its parameter and gradient buffers to process_batch() without copying
@@ -25,6 +25,8 @@ constexpr int HIDDEN = 64;
 constexpr int PERSPECTIVES = 2;
 constexpr int OUTPUT_BUCKETS = 8;
 constexpr int OUTPUT_STRIDE = PERSPECTIVES * HIDDEN;
+constexpr int W2_MIN = -64;
+constexpr int W2_MAX = 63;
 constexpr int RECORD_SIZE = 40;
 constexpr int HEADER_SIZE = 16;
 constexpr int PARAM_COUNT = FEATURES * HIDDEN + HIDDEN +
@@ -83,7 +85,8 @@ static bool load_net(const std::string& path, Net& net) {
         return false;
     int version = header[4];
     int buckets = (version == 2 && header[10] == 0 && header[11] == 0) ? 1 :
-                  (version == 3 && header[10] == OUTPUT_BUCKETS && header[11] == 0)
+                  ((version == 3 || version == 4) &&
+                   header[10] == OUTPUT_BUCKETS && header[11] == 0)
                       ? OUTPUT_BUCKETS : 0;
     if (!buckets) return false;
     std::vector<uint8_t> bytes(FEATURES * HIDDEN + HIDDEN + buckets * OUTPUT_STRIDE);
@@ -102,6 +105,10 @@ static bool load_net(const std::string& path, Net& net) {
                 net.w2[b * OUTPUT_STRIDE + i] = x;
         }
     }
+    /* v2/v3 use x64 output weights. Convert them into v4's x32 parameter
+       units before QAT; the quantizer performs the final half-step rounding. */
+    if (version != 4)
+        for (float& x : net.w2) x *= 0.5f;
     for (int b = 0; b < buckets; ++b) {
         uint8_t bias_bytes[2];
         file.read(reinterpret_cast<char*>(bias_bytes), 2);
@@ -130,6 +137,11 @@ static int quant_i16(float x) {
     return std::max(-32768, std::min(32767, q));
 }
 
+static int quant_w2(float x) {
+    int q = int(x + (x >= 0.0f ? 0.5f : -0.5f));
+    return std::max(W2_MIN, std::min(W2_MAX, q));
+}
+
 static int arithmetic_shift(int value, int shift) {
     return value >> shift;
 }
@@ -137,7 +149,7 @@ static int arithmetic_shift(int value, int shift) {
 static void quantize_net(const Net& net, QuantizedNet& q) {
     for (size_t i = 0; i < q.w1.size(); ++i) q.w1[i] = uint16_t(int16_t(quant_i8(net.w1[i])));
     for (size_t i = 0; i < q.b1.size(); ++i) q.b1[i] = uint16_t(int16_t(quant_i8(net.b1[i])));
-    for (size_t i = 0; i < q.w2.size(); ++i) q.w2[i] = int8_t(quant_i8(net.w2[i]));
+    for (size_t i = 0; i < q.w2.size(); ++i) q.w2[i] = int8_t(quant_w2(net.w2[i]));
     for (size_t i = 0; i < q.bias.size(); ++i) q.bias[i] = int16_t(quant_i16(net.bias[i]));
 }
 
@@ -340,8 +352,8 @@ static Forward forward(const Record& r, const Net& net, const ActiveFeatures& f,
         for (int j = 0; j < HIDDEN; ++j) {
             int as = int(out.act[stm][j]);
             int an = int(out.act[nstm][j]);
-            raw += arithmetic_shift(as * as * qnet->w2[output_base + j], 9);
-            raw += arithmetic_shift(an * an * qnet->w2[output_base + HIDDEN + j], 9);
+            raw += arithmetic_shift(as * as * qnet->w2[output_base + j], 8);
+            raw += arithmetic_shift(an * an * qnet->w2[output_base + HIDDEN + j], 8);
         }
         out.raw = float(raw);
         /* Match the engine's final cast to its signed 16-bit Score type. */
@@ -366,8 +378,8 @@ static Forward forward(const Record& r, const Net& net, const ActiveFeatures& f,
     for (int j = 0; j < HIDDEN; ++j) {
         int as = int(out.act[stm][j]);
         int an = int(out.act[nstm][j]);
-        raw_float += float(as * as) * net.w2[output_base + j] / 512.0f;
-        raw_float += float(an * an) * net.w2[output_base + HIDDEN + j] / 512.0f;
+        raw_float += float(as * as) * net.w2[output_base + j] / 256.0f;
+        raw_float += float(an * an) * net.w2[output_base + HIDDEN + j] / 256.0f;
     }
     out.raw = raw_float;
     out.score = out.raw / OUTPUT_SHIFT;
@@ -420,7 +432,7 @@ struct LossParams {
 
 // Accumulates the exact derivative of mean(abs(pt-qf)^pow_exp) into grads.
 // Parameters are in engine units: w1/b1 are accumulator units, w2 is the
-// i8-like x64 row unit, and bias is raw output units.
+// narrow x32 row unit, and bias is raw output units.
 static float process_record(const Record& record, const Net& net,
                             const LossParams& params, Gradients& grads, bool qat,
                             const QuantizedNet* qnet) {
@@ -463,8 +475,8 @@ static float process_record(const Record& record, const Net& net,
     const int8_t* w2_q = qat && qnet ? qnet->w2.data() : nullptr;
     // Division by a power of two equals multiplication by its exact inverse,
     // so these hoists do not change the results beyond association order.
-    const float inv512 = 1.0f / 512.0f;
     const float inv256 = 1.0f / 256.0f;
+    const float inv128 = 1.0f / 128.0f;
     float dacc[PERSPECTIVES][HIDDEN];
     for (int p = 0; p < PERSPECTIVES; ++p) {
         int w2_base = output_base + ((p == stm) ? 0 : HIDDEN);
@@ -485,9 +497,9 @@ static float process_record(const Record& record, const Net& net,
         const float* wr = w2row;
         for (int j = 0; j < HIDDEN; ++j) {
             float a = act[j];
-            gw2r[j] += draw * a * a * inv512;
+            gw2r[j] += draw * a * a * inv256;
             bool live = (acc[j] > 0.0f) & (acc[j] < 255.0f);
-            float d = draw * (a * wr[j]) * inv256;
+            float d = draw * (a * wr[j]) * inv128;
             da[j] = live ? d : 0.0f;
             gb1[j] += da[j];
         }
@@ -754,14 +766,41 @@ float process_batch_flat(const uint8_t* records, size_t record_count,
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr, "usage: nnue_trainer_test file.records [... ]\n"
-                             "       nnue_trainer_test --net net path.records\n");
+                             "       nnue_trainer_test --net net path.records\n"
+                             "       nnue_trainer_test --loss net path.records [tail-count]\n");
         return 2;
     }
     try {
+        if ((argc == 4 || argc == 5) && std::strcmp(argv[1], "--loss") == 0) {
+            short_trainer::Net net;
+            if (!short_trainer::load_net(argv[2], net))
+                throw std::runtime_error("cannot load v2/v3/v4 net");
+            short_trainer::RecordFile file(argv[3]);
+            uint32_t count = argc == 5 ? uint32_t(std::stoul(argv[4]))
+                                       : std::max<uint32_t>(1, file.count() / 100);
+            count = std::min(count, file.count());
+            uint32_t first = file.count() - count;
+            const uint32_t chunk_size = 65536;
+            std::vector<short_trainer::Record> batch;
+            short_trainer::Gradients grads;
+            short_trainer::LossParams params;
+            short_trainer::set_threads(4);
+            double total = 0.0;
+            for (uint32_t done = 0; done < count;) {
+                uint32_t size = std::min(chunk_size, count - done);
+                file.read(first + done, size, batch);
+                total += double(short_trainer::process_batch(
+                                    batch.data(), batch.size(), net, params, grads)) * size;
+                done += size;
+            }
+            std::printf("records=%u validation=%u loss=%.9g\n",
+                        file.count(), count, total / count);
+            return 0;
+        }
         if ((argc == 4 || argc == 5) && std::strcmp(argv[1], "--net") == 0) {
             short_trainer::Net net;
             if (!short_trainer::load_net(argv[2], net))
-                throw std::runtime_error("cannot load v2/v3 net");
+                throw std::runtime_error("cannot load v2/v3/v4 net");
             short_trainer::RecordFile file(argv[3]);
             uint32_t count = argc == 5 ? uint32_t(std::stoul(argv[4])) : 1;
             count = std::min(count, file.count());

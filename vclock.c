@@ -247,9 +247,9 @@ static i64 vbudget_cyc;   /* weighted cycle budget for the current move */
 typedef struct { i32 att, ps, gc, gq, gm, mk, nm, rf, ev, ev8, rn, rm, tp, ts; } VW;
 static const VW vw_tab[3] = {
     /*   att    ps     gc     gq      gm     mk    nm   rf   ev1   ev8     rn      rm      tp    ts */
-    {  2316,     0, 16890, 18810, 170268, 1977, 1488, 3570, 5436, 10464,   1342,   8723,   654,  534 }, /* 80286 */
-    {  6576,     0, 47232, 54192, 610048, 6336, 4261,10227,17136, 28560,   3050,  31934,  2240, 1856 }, /* 8088 */
-    {  4932,     0, 35424, 40644, 457536, 4752, 3196, 7670,12852, 21420,   2288,  23951,  1680, 1392 }, /* 8086 est */
+    {  2316,     0, 16890, 18810, 170268, 1977, 1488, 3570, 5436,  7986,   1342,   8723,   654,  534 }, /* 80286 */
+    {  6576,     0, 47232, 54192, 610048, 6336, 4261,10227,17136, 22400,   3050,  31934,  2240, 1856 }, /* 8088 */
+    {  4932,     0, 35424, 40644, 457536, 4752, 3196, 7670,12852, 16800,   2288,  23951,  1680, 1392 }, /* 8086 est */
 };
 /* CURRENT 86BOX RE-MEASURE (2026-08-29): sbench values are converted by the
    configured MHz; make10k is a make+undo pair, hence /2 for mk. The NNUE
@@ -260,12 +260,11 @@ static const VW vw_tab[3] = {
    to the fresh profile totals: 1.42624e9 cycles (8088) / 0.47622e9 cycles
    (80286), at 10,037 nodes. rm is unchanged; 8086 remains a 0.75x estimate. */
 
-/* OUTPUT-BUCKET RE-MEASURE (2026-09-18): calibrated 86Box nbench, with the
-   make/undo control reproducing its historical cost, gives forward eval
-   ev1/ev8 = 5436/10464 cycles on the 6 MHz 80286 and 17136/28560 on the
-   16 MHz 8088. The 8086 row remains the documented 0.75x 8088 estimate.
-   Select by the loaded blob's output-head count so v2 and v3 time controls
-   charge their measured, different assembly paths. */
+/* NARROW OUTPUT-BUCKET RE-MEASURE (2026-09-18): calibrated 86Box nbench gives
+   ev1/ev8 = 5436/7986 cycles on the 6 MHz 80286 and 17136/22400 on the
+   16 MHz 8088. Blob v4's signed [-64,63] table removes v3's sign/remainder
+   path and recovers 24%/22% of its forward time. The 8086 row remains the
+   documented 0.75x 8088 estimate. */
 
 static i64 vclock_cyc(void) {
     const VW *w = &vw_tab[vcpu_model];
