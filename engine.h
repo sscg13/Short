@@ -88,6 +88,7 @@ typedef struct {
     i16 castle;       /* bit0 WK bit1 WQ bit2 BK bit3 BQ */
     i16 ep;           /* en-passant target square, or -1 */
     i16 ks[2];        /* king squares */
+    i16 pieces;       /* occupied squares (2..32); selects the NNUE output bucket */
     Sig sig;          /* incremental Zobrist signature of this position */
 } Pos;
 
@@ -212,20 +213,26 @@ int xboard_main(void);
    One-hot 704-feature net (12 piece types, king file folded to a-d, pawns on
    48 squares), 704 -> 2N -> 1 with the two perspectives sharing one weight
    matrix. Weights are i8 and live far on the 16-bit target (see NNUE.md).
-   Single architecture (blob version 2, ReLU^2): accumulator x256,
-   act = clamp(acc,0,255), the forward table stores (act^2 * w2) >> 9.
-   w2 stays x64 and the bias stays x8192, so the total is log2(64 * 256^2 /
-   256) = 14 bits: the pre-shift is 9 (not 8 - 8 would over-size the output
-   2x). It keeps the table magnitudes identical to the old linear net (max
-   255^2*127>>9 = 16129) and fits i16. score = out >> 5 (1.0 = 256 cp). */
+   Blob v2 is the original single output. Blob v4 has sixteen material-count
+   outputs, selected by min(15, (pieces-1)/2). Both use ReLU^2: accumulator
+   x256 and act = clamp(acc,0,255). v2 stores w2 at x64 and pre-shifts products
+   by 9. v4 stores w2 at x32 in [-64,63] and pre-shifts by 8, preserving the
+   same real scale while allowing one exact signed-weight product table in
+   64 KB. The bias remains x8192 and score = out >> 5 (1.0 = 256 cp). */
 #define NNUE_FEATURES    704
 #define NNUE_N           64
+#define NNUE_BUCKETS     16
+#define NNUE_BUCKET_SHIFT 1  /* bucket = (pieces - 1) >> 1: two piece counts/head */
 #define NNUE_SCALE_SHIFT 5    /* out >> 5 = centipawns (trainer: 1.0 net output = 256 cp) */
 #define NNUE_ACT2_SHIFT  9    /* forward table pre-shift: (act^2*w2)>>9, w2 x64, 1.0 = 256 cp */
+#define NNUE_ACT2_SHIFT_NARROW 8 /* blob v4: (act^2*w2)>>8, w2 x32 in [-64,63] */
 #define NNUE_W1_SIZE     45056L  /* NNUE_FEATURES * NNUE_N, long so 16-bit ints don't wrap */
-#define NNUE_W2_SIZE     128     /* 2 * NNUE_N */
+#define NNUE_W2_STRIDE   128     /* stm + nstm rows for one output bucket */
+#define NNUE_W2_SIZE     2048    /* NNUE_BUCKETS * NNUE_W2_STRIDE */
 extern i16 nnue_enabled;     /* a net is loaded */
 extern i16 nnue_active;      /* incremental accumulators are live (during search) */
+extern i16 nn_output_buckets; /* 1 for blob v2, NNUE_BUCKETS for narrow blob v4 */
+extern i16 nn_w2_shift;       /* 9 for x64 v2, 8 for narrow x32 v4 */
 void nnue_reset(Pos *p);
 void nnue_make(Pos *p, u16 m, Undo *u);
 void nnue_undo(Pos *p);

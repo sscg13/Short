@@ -246,13 +246,13 @@ static const i32 cpn_tab[4][2] = {
 #ifdef VCLOCK
 static i64 vbudget_cyc;   /* weighted cycle budget for the current move */
 
-typedef struct { i32 att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm, tp, ts; } VW;
+typedef struct { i32 att, ps, gc, gq, gm, mk, nm, rf, ev, evb, rn, rm, tp, ts; } VW;
 static const VW vw_tab[4] = {
-    /*   att    ps     gc     gq      gm     mk    nm   rf    ev     rn      rm      tp    ts */
-    {  2316,     0, 16890, 18810, 170268, 1977, 1488, 3570,  5436,   1342,   8723,   654,  534 }, /* 80286 */
-    {  6576,     0, 47232, 54192, 610048, 6336, 4261,10227, 17136,   3050,  31934,  2240, 1856 }, /* 8088 */
-    {  5547,     0, 35520, 42657, 492500, 5286, 3847, 9234, 14282,  14514,  24116,  1867, 1567 }, /* 8086 */
-    {  3317,   140, 21358, 24698, 263943, 2748, 2025, 4860,  7834,   8252,  16790,  1165, 1009 }, /* 80186 */
+    /*   att    ps     gc     gq      gm     mk    nm   rf    ev    evb     rn      rm      tp    ts */
+    {  2316,     0, 16890, 18810, 170268, 1977, 1488, 3570,  5436,  7986,   1342,   8723,   654,  534 }, /* 80286 */
+    {  6576,     0, 47232, 54192, 610048, 6336, 4261,10227, 17136, 22400,   3050,  31934,  2240, 1856 }, /* 8088 */
+    {  5547,     0, 35520, 42657, 492500, 5286, 3847, 9234, 14282, 16800,  14514,  24116,  1867, 1567 }, /* 8086 */
+    {  3317,   140, 21358, 24698, 263943, 2748, 2025, 4860,  7834, 10240,   8252,  16790,  1165, 1009 }, /* 80186 */
 };
 /* CURRENT 86BOX RE-MEASURE (2026-08-29): sbench values are converted by the
    configured MHz; make10k is a make+undo pair, hence /2 for mk. The NNUE
@@ -267,6 +267,12 @@ static const VW vw_tab[4] = {
    carried into v2 without a re-fit. Calibrated 86Box nbench measurements of the
    unchanged generated v2 forward are 5436 cycles on the 6 MHz 80286 and 17136
    on the 16 MHz 8088. */
+
+/* NARROW BUCKETED FORWARD (2026-09-18): the universal signed-table routine
+   costs 7986 cycles on the 6 MHz 80286 and 22400 on the 16 MHz 8088. Selecting
+   one head does the same work for 8, 16, or 32 total heads, so these measured
+   evb values apply unchanged. The 8086 and 80186 rows are estimates until
+   those machines are measured with a narrow bucketed blob. */
 
 /* 8086 DESKPRO CALIBRATION (2026-09-19): 86Box interpreter, Compaq Deskpro
    8086 @ 8 MHz, dynarec off. This replaces the old 0.75x/0.779x 8088 estimate.
@@ -304,7 +310,7 @@ static i64 vclock_cyc(void) {
     r += (i64)w->mk  * (c_make + c_undo);
     r += (i64)w->nm  * (c_nn_make + c_nn_undo);
     r += (i64)w->rf  * c_refresh;
-    r += (i64)w->ev  * c_nn_eval;
+    r += (i64)(nn_output_buckets == NNUE_BUCKETS ? w->evb : w->ev) * c_nn_eval;
     r += (i64)w->tp  * c_tt_probe;
     r += (i64)w->ts  * c_tt_store;
     return r;

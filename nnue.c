@@ -4,8 +4,11 @@
  *   704 one-hot inputs -> two N-wide i16 accumulators (white POV, black POV)
  *   sharing ONE weight matrix, plus a shared N-wide layer-1 bias ->
  *   symmetric clamp clamp(pre,-1,1) at accumulator quantization 128 (the
- *   +/-128 extremes are shift-only: 128*w = w<<7) -> 2N i8 output weights
- *   (x64) -> i16 output bias (x8192) -> raw score (>> NNUE_SCALE_SHIFT = cp).
+ *   +/-128 extremes are shift-only: 128*w = w<<7) -> one or sixteen sets of
+ *   2N i8 output weights plus i16 output bias (x8192) -> raw score
+ *   (>> NNUE_SCALE_SHIFT = cp). Blob v4 uses x32 output weights restricted
+ *   to [-64,63] and selects one of sixteen material-count buckets:
+ *   min(15, (occupied-1)/2). Blob v2 remains supported.
  *
  * The black POV is the white POV of the position rotated 180 degrees with
  * colors swapped, so the net is color-symmetric by construction. Both POVs
@@ -61,7 +64,9 @@ i8 nn_w1[NNUE_W1_SIZE];
 #endif
 i8 nn_b1[NNUE_N];   /* layer-1 bias (per hidden neuron, shared by both POVs) */
 i8 nn_w2[NNUE_W2_SIZE];
-i16 nn_bias;        /* output bias, i16, quantized at 128*64 (WORD for the asm fwd) */
+i16 nn_bias[NNUE_BUCKETS]; /* per-bucket output bias, quantized at 256*32 */
+i16 nn_output_buckets = 1; /* loaded blob: 1 (v2) or NNUE_BUCKETS (v4) */
+i16 nn_w2_shift = NNUE_ACT2_SHIFT; /* v2 x64 or v4 x32 product scale */
 
 #if !defined(__WATCOMC__)
 /* Embed the net into the binary (gcc build: OpenBench runs the bare binary, so
@@ -109,15 +114,16 @@ void nn_make_move(i16 persp, i16 to_row, i16 from_row);
 void nn_make_cap(i16 persp, i16 to_row, i16 from_row, i16 cap_row);
 #define NNUE_ASM_BATCH 1
 
-/* per-slot forward product tables (nnue_opt.asm, NNUE_OPTIMIZATION.md §5):
+/* Forward product table (nnue_opt.asm, NNUE_OPTIMIZATION.md):
    fwd[p][j][a] = (a^2 * w2[p*64+j]) >> NNUE_ACT2_SHIFT  for a in [0,255]
    (the ReLU^2 activation, pre-shifted so every entry fits i16). Built at net
    load so the forward multiply becomes one word load. ONE 64 KB far array
-   holding both perspectives so the linker CANNOT reorder them: the asm fwd
-   reads fwd[0] at offset 0 and fwd[1] at +32768 of the same segment (a single
-   2D declaration makes that layout guaranteed). */
-i16 _far nn_fwd[2][NNUE_N][256];
+   holding either v2's two per-slot tables or v4's universal signed table.
+   They are mutually exclusive at runtime, so overlaying them retains the
+   original memory footprint. */
+u16 _far nn_table[2][NNUE_N][256];
 Score nn_fwd_eval(i16 side);          /* generated asm forward pass (ReLU^2) */
+Score nn_fwd_eval8(i16 side, i16 bucket); /* narrow bucketed signed-table forward */
 #ifndef NNUE_DISABLE_ASM_FWD
 #define NNUE_ASM_FWD 1
 #endif
@@ -396,36 +402,45 @@ void nnue_undo(Pos *p) {
 /* forward pass                                                       */
 /* ------------------------------------------------------------------ */
 
+static i16 nn_output_bucket(const Pos *p) {
+    i16 pieces = p->pieces;
+    i16 bucket;
+    if (pieces < 1) pieces = 1;
+    bucket = (pieces - 1) >> NNUE_BUCKET_SHIFT;
+    return bucket < NNUE_BUCKETS ? bucket : NNUE_BUCKETS - 1;
+}
+
+static Score nn_eval_scalar(i16 side, i16 bucket) {
+    i16 wbase = bucket * NNUE_W2_STRIDE;
+    i32 out = nn_bias[bucket];
+    i16 j;
+    /* ReLU^2: act = clamp(acc, 0, 255). Blob v2 uses
+       (act^2*w2)>>9; narrow blob v4 uses (act^2*w2)>>8. stm/nstm:
+       acc[0] is the white POV and acc[1] the black POV. The net is
+       side-to-move-aware, so black-to-move swaps the accumulator roles and
+       needs no final negation. */
+    for (j = 0; j < NNUE_N; j++) {
+        i16 a0 = nn_acc[nn_ply][0][j], a1 = nn_acc[nn_ply][1][j];
+        i16 ws = nn_w2[wbase + j];
+        i16 wn = nn_w2[wbase + NNUE_N + j];
+        i16 as = (side == 0) ? a0 : a1;
+        i16 an = (side == 0) ? a1 : a0;
+        i32 xs = (as < 0) ? 0 : (as > 255 ? 255 : as);
+        i32 xn = (an < 0) ? 0 : (an > 255 ? 255 : an);
+        out += (xs * xs * ws) >> nn_w2_shift;
+        out += (xn * xn * wn) >> nn_w2_shift;
+    }
+    return (Score)(out >> NNUE_SCALE_SHIFT);
+}
+
 Score nnue_eval(Pos *p) {
+    i16 bucket = (nn_output_buckets == 1) ? 0 : nn_output_bucket(p);
     PCOUNT(c_nn_eval);
 #ifdef NNUE_ASM_FWD
-    return nn_fwd_eval(p->side);
+    if (nn_output_buckets == 1) return nn_fwd_eval(p->side);
+    return nn_fwd_eval8(p->side, bucket);
 #else
-    {
-        i32 out = nn_bias;
-        i16 j;
-        /* ReLU^2: act = clamp(acc, 0, 255); term = (act^2 * w2) >> 8. The
-           squared pre-activation (max 255^2*127 ~ 8.26M) is pre-shifted so the
-           forward table still fits i16; out stays i32 and the final >>5
-           (1.0 = 256 cp) is unchanged. stm/nstm: acc[0] is the white POV,
-           acc[1] the black POV. The net is side-to-move-aware (the trainer
-           always treats the side to move as "white" in feature space), so when
-           black is to move the weight roles SWAP (acc[1] is the stm POV) and
-           there is NO final negate - the score is already from the side to
-           move's perspective. */
-        for (j = 0; j < NNUE_N; j++) {
-            i16 a0 = nn_acc[nn_ply][0][j], a1 = nn_acc[nn_ply][1][j];
-            i16 ws = nn_w2[j];                  /* stm weight */
-            i16 wn = nn_w2[NNUE_N + j];         /* nstm weight */
-            i16 as = (p->side == 0) ? a0 : a1;  /* stm activation */
-            i16 an = (p->side == 0) ? a1 : a0;  /* nstm activation */
-            i32 xs = (as < 0) ? 0 : (as > 255 ? 255 : as);
-            i32 xn = (an < 0) ? 0 : (an > 255 ? 255 : an);
-            out += (xs * xs * ws) >> NNUE_ACT2_SHIFT;
-            out += (xn * xn * wn) >> NNUE_ACT2_SHIFT;
-        }
-        return (Score)(out >> NNUE_SCALE_SHIFT);
-    }
+    return nn_eval_scalar(p->side, bucket);
 #endif
 }
 
@@ -446,8 +461,24 @@ static void nn_fwd_build(void) {
         for (a = 0; a < 256; a++) {
             i32 p0 = (i32)a * a * w0;
             i32 p1 = (i32)a * a * w1;
-            nn_fwd[0][j][a] = (i16)(p0 >> NNUE_ACT2_SHIFT);
-            nn_fwd[1][j][a] = (i16)(p1 >> NNUE_ACT2_SHIFT);
+            nn_table[0][j][a] = (u16)(i16)(p0 >> NNUE_ACT2_SHIFT);
+            nn_table[1][j][a] = (u16)(i16)(p1 >> NNUE_ACT2_SHIFT);
+        }
+    }
+}
+
+/* Blob v4's 128 possible signed weights (-64..63) fit directly in one
+   64 KB table: row w+64 stores the exact signed (a^2*w)>>8 result. The table
+   is universal across every neuron and output bucket, so 16 heads do not
+   increase the forward-table footprint or the hot-loop work. */
+static void nn_prod_build_narrow(void) {
+    i16 w, a;
+    for (w = -64; w <= 63; w++) {
+        i16 row = w + 64;
+        for (a = 0; a < 256; a++) {
+            i32 product = (i32)a * a * w;
+            nn_table[row >> 6][row & 63][a] =
+                (u16)(i16)(product >> NNUE_ACT2_SHIFT_NARROW);
         }
     }
 }
@@ -455,21 +486,39 @@ static void nn_fwd_build(void) {
 
 /* parse a net blob (engine format, see NNUE.md) from memory */
 static int nnue_parse_blob(const u8 *p, i32 len) {
-    u16 ver, feats, hN;
+    u16 ver, feats, hN, bucket_field;
+    i16 buckets, b;
     i32 w1sz = (i32)NNUE_FEATURES * NNUE_N;
-    i32 need = 12 + w1sz + NNUE_N + NNUE_W2_SIZE + 2;
-    if (len < need) return 0;
+    i32 w2sz, need, at;
+    if (len < 12) return 0;
     if (p[0] != 'N' || p[1] != 'N' || p[2] != 'U' || p[3] != 'E') return 0;
     ver   = (u16)p[4] | ((u16)p[5] << 8);
     feats = (u16)p[6] | ((u16)p[7] << 8);
     hN    = (u16)p[8] | ((u16)p[9] << 8);
-    if (ver != 2) return 0;                        /* v2 ReLU^2 is the only format */
+    bucket_field = (u16)p[10] | ((u16)p[11] << 8);
+    if (ver == 2 && bucket_field == 0) buckets = 1;
+    else if (ver == 4 && bucket_field == NNUE_BUCKETS)
+        buckets = NNUE_BUCKETS;
+    else return 0;
     if (feats != NNUE_FEATURES || hN != NNUE_N) return 0;
+    w2sz = (i32)buckets * NNUE_W2_STRIDE;
+    need = 12 + w1sz + NNUE_N + w2sz + (i32)buckets * 2;
+    if (len < need) return 0;
     memcpy(nn_w1, p + 12, (size_t)w1sz);
     memcpy(nn_b1, p + 12 + w1sz, (size_t)NNUE_N);
-    memcpy(nn_w2, p + 12 + w1sz + NNUE_N, (size_t)NNUE_W2_SIZE);
-    nn_bias = (i16)((u16)(u8)p[12 + w1sz + NNUE_N + NNUE_W2_SIZE]
-            | ((u16)(u8)p[13 + w1sz + NNUE_N + NNUE_W2_SIZE] << 8));
+    at = 12 + w1sz + NNUE_N;
+    memcpy(nn_w2, p + at, (size_t)w2sz);
+    if (ver == 4) {
+        i32 i;
+        for (i = 0; i < w2sz; i++)
+            if (nn_w2[i] < -64 || nn_w2[i] > 63) return 0;
+    }
+    at += w2sz;
+    for (b = 0; b < buckets; b++)
+        nn_bias[b] = (i16)((u16)(u8)p[at + b * 2]
+                    | ((u16)(u8)p[at + b * 2 + 1] << 8));
+    nn_output_buckets = buckets;
+    nn_w2_shift = (ver == 4) ? NNUE_ACT2_SHIFT_NARROW : NNUE_ACT2_SHIFT;
     nnue_enabled = 1;
     nnue_tables_init();
     return 1;
@@ -485,7 +534,8 @@ static int nnue_parse_blob(const u8 *p, i32 len) {
 void nnue_tables_init(void) {
     nn_rowtab_build();
 #ifdef NNUE_ASM_FWD
-    nn_fwd_build();
+    if (nn_output_buckets == 1) nn_fwd_build();
+    else nn_prod_build_narrow();
 #endif
     nn_castle_build();
 }
@@ -498,22 +548,38 @@ void nnue_tables_init(void) {
 int nnue_load(const char *path) {
     FILE *f = fopen(path, "rb");
     u8 hdr[12];
-    u16 ver, feats, hN;
+    u16 ver, feats, hN, bucket_field;
+    i16 buckets, b;
     i32 w1sz = (i32)NNUE_FEATURES * NNUE_N;
+    i32 w2sz;
     if (!f) return 0;
     if (fread(hdr, 1, 12, f) != 12) { fclose(f); return 0; }
     if (hdr[0] != 'N' || hdr[1] != 'N' || hdr[2] != 'U' || hdr[3] != 'E') { fclose(f); return 0; }
     ver   = (u16)hdr[4] | ((u16)hdr[5] << 8);
     feats = (u16)hdr[6] | ((u16)hdr[7] << 8);
     hN    = (u16)hdr[8] | ((u16)hdr[9] << 8);
-    if (ver != 2) { fclose(f); return 0; }       /* v2 ReLU^2 is the only format */
+    bucket_field = (u16)hdr[10] | ((u16)hdr[11] << 8);
+    if (ver == 2 && bucket_field == 0) buckets = 1;
+    else if (ver == 4 && bucket_field == NNUE_BUCKETS)
+        buckets = NNUE_BUCKETS;
+    else { fclose(f); return 0; }
     if (feats != NNUE_FEATURES || hN != NNUE_N) { fclose(f); return 0; }
+    w2sz = (i32)buckets * NNUE_W2_STRIDE;
     if (fread(nn_w1, 1, (size_t)w1sz, f) != (size_t)w1sz) { fclose(f); return 0; }
     if (fread(nn_b1, 1, (size_t)NNUE_N, f) != NNUE_N) { fclose(f); return 0; }
-    if (fread(nn_w2, 1, (size_t)NNUE_W2_SIZE, f) != NNUE_W2_SIZE) { fclose(f); return 0; }
-    if (fread(hdr, 1, 2, f) != 2) { fclose(f); return 0; }
-    nn_bias = (i16)((u16)(u8)hdr[0] | ((u16)(u8)hdr[1] << 8));
+    if (fread(nn_w2, 1, (size_t)w2sz, f) != (size_t)w2sz) { fclose(f); return 0; }
+    if (ver == 4) {
+        i32 i;
+        for (i = 0; i < w2sz; i++)
+            if (nn_w2[i] < -64 || nn_w2[i] > 63) { fclose(f); return 0; }
+    }
+    for (b = 0; b < buckets; b++) {
+        if (fread(hdr, 1, 2, f) != 2) { fclose(f); return 0; }
+        nn_bias[b] = (i16)((u16)(u8)hdr[0] | ((u16)(u8)hdr[1] << 8));
+    }
     fclose(f);
+    nn_output_buckets = buckets;
+    nn_w2_shift = (ver == 4) ? NNUE_ACT2_SHIFT_NARROW : NNUE_ACT2_SHIFT;
     nnue_enabled = 1;
     nnue_tables_init();
     return 1;
@@ -571,6 +637,7 @@ static void flip_pos(Pos *dst, const Pos *src) {
     dst->side = src->side ^ 1;
     dst->castle = 0;
     dst->ep = -1;
+    dst->pieces = src->pieces;
     /* re-locate kings: nn_compute reads ks[] for the mirror flags */
     for (c = 0; c < 64; c++) {
         i16 pc = dst->board[c2sq(c)];
@@ -592,6 +659,7 @@ static void hmirror_pos(Pos *dst, const Pos *src) {
     dst->side = src->side;
     dst->castle = 0;
     dst->ep = -1;
+    dst->pieces = src->pieces;
     for (c = 0; c < 64; c++) {
         i16 pc = dst->board[c2sq(c)];
         if (pc == WK) dst->ks[0] = c2sq(c);
@@ -675,7 +743,7 @@ int nnue_selftest(const char *fen) {
     static i16 a[2][NNUE_N], b[2][NNUE_N];
     static i16 before[2][NNUE_N], incr[2][NNUE_N], fresh[2][NNUE_N];
     u16 *list = movebuf[28];
-    i16 n, i, fail = 0, asym = 0, asymH = 0;
+    i16 n, i, fail = 0, asym = 0, asymH = 0, fwd_fail = 0;
 
     parse_fen(&pos, fen ? fen : "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
 
@@ -686,8 +754,10 @@ int nnue_selftest(const char *fen) {
         for (z = 0; z < (i32)NNUE_N; z++)
             nn_b1[z] = (i8)((((i32)z * 17 + 3) & 255) - 128);
         for (z = 0; z < (i32)NNUE_W2_SIZE; z++)
-            nn_w2[z] = (i8)((((i32)z * 11 + 5) & 255) - 128);
-        nn_bias = 1000;
+            nn_w2[z] = (i8)((((i32)z * 11 + 5) & 127) - 64);
+        for (z = 0; z < NNUE_BUCKETS; z++) nn_bias[z] = (i16)(1000 + z * 17);
+        nn_output_buckets = NNUE_BUCKETS;
+        nn_w2_shift = NNUE_ACT2_SHIFT_NARROW;
         nnue_enabled = 1;
         nnue_tables_init();
     }
@@ -748,7 +818,33 @@ int nnue_selftest(const char *fen) {
     nnue_active = 0;
 
     nnue_reset(&pos);
-    printf("nn selftest: moves=%d  acc-sym(R180)=%d  acc-sym(H)=%d  roundtrip-fails=%d  eval=%d\n",
-           n, asym, asymH, fail, nnue_eval(&pos));
-    return (fail == 0 && asym == 0 && asymH == 0) ? 0 : 1;
+#ifdef NNUE_ASM_FWD
+    if (nn_output_buckets == NNUE_BUCKETS) {
+        i16 bucket, side, j;
+        /* Exercise every head, both POV orders, clamps, and signed table rows
+           against the scalar oracle. Restore the position accumulator before
+           reporting its real evaluation. */
+        memcpy(before, nn_acc[nn_ply], sizeof before);
+        for (j = 0; j < NNUE_N; j++) {
+            nn_acc[nn_ply][0][j] = (i16)(j * 5 - 25);
+            nn_acc[nn_ply][1][j] = (i16)(280 - j * 5);
+        }
+        for (bucket = 0; bucket < NNUE_BUCKETS; bucket++) {
+            for (side = 0; side < 2; side++) {
+                Score got = nn_fwd_eval8(side, bucket);
+                Score want = nn_eval_scalar(side, bucket);
+                if (got != want) {
+                    if (!fwd_fail)
+                        printf("nn bucket-fwd mismatch bucket=%d side=%d asm=%d scalar=%d\n",
+                               bucket, side, got, want);
+                    fwd_fail++;
+                }
+            }
+        }
+        memcpy(nn_acc[nn_ply], before, sizeof before);
+    }
+#endif
+    printf("nn selftest: moves=%d  acc-sym(R180)=%d  acc-sym(H)=%d  roundtrip-fails=%d  fwd-fails=%d  eval=%d\n",
+           n, asym, asymH, fail, fwd_fail, nnue_eval(&pos));
+    return (fail == 0 && asym == 0 && asymH == 0 && fwd_fail == 0) ? 0 : 1;
 }
