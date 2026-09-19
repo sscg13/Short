@@ -247,18 +247,23 @@ static i64 vbudget_cyc;   /* weighted cycle budget for the current move */
 typedef struct { i32 att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm, tp, ts; } VW;
 static const VW vw_tab[3] = {
     /*   att    ps     gc     gq      gm     mk    nm   rf    ev     rn      rm      tp    ts */
-    {  2316,     0, 16890, 18810, 170268, 1977, 1488, 3570, 10296,   1342,   8723,   654,  534 }, /* 80286 */
-    {  6576,     0, 47232, 54192, 610048, 6336, 4261,10227, 35360,   3050,  31934,  2240, 1856 }, /* 8088 */
-    {  4932,     0, 35424, 40644, 457536, 4752, 3196, 7670, 26520,   2288,  23951,  1680, 1392 }, /* 8086 est */
+    {  2316,     0, 16890, 18810, 170268, 1977, 1488, 3570,  5436,   1342,   8723,   654,  534 }, /* 80286 */
+    {  6576,     0, 47232, 54192, 610048, 6336, 4261,10227, 17136,   3050,  31934,  2240, 1856 }, /* 8088 */
+    {  4932,     0, 35424, 40644, 457536, 4752, 3196, 7670, 12852,   2288,  23951,  1680, 1392 }, /* 8086 est */
 };
 /* CURRENT 86BOX RE-MEASURE (2026-08-29): sbench values are converted by the
    configured MHz; make10k is a make+undo pair, hence /2 for mk. The NNUE
    nbench timer is not a usable cross-CPU cycle source under the host-bound
    interpreter (its eval/delta outputs do not preserve their expected ratio),
-   so the existing ev value is retained and nm+rf is refreshed from the delta
-   minus board pair using the historical 1:2.4 split. rn is fitted separately
-   to the fresh profile totals: 1.42624e9 cycles (8088) / 0.47622e9 cycles
-   (80286), at 10,037 nodes. rm is unchanged; 8086 remains a 0.75x estimate. */
+   so nm+rf is refreshed from the delta minus board pair using the historical
+   1:2.4 split. rn is fitted separately to the fresh profile totals: 1.42624e9
+   cycles (8088) / 0.47622e9 cycles (80286), at 10,037 nodes. rm is unchanged. */
+
+/* V2 FORWARD CORRECTION (2026-09-18): the old ev values 10296/35360 were
+   measured before ReLU^2 v2 existed, on the v1 linear-clamp forward pass, then
+   carried into v2 without a re-fit. Calibrated 86Box nbench measurements of the
+   unchanged generated v2 forward are 5436 cycles on the 6 MHz 80286 and 17136
+   on the 16 MHz 8088. The 8086 row remains the documented 0.75x estimate. */
 
 static i64 vclock_cyc(void) {
     const VW *w = &vw_tab[vcpu_model];
