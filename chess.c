@@ -146,6 +146,8 @@ void do_make(Pos *p, u16 m, Undo *u) {
     p->board[to] = promo ? promo : piece;
     p->board[from] = EMPTY;
 
+    if (u->cap != EMPTY || fl == MF_EP) p->pieces--;
+
     if (fl == MF_CASTLE) {
         if (to == 0x06)      { p->board[0x05] = WR; p->board[0x07] = EMPTY; }
         else if (to == 0x02) { p->board[0x03] = WR; p->board[0x00] = EMPTY; }
@@ -206,6 +208,8 @@ void undo_move(Pos *p, u16 m, Undo *u) {
         if (p->side == 0) p->board[to - 16] = BP;
         else              p->board[to + 16] = WP;
     }
+
+    if (u->cap != EMPTY || fl == MF_EP) p->pieces++;
 
     p->castle = u->castle;
     p->ep = u->ep;
@@ -770,12 +774,13 @@ void parse_fen(Pos *p, const char *s) {
 
     for (i = 0; i < 128; i++) p->board[i] = EMPTY;
     p->ks[0] = p->ks[1] = -1;
+    p->pieces = 0;
 
     while (*s && *s != ' ') {
         char c = *s++;
         if (c == '/') { rank--; file = 0; }
         else if (c >= '1' && c <= '8') file += c - '0';
-        else { p->board[rank * 16 + file] = pchar(c); file++; }
+        else { p->board[rank * 16 + file] = pchar(c); p->pieces++; file++; }
     }
     s++;
     p->side = (*s == 'b') ? 1 : 0;
