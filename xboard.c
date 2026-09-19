@@ -286,7 +286,7 @@ int xboard_main(void) {
                default marked by a leading `*`; -check takes 1/0. */
             xb_outf("feature option=\"Threads -spin 1 1 16\"");
             xb_outf("feature option=\"Hash -spin 32 32 1024\"");
-            xb_outf("feature option=\"CPU_model -combo *80286 /// 8088 /// 8086\"");
+            xb_outf("feature option=\"CPU_model -combo *80286 /// 80186 /// 8088 /// 8086\"");
             xb_outf("feature option=\"CPU_KHz -spin 25000 1000 50000\"");
             xb_outf("feature option=\"VirtualTime -check 0\"");
             xb_outf("feature myname=\"Short\" setboard=1 usermove=1 ping=1 playother=1 done=1");

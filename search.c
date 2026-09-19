@@ -2,6 +2,11 @@
 
 #include "engine.h"
 
+#if defined(TIMING_DETAIL) && defined(__WATCOMC__)
+#include <dos.h>
+static u32 timing_bios_ticks(void);
+#endif
+
 volatile i16 stop_now = 0;
 i32 deadline = 0;                   /* ms deadline, 0 = no limit */
 
@@ -708,6 +713,9 @@ int bench(int depth) {
 #ifndef VCLOCK
     clock_t b0, b1;
     double bsecs;
+#if defined(TIMING_DETAIL) && defined(__WATCOMC__)
+    u32 bios0, bios1;
+#endif
 #endif
 
     if (depth < 1) depth = BENCH_DEPTH;
@@ -720,6 +728,9 @@ int bench(int depth) {
     vclock_reset();
 
 #ifndef VCLOCK
+#if defined(TIMING_DETAIL) && defined(__WATCOMC__)
+    bios0 = timing_bios_ticks();
+#endif
     b0 = clock();
 #endif
     for (i = 0; i < BENCH_N; i++) {
@@ -808,7 +819,18 @@ int bench(int depth) {
     }
 #ifndef VCLOCK
     b1 = clock();
+#if defined(TIMING_DETAIL) && defined(__WATCOMC__)
+    bios1 = timing_bios_ticks();
+#endif
     bsecs = (double)(b1 - b0) / (double)CLOCKS_PER_SEC;
+#ifdef TIMING_DETAIL
+    printf("bench raw_ticks=%ld clock_hz=%ld\n",
+           (long)(b1 - b0), (long)CLOCKS_PER_SEC);
+#ifdef __WATCOMC__
+    printf("bench bios_ticks=%lu bios_hz=18.20648193\n",
+           (unsigned long)(bios1 - bios0));
+#endif
+#endif
 #endif
 
     /* these two lines must stay the last output: OpenBench matches them
@@ -989,44 +1011,56 @@ int sbench(void) {
 
         iters = 1500;
         t0 = clock();
+        MAME_MARK(0x10);
         for (i = 0; i < iters; i++) {
             is_attacked(&pos, pos.ks[0], 1);
             is_attacked(&pos, pos.ks[1], 0);
         }
+        MAME_MARK(0x11);
         t1 = clock();
         att += (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
 
         iters = 300;
         t0 = clock();
+        MAME_MARK(0x12);
         for (i = 0; i < iters; i++) gen_caps(&pos, list);
+        MAME_MARK(0x13);
         t1 = clock();
         caps += (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
 
         t0 = clock();
+        MAME_MARK(0x14);
         for (i = 0; i < iters; i++) gen_quiets(&pos, list);
+        MAME_MARK(0x15);
         t1 = clock();
         quiets += (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
 
         t0 = clock();
+        MAME_MARK(0x16);
         for (i = 0; i < iters; i++) {
             mgen_init(&pos, &mg, 0, 0, 0, 0);
             while ((m = next_move(&pos, &mg)) != 0) ;
         }
+        MAME_MARK(0x17);
         t1 = clock();
         drain += (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
 
         iters = 2000;
         t0 = clock();
+        MAME_MARK(0x18);
         for (i = 0; i < iters; i++) {
             do_make(&pos, list[0], &u);
             undo_move(&pos, list[0], &u);
         }
+        MAME_MARK(0x19);
         t1 = clock();
         make10k += (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
 
         iters = 400;
         t0 = clock();
+        MAME_MARK(0x1a);
         for (i = 0; i < iters; i++) pos_sig(&pos);
+        MAME_MARK(0x1b);
         t1 = clock();
         sig += (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
 
@@ -1035,11 +1069,15 @@ int sbench(void) {
         tt_clear();
         tt_store(&pos, list[0], 5, 100, TT_EXACT, 0);
         t0 = clock();
+        MAME_MARK(0x1c);
         for (i = 0; i < iters; i++) tt_probe(&pos, 0, &mv, &tsc, &tfl, &tdp);
+        MAME_MARK(0x1d);
         t1 = clock();
         ttpr += (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
         t0 = clock();
+        MAME_MARK(0x1e);
         for (i = 0; i < iters; i++) tt_store(&pos, list[0], 5, 100, TT_EXACT, 0);
+        MAME_MARK(0x1f);
         t1 = clock();
         ttst += (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
     }
@@ -1050,6 +1088,23 @@ int sbench(void) {
            (long)(quiets * 1000 / (300 * BENCH_N)), (long)(drain * 1000 / (300 * BENCH_N)),
            (long)(make10k * 1000 / (2000 * BENCH_N)), (long)(sig * 1000 / (400 * BENCH_N)),
            (long)(ttpr * 1000 / (2000 * BENCH_N)), (long)(ttst * 1000 / (2000 * BENCH_N)));
+#ifdef TIMING_DETAIL
+    printf("sbench raw_ms att=%ld caps=%ld quiets=%ld drain=%ld make=%ld sig=%ld "
+           "ttprobe=%ld ttstore=%ld\n",
+           (long)att, (long)caps, (long)quiets, (long)drain,
+           (long)make10k, (long)sig, (long)ttpr, (long)ttst);
+#endif
     return 0;
 }
+
+#if defined(TIMING_DETAIL) && defined(__WATCOMC__)
+/* Keep this calibration-only helper after every hot search routine so enabling
+   TIMING_DETAIL does not shift their code addresses/alignment on the 8086. */
+static u32 timing_bios_ticks(void) {
+    union REGS in, out;
+    in.h.ah = 0;
+    int86(0x1a, &in, &out);
+    return ((u32)out.x.cx << 16) | out.x.dx;
+}
+#endif
 

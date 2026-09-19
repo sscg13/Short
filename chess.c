@@ -2,6 +2,11 @@
 
 #include "engine.h"
 
+#ifdef MAME_MARKERS
+#include <conio.h>
+void mame_mark(u8 id) { outp(0x00e9, id); }
+#endif
+
 static const i16 kn[8] = { -33, -31, -18, -14, 14, 18, 31, 33 };
 static const i16 ki[8] = { -17, -16, -15, -1, 1, 15, 16, 17 };
 static const i16 rb[4] = { -16, 1, 16, -1 };
@@ -234,18 +239,6 @@ void nm_undo(Pos *p) {
 /* attacks                                                            */
 /* ------------------------------------------------------------------ */
 
-/* is the king at ks[s] aligned with sq on a rank/file/diagonal? Used by the
-   search's legality check: a NON-king move from a square NOT on the mover
-   king's rank/file/diagonal can never open an attack on that king, so the
-   is_attacked legality test can be skipped for such moves. */
-i16 sq_on_king_line(Pos *p, i16 sq, i16 s) {
-    i16 k = p->ks[s];
-    i16 kr = k >> 4, kf = k & 7, sr = sq >> 4, sf = sq & 7;
-    if (kr == sr) return 1;                          /* same rank */
-    if (kf == sf) return 1;                          /* same file */
-    return (kr + kf == sr + sf) || (kr - kf == sr - sf);  /* diagonals */
-}
-
 i16 is_attacked(Pos *p, i16 sq, i16 by) {
     i16 i, to, d;
     i16 pc;
@@ -309,7 +302,10 @@ i16 gen_caps(Pos *p, u16 *list) {
 
     PCOUNT(c_gen_caps);
 
-    for (from = 0; from < 128; from += ((from & 7) == 7) ? 9 : 1) {
+    /* Branchless next on-board 0x88 square: within a rank, (from+9)&~8
+       clears the added 8 and advances by one; after file h it advances to
+       the next rank's file a. */
+    for (from = 0; from < 128; from = (from + 9) & ~8) {
         pc = p->board[from];
         if (!pc) continue;
         if (CO(pc) != (us ? 8 : 0)) continue;
@@ -395,7 +391,7 @@ i16 gen_quiets(Pos *p, u16 *list) {
 
     PCOUNT(c_gen_quiets);
 
-    for (from = 0; from < 128; from += ((from & 7) == 7) ? 9 : 1) {
+    for (from = 0; from < 128; from = (from + 9) & ~8) {
         pc = p->board[from];
         if (!pc) continue;
         if (CO(pc) != (us ? 8 : 0)) continue;
@@ -503,12 +499,29 @@ i16 gen_moves(Pos *p, u16 *list) {
    tiny 8x8 table (128 B) precomputes it once instead of a per-move score
    buffer or the mval*16 arithmetic on every selection pass. */
 static i16 mvv_tab[8][8];
+u8 king_line[256];
 
 static void mvv_build(void) {
     i16 v, a;
     for (v = 0; v < 8; v++)
         for (a = 0; a < 8; a++)
             mvv_tab[v][a] = mval[v] * 16 - a;
+}
+
+static void king_line_build(void) {
+    i16 k, sq;
+    /* Precompute the king-line relation used by the search legality fast
+       path.  Valid 0x88-square differences span -119..119, so their u8
+       encodings are unique and a single byte lookup is exact. */
+    memset(king_line, 0, sizeof king_line);
+    for (k = 0; k < 128; k += ((k & 7) == 7) ? 9 : 1) {
+        i16 kr = k >> 4, kf = k & 7;
+        for (sq = 0; sq < 128; sq += ((sq & 7) == 7) ? 9 : 1) {
+            i16 sr = sq >> 4, sf = sq & 7;
+            if (kr == sr || kf == sf || kr + kf == sr + sf || kr - kf == sr - sf)
+                king_line[(u8)(sq - k)] = 1;
+        }
+    }
 }
 
 static i16 mvv_lva(Pos *p, u16 m) {
@@ -833,6 +846,7 @@ int main(int argc, char **argv) {
     double secs;
 
     mvv_build();   /* one-time MVV-LVA table (dedicated init) */
+    king_line_build(); /* one-time legality lookup (dedicated init) */
     zob_init();    /* one-time Zobrist key tables (dedicated init) */
     lmr_build();   /* one-time LMR log table (dedicated init) */
 

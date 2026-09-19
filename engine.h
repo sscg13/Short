@@ -32,6 +32,15 @@ typedef uint32_t  u32;
 typedef int64_t   i64;
 typedef uint64_t  u64;
 
+/* Calibration builds emit byte IDs to the Nimbus' otherwise-unused port E9.
+   MAME debugger watchpoints attach exact CPU total-cycle values to them. */
+#ifdef MAME_MARKERS
+void mame_mark(u8 id);
+#define MAME_MARK(id) mame_mark((u8)(id))
+#else
+#define MAME_MARK(id) ((void)0)
+#endif
+
 enum { EMPTY = 0, WP = 1, WN = 2, WB = 3, WR = 4, WQ = 5, WK = 6,
        BP = 9, BN = 10, BB = 11, BR = 12, BQ = 13, BK = 14 };
 
@@ -166,7 +175,14 @@ void undo_move(Pos *p, u16 m, Undo *u);
 void nm_make(Pos *p);            /* null-move make: side flip + Zobrist side toggle */
 void nm_undo(Pos *p);            /* null-move undo (same op: XOR is self-inverse) */
 i16 is_attacked(Pos *p, i16 sq, i16 by);
-i16 sq_on_king_line(Pos *p, i16 sq, i16 s);
+/* A move can expose its own king only when its from-square shares a rank,
+   file, or diagonal with that king.  The relation depends solely on the
+   signed 0x88-square difference; the valid range (-119..119) has no aliases
+   when cast to u8.  Keep this lookup inline in the search hot path: the old
+   out-of-module helper compiled to a 71-byte far routine on 16-bit Watcom. */
+extern u8 king_line[256];
+#define sq_on_king_line(p, sq, s) \
+    (king_line[(u8)((sq) - (p)->ks[(s)])] != 0)
 i16 gen_moves(Pos *p, u16 *list);
 i32 perft(Pos *p, i16 depth);
 Sig pos_sig(Pos *p);
@@ -236,7 +252,7 @@ void tt_store(Pos *p, u16 move, i16 depth, Score score, i16 flag, i16 ply);
    model (CPU_model + CPU_KHz). See TESTING.md.
    The 32-bit (VCLOCK) build charges the search's sub-functions at measured
    per-call costs; the 16-bit build keeps a scalar cycles/node. */
-enum { VCPU_80286 = 0, VCPU_8088, VCPU_8086 };
+enum { VCPU_80286 = 0, VCPU_8088, VCPU_8086, VCPU_80186 };
 extern i16 vtime_mode;       /* 1 = virtual clock active (ignore GUI time) */
 extern i32 vcpu_khz;        /* CPU clock in KHz (cycles per ms); i32: 50000 KHz overflows a 16-bit int */
 extern i16 vcpu_model;       /* VCPU_* */

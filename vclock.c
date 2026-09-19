@@ -83,7 +83,8 @@
       1.808e9 / 0.604e9 (move-sweep). Material build (10152 nodes) unchanged
       at 0.689e9 / 0.233e9.
       R (per-node base) is what those terms leave over, fitted per NNUE state.
-      8086 = 16-bit-bus 8088 core, an ESTIMATE (re-derive before trusting).
+      At that point the 8086 row was still a 16-bit-bus estimate from the
+      8088; the direct Deskpro calibration below supersedes it.
 
    QUIET-HISTORY re-fit (2026-08, branch `quiet-history`): MG_QUIETS now orders
    the generated quiets by a piece-to quiet-history table (qhist[2][6][64], see
@@ -234,10 +235,11 @@ static i16 vperiod_started; /* first period not yet granted */
 
 /* scalar cycles/node, NNUE / material (16-bit build) */
 #ifndef VCLOCK
-static const i32 cpn_tab[3][2] = {
+static const i32 cpn_tab[4][2] = {
     { 47446L,  23802L },   /* VCPU_80286: 79.37 s * 6 MHz / 10037 nodes */
     { 142100L, 76064L },   /* VCPU_8088:  89.14 s * 16 MHz / 10037 nodes */
-    { 114300L, 51198L },   /* VCPU_8086 (estimate, 0.779x of the 8088 row) */
+    { 118859L, 67573L },   /* VCPU_8086: 86Box Deskpro @ 8 MHz */
+    { 65416L,  41713L },   /* VCPU_80186: MAME Nimbus exact cycle markers */
 };
 #endif
 
@@ -245,11 +247,12 @@ static const i32 cpn_tab[3][2] = {
 static i64 vbudget_cyc;   /* weighted cycle budget for the current move */
 
 typedef struct { i32 att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm, tp, ts; } VW;
-static const VW vw_tab[3] = {
+static const VW vw_tab[4] = {
     /*   att    ps     gc     gq      gm     mk    nm   rf    ev     rn      rm      tp    ts */
     {  2316,     0, 16890, 18810, 170268, 1977, 1488, 3570,  5436,   1342,   8723,   654,  534 }, /* 80286 */
     {  6576,     0, 47232, 54192, 610048, 6336, 4261,10227, 17136,   3050,  31934,  2240, 1856 }, /* 8088 */
-    {  4932,     0, 35424, 40644, 457536, 4752, 3196, 7670, 12852,   2288,  23951,  1680, 1392 }, /* 8086 est */
+    {  5547,     0, 35520, 42657, 492500, 5286, 3847, 9234, 14282,  14514,  24116,  1867, 1567 }, /* 8086 */
+    {  3317,   140, 21358, 24698, 263943, 2748, 2025, 4860,  7834,   8252,  16790,  1165, 1009 }, /* 80186 */
 };
 /* CURRENT 86BOX RE-MEASURE (2026-08-29): sbench values are converted by the
    configured MHz; make10k is a make+undo pair, hence /2 for mk. The NNUE
@@ -263,7 +266,32 @@ static const VW vw_tab[3] = {
    measured before ReLU^2 v2 existed, on the v1 linear-clamp forward pass, then
    carried into v2 without a re-fit. Calibrated 86Box nbench measurements of the
    unchanged generated v2 forward are 5436 cycles on the 6 MHz 80286 and 17136
-   on the 16 MHz 8088. The 8086 row remains the documented 0.75x estimate. */
+   on the 16 MHz 8088. */
+
+/* 8086 DESKPRO CALIBRATION (2026-09-19): 86Box interpreter, Compaq Deskpro
+   8086 @ 8 MHz, dynarec off. This replaces the old 0.75x/0.779x 8088 estimate.
+   `build.ps1 -TimingDetail` reports the unrounded PIT-backed clock totals; a
+   32-bit BIOS tick check agrees, and three NNUE runs were identical at 149123
+   ms (2715 BIOS ticks). Material bench 1 was 84036 ms (1530 BIOS ticks).
+
+   NNUE: 149123 ms * 8000 cyc/ms / 10037 = 118858.62 cycles/node.
+   Material: 84036 ms * 8000 cyc/ms / 9949 = 67573.42 cycles/node.
+   Unprofiled sbench/nbench directly measured every weighted term except the
+   negligible pos_sig field read (kept at zero and absorbed in rn). As with the
+   other rows, nm/rf split the measured NNUE-only make-pair cost 1:2.4. Rounded
+   weights plus rn/rm reproduce the totals within 0.0004%. */
+
+/* 80186 NIMBUS CALIBRATION (2026-09-18): MAME 0.289 Nimbus, RM DOS, v1.32f
+   BIOS. Port-E9 watchpoints bracket the whole benchmark and each sbench/nbench
+   loop, reading the main CPU's exact `totalcycles`. The MAME i80186 device
+   divides its 16 MHz input clock by two, so this row is used with CPU_KHz=8000.
+   Startup/net loading is removed with a matching `1 0` control run.
+
+   NNUE: (906605642 - 250028037) / 10037 = 65415.72 cycles/node.
+   Material: (594628157 - 179628030) / 9949 = 41712.65 cycles/node.
+   The rounded per-call weights plus rn/rm reproduce those totals within 0.001%.
+   nm/rf split the NNUE-only make-pair residual in the established 1:2.4 ratio;
+   their sum is measured, while the individual split remains an estimate. */
 
 static i64 vclock_cyc(void) {
     const VW *w = &vw_tab[vcpu_model];
@@ -296,6 +324,7 @@ void vclock_set_model(const char *name) {
     if (!name) return;
     if (strcmp(name, "8088") == 0) vcpu_model = VCPU_8088;
     else if (strcmp(name, "8086") == 0) vcpu_model = VCPU_8086;
+    else if (strcmp(name, "80186") == 0) vcpu_model = VCPU_80186;
     else vcpu_model = VCPU_80286;   /* "80286" or anything else */
 }
 

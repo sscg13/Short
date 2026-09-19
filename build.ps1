@@ -1,7 +1,9 @@
 param(
     [string]$Model = "large",
-    [switch]$Profile,   # -Profile: build with -DPROFILE so `chess profile` works
-    [switch]$NoNNUE     # -NoNNUE: build with -DNO_NNUE (material eval, no net load)
+    [switch]$Profile,    # -Profile: build with -DPROFILE so `chess profile` works
+    [switch]$NoNNUE,     # -NoNNUE: build with -DNO_NNUE (material eval, no net load)
+    [switch]$MameMarkers, # -MameMarkers: emit port-E9 calibration markers
+    [switch]$TimingDetail # -TimingDetail: print unrounded emulator timing totals
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,6 +29,8 @@ foreach ($s in $sources) {
     $flags = @("-bt=dos", "-0", $modelFlag, "-ox", "-d0")
     if ($Profile) { $flags += "-DPROFILE" }
     if ($NoNNUE)  { $flags += "-DNO_NNUE" }
+    if ($MameMarkers) { $flags += "-DMAME_MARKERS" }
+    if ($TimingDetail) { $flags += "-DTIMING_DETAIL" }
     & "$ow\binnt\wcc.exe" @flags $s
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $objs += [System.IO.Path]::GetFileNameWithoutExtension($s) + ".obj"

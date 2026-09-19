@@ -618,9 +618,18 @@ int nnue_bench(void) {
 
     iters = 4000;
     t0 = clock();
+    MAME_MARK(0x20);
     for (i = 0; i < iters; i++) nnue_eval(&pos);
+    MAME_MARK(0x21);
     t1 = clock();
+#ifdef __WATCOMC__
+    /* Watcom's DOS clock() source wraps every 65536 ticks even though clock_t
+       is unsigned long. Each calibration block is shorter than 65.536 s, so
+       subtract modulo 16 bits before widening. */
+    eval_ms = (i32)(u16)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
+#else
     eval_ms = ((i32)(t1 - t0)) * 1000 / CLOCKS_PER_SEC;
+#endif
 
     iters = 10000;
     {
@@ -629,6 +638,7 @@ int nnue_bench(void) {
             if (mfl(list[i]) == 0) { qm = list[i]; break; }
         if (!qm) return 1;
         t0 = clock();
+        MAME_MARK(0x22);
 #ifdef PROFILE
         {
             i32 r0 = c_refresh, f0 = c_flip;
@@ -637,16 +647,24 @@ int nnue_bench(void) {
             do_make(&pos, qm, &u);
             undo_move(&pos, qm, &u);
         }
+        MAME_MARK(0x23);
 #ifdef PROFILE
             printf("nbench applies=%ld flips=%ld\n", (long)(c_refresh - r0), (long)(c_flip - f0));
         }
 #endif
         t1 = clock();
+#ifdef __WATCOMC__
+        delta_ms = (i32)(u16)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
+#else
         delta_ms = ((i32)(t1 - t0)) * 1000 / CLOCKS_PER_SEC;
+#endif
     }
 
     printf("nbench eval1000=%ld delta1000=%ld\n",
            (long)(eval_ms * 1000 / 4000), (long)(delta_ms * 1000 / 10000));
+#ifdef TIMING_DETAIL
+    printf("nbench raw_ms eval=%ld delta=%ld\n", (long)eval_ms, (long)delta_ms);
+#endif
     nnue_active = 0;
     return 0;
 }
