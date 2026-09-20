@@ -1,6 +1,7 @@
 """PyTorch training loop for the 704->128->1 SCReLU^2 NNUE."""
 
 import argparse
+import math
 import os
 import struct
 import time
@@ -100,6 +101,13 @@ def initial_weights(path, seed):
     return weights
 
 
+def scheduled_lr(initial_lr, final_lr, fraction, schedule):
+    if schedule == "cosine":
+        blend = 0.5 * (1.0 + math.cos(math.pi * fraction))
+        return final_lr + (initial_lr - final_lr) * blend
+    return initial_lr + (final_lr - initial_lr) * fraction
+
+
 def run_batches(records, indices, weights, gradients, batch_size, lambda_value, train, optimizer=None):
     total_loss = 0.0
     total_count = 0
@@ -157,6 +165,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("records", help="SH01 record file, preferably the unified file")
     parser.add_argument("--output", default="nets/trained-v2.net")
+    parser.add_argument("--best-output", default=None,
+                        help="optional path for the lowest-validation-loss checkpoint")
     parser.add_argument("--init-net", default=None, help="optional v2 net to fine-tune")
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=4096)
@@ -170,7 +180,9 @@ def main():
     parser.add_argument("--val-fraction", type=float, default=0.01)
     parser.add_argument("--lr", type=float, default=8.75e-4)
     parser.add_argument("--final-lr", type=float, default=None,
-                        help="final LR for linear epoch decay (default: same as --lr)")
+                        help="final LR for the epoch schedule (default: same as --lr)")
+    parser.add_argument("--lr-schedule", choices=("linear", "cosine"), default="linear",
+                        help="epoch learning-rate schedule (default: linear)")
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--lambda", dest="lambda_value", type=float, default=1.0)
     parser.add_argument("--threads", type=int, default=4,
@@ -190,7 +202,10 @@ def main():
     if not 0.0 <= args.lambda_value <= 1.0:
         parser.error("lambda must be in [0, 1]")
 
-    torch.set_num_threads(max(1, torch.get_num_threads()))
+    # The optimizer and clamp touch only this tiny parameter vector. PyTorch's
+    # default logical-core pool costs substantially more to dispatch per batch
+    # than it saves; C++ owns the record-level parallelism below.
+    torch.set_num_threads(1)
     if args.threads:
         nnue_extension.set_threads(args.threads)
     records, count = read_records(args.records, args.max_records)
@@ -204,11 +219,13 @@ def main():
     final_lr = args.lr if args.final_lr is None else args.final_lr
 
     print(f"records={count} train={train_count} validation={val_count}")
-    print(f"parameters={PARAM_COUNT} batch={args.batch_size} chunk={args.chunk_records} lambda={args.lambda_value}")
+    print(f"parameters={PARAM_COUNT} batch={args.batch_size} chunk={args.chunk_records} "
+          f"lambda={args.lambda_value} threads={args.threads} schedule={args.lr_schedule}")
+    best_val_loss = float("inf")
     for epoch in range(args.epochs):
         started = time.perf_counter()
         fraction = epoch / max(1, args.epochs - 1)
-        current_lr = args.lr + (final_lr - args.lr) * fraction
+        current_lr = scheduled_lr(args.lr, final_lr, fraction, args.lr_schedule)
         for group in optimizer.param_groups:
             group["lr"] = current_lr
         train_loss = run_chunked_epoch(
@@ -226,6 +243,10 @@ def main():
               f"val={val_loss:.9g} seconds={elapsed:.1f}")
         export_net(weights, args.output)
         print(f"exported={args.output}")
+        if args.best_output and val_count and val_loss < best_val_loss:
+            best_val_loss = val_loss
+            export_net(weights, args.best_output)
+            print(f"best={args.best_output} val={best_val_loss:.9g}")
 
 
 if __name__ == "__main__":

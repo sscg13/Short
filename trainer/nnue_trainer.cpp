@@ -309,10 +309,40 @@ static float sigmoid(float x) {
     return e / (1.0f + e);
 }
 
-static float score_probability(float score) {
+struct ScoreLossEntry {
+    float probability;
+    float derivative;
+};
+
+static ScoreLossEntry score_loss_entry(float score) {
     float q = (score - SCORE_OFFSET) / SCORE_SCALE;
     float qm = (-score - SCORE_OFFSET) / SCORE_SCALE;
-    return 0.5f * (1.0f + sigmoid(q) - sigmoid(qm));
+    float sq = sigmoid(q);
+    float sqm = sigmoid(qm);
+    ScoreLossEntry entry;
+    entry.probability = 0.5f * (1.0f + sq - sqm);
+    entry.derivative =
+        0.5f / SCORE_SCALE * (sq * (1.0f - sq) + sqm * (1.0f - sqm));
+    return entry;
+}
+
+// Both record scores and the engine-exact QAT output are integer centipawns.
+// Precompute their probability and derivative for every i16 value once, so
+// the batch hot path performs no exp calls. The smooth, non-QAT gradient check
+// retains the continuous formula, as its perturbed scores are fractional.
+struct ScoreLossTable {
+    ScoreLossEntry entries[65536];
+
+    ScoreLossTable() {
+        for (int score = -32768; score <= 32767; ++score)
+            entries[score + 32768] = score_loss_entry(float(score));
+    }
+};
+
+static const ScoreLossTable SCORE_LOSS_TABLE;
+
+static const ScoreLossEntry& integer_score_loss_entry(int score) {
+    return SCORE_LOSS_TABLE.entries[score + 32768];
 }
 
 struct LossParams {
@@ -328,16 +358,14 @@ static float process_record(const Record& record, const Net& net,
                             const QuantizedNet* qnet) {
     ActiveFeatures f = features(record);
     Forward y = forward(record, net, f, qat, qnet);
-    // The probability and its derivative share the same two sigmoids, so both
-    // score values are sigmoidized exactly once each.
-    float qs = (y.score - SCORE_OFFSET) / SCORE_SCALE;
-    float qs_m = (-y.score - SCORE_OFFSET) / SCORE_SCALE;
-    float sqs = sigmoid(qs);
-    float sqs_m = sigmoid(qs_m);
-    float qf = 0.5f * (1.0f + sqs - sqs_m);
-    float ts = float(record.score);
-    float pf = 0.5f * (1.0f + sigmoid((ts - SCORE_OFFSET) / SCORE_SCALE) -
-                       sigmoid((-ts - SCORE_OFFSET) / SCORE_SCALE));
+    ScoreLossEntry predicted;
+    if (qat && y.score >= -32768.0f && y.score <= 32767.0f)
+        predicted = integer_score_loss_entry(int(y.score));
+    else
+        predicted = score_loss_entry(y.score);
+    const ScoreLossEntry& teacher = integer_score_loss_entry(int(record.score));
+    float qf = predicted.probability;
+    float pf = teacher.probability;
     float result = 0.5f * float(record.result);
     float target = params.lambda * pf + (1.0f - params.lambda) * result;
     float error = qf - target;
@@ -355,9 +383,7 @@ static float process_record(const Record& record, const Net& net,
         dloss_dq = params.pow_exp * std::pow(abs_error, params.pow_exp - 1.0f);
     }
     if (error < 0.0f) dloss_dq = -dloss_dq;
-    float dprob_dscore =
-        0.5f / SCORE_SCALE * (sqs * (1.0f - sqs) + sqs_m * (1.0f - sqs_m));
-    float draw = dloss_dq * dprob_dscore / OUTPUT_SHIFT;
+    float draw = dloss_dq * predicted.derivative / OUTPUT_SHIFT;
     grads.bias += draw;
 
     int stm = record.stm ? 1 : 0;
