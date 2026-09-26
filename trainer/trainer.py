@@ -169,7 +169,8 @@ def main():
                         help="optional path for the lowest-validation-loss checkpoint")
     parser.add_argument("--init-net", default=None, help="optional v2 net to fine-tune")
     parser.add_argument("--epochs", type=int, default=1)
-    parser.add_argument("--batch-size", type=int, default=4096)
+    parser.add_argument("--batch-size", type=int, default=16384,
+                        help="positions per optimizer step (default: 16384)")
     parser.add_argument("--chunk-records", type=int, default=1_048_576,
                         help="runtime shuffle chunk size (default: 1048576)")
     parser.add_argument("--shuffle-chunks", action="store_true",

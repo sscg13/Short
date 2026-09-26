@@ -629,17 +629,27 @@ static float process_batch_impl(const Record* records, size_t count, const Net& 
     const std::vector<Gradients>& local_grads = worker_pool.gradients();
     const std::vector<float>& local_loss = worker_pool.losses();
     float loss = 0.0f;
-    for (int t = 0; t < thread_count; ++t) {
-        loss += local_loss[t];
-        for (size_t j = 0; j < grads.w1.size(); ++j) grads.w1[j] += local_grads[t].w1[j];
-        for (size_t j = 0; j < grads.b1.size(); ++j) grads.b1[j] += local_grads[t].b1[j];
-        for (size_t j = 0; j < grads.w2.size(); ++j) grads.w2[j] += local_grads[t].w2[j];
-        grads.bias += local_grads[t].bias;
-    }
     float inv_count = 1.0f / float(count);
-    for (float& x : grads.w1) x *= inv_count;
-    for (float& x : grads.b1) x *= inv_count;
-    for (float& x : grads.w2) x *= inv_count;
+    for (int t = 0; t < thread_count; ++t) loss += local_loss[t];
+    // Sum each parameter in worker order and normalize before writing it.
+    // This preserves addition grouping while avoiding a destination pass
+    // per worker followed by another full pass for normalization.
+    for (size_t j = 0; j < grads.w1.size(); ++j) {
+        float sum = 0.0f;
+        for (int t = 0; t < thread_count; ++t) sum += local_grads[t].w1[j];
+        grads.w1[j] = sum * inv_count;
+    }
+    for (size_t j = 0; j < grads.b1.size(); ++j) {
+        float sum = 0.0f;
+        for (int t = 0; t < thread_count; ++t) sum += local_grads[t].b1[j];
+        grads.b1[j] = sum * inv_count;
+    }
+    for (size_t j = 0; j < grads.w2.size(); ++j) {
+        float sum = 0.0f;
+        for (int t = 0; t < thread_count; ++t) sum += local_grads[t].w2[j];
+        grads.w2[j] = sum * inv_count;
+    }
+    for (int t = 0; t < thread_count; ++t) grads.bias += local_grads[t].bias;
     grads.bias *= inv_count;
     return loss * inv_count;
 }
