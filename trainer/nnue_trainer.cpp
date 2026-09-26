@@ -16,6 +16,9 @@
 #include <string>
 #include <thread>
 #include <vector>
+#if defined(_MSC_VER) && defined(_M_X64) && !defined(__clang__)
+#include <intrin.h>
+#endif
 
 namespace short_trainer {
 
@@ -203,34 +206,78 @@ static int row_for_piece(int piece, int compact) {
     return -1;
 }
 
-static void add_perspective(const Record& r, int perspective, int mirror, ActiveFeatures& out) {
-    int n = 0;
-    for (int sq = 0; sq < 64; ++sq) {
-        int record_piece = square(r, sq);
-        if (!record_piece) continue;
-        bool black = record_piece >= 7;
-        int type = black ? record_piece - 6 : record_piece;
-        int compact = sq;
-        bool enemy = (perspective == 0) ? black : !black;
-        int piece = (enemy ? 8 : 0) | type;
-        if (perspective) compact = 63 - compact;
-        if (mirror) compact = (compact & ~7) | (7 - (compact & 7));
-        int row = row_for_piece(piece, compact);
-        if (row >= 0) {
-            if (n >= 32) throw std::runtime_error("too many active NNUE features");
-            out.rows[perspective][n++] = row;
-        }
+struct FeatureRowTable {
+    int16_t row[16][64];
+
+    FeatureRowTable() {
+        for (int piece = 0; piece < 16; ++piece)
+            for (int sq = 0; sq < 64; ++sq)
+                row[piece][sq] = int16_t(row_for_piece(piece, sq));
     }
-    out.count[perspective] = n;
+};
+
+static const FeatureRowTable feature_row_table;
+
+// Called only for a nonzero occupied-square mask.
+static inline int trailing_zeroes(uint64_t value) {
+#if defined(__clang__) || defined(__GNUC__)
+    return int(__builtin_ctzll(value));
+#elif defined(_MSC_VER) && defined(_M_X64)
+    unsigned long index;
+    _BitScanForward64(&index, value);
+    return int(index);
+#else
+    int index = 0;
+    while (!(value & 1)) {
+        value >>= 1;
+        ++index;
+    }
+    return index;
+#endif
+}
+
+static inline void append_feature(ActiveFeatures& out, int& n0, int& n1,
+                                  int record_piece, int sq,
+                                  int mirror0, int mirror1) {
+    bool black = record_piece >= 7;
+    int type = black ? record_piece - 6 : record_piece;
+    int compact0 = mirror0 ? (sq ^ 7) : sq;
+    int row0 = feature_row_table.row[(black ? 8 : 0) | type][compact0];
+    if (row0 >= 0) {
+        if (n0 >= 32) throw std::runtime_error("too many active NNUE features");
+        out.rows[0][n0++] = row0;
+    }
+    int compact1 = 63 - sq;
+    if (mirror1) compact1 ^= 7;
+    int row1 = feature_row_table.row[(black ? 0 : 8) | type][compact1];
+    if (row1 >= 0) {
+        if (n1 >= 32) throw std::runtime_error("too many active NNUE features");
+        out.rows[1][n1++] = row1;
+    }
 }
 
 static ActiveFeatures features(const Record& r) {
     ActiveFeatures out;
-    int white_file = r.white_king & 7;
-    int black_file = r.black_king & 7;
-    int mirror[2] = {white_file >= 4, (7 - black_file) >= 4};
-    add_perspective(r, 0, mirror[0], out);
-    add_perspective(r, 1, mirror[1], out);
+    int n0 = 0;
+    int n1 = 0;
+    int mirror0 = (r.white_king & 7) >= 4;
+    int mirror1 = (7 - (r.black_king & 7)) >= 4;
+    // SH01 packs two squares per byte. Collapse each nonempty nibble into
+    // its low bit, then visit occupied squares in the original ascending
+    // order so floating-point gradient accumulation remains identical.
+    for (int block = 0; block < 4; ++block) {
+        uint64_t packed;
+        std::memcpy(&packed, r.board + block * 8, sizeof(packed));
+        uint64_t occupied = (packed | (packed >> 1) | (packed >> 2) |
+                             (packed >> 3)) & UINT64_C(0x1111111111111111);
+        while (occupied) {
+            int sq = block * 16 + (trailing_zeroes(occupied) >> 2);
+            occupied &= occupied - 1;
+            append_feature(out, n0, n1, square(r, sq), sq, mirror0, mirror1);
+        }
+    }
+    out.count[0] = n0;
+    out.count[1] = n1;
     return out;
 }
 
