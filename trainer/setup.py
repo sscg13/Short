@@ -47,9 +47,9 @@ def locate_link():
 class BuildExtensionClang(BuildExtension):
     """Build the extension with clang-cl on Windows when available.
 
-    Falls back to the stock MSVC path otherwise. The F16C shim is required
-    because /arch:AVX2 implies __F16C__, and torch's Half.h then calls
-    MSVC-only scalar converters that clang-cl does not provide.
+    Falls back to the stock MSVC path otherwise. Explicit SIMD uses Clang's
+    own intrinsic headers. Include them before PyTorch so its Half.h sees the
+    native F16C converters; the custom MSVC-header shim is unnecessary.
     """
 
     def build_extension(self, ext):
@@ -63,13 +63,13 @@ class BuildExtensionClang(BuildExtension):
         print(f"nnue_extension: building {ext.name} with {clang}")
         import sysconfig
 
-        shim = os.path.abspath(os.path.join(os.path.dirname(__file__), "f16c_shim.h"))
         msvc_dir = find_tool([
             r"C:\Program Files\Microsoft Visual Studio\2022\Preview\VC\Tools\MSVC\14.*",
             r"C:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*",
         ])
         sdk = find_tool([r"C:\Program Files (x86)\Windows Kits\10\Include\10.*"])
-        include_dirs = list(ext.include_dirs or []) + [
+        resource_include = os.path.join(subprocess.check_output([clang, "-print-resource-dir"], text=True).strip(), "include")
+        include_dirs = [resource_include] + list(ext.include_dirs or []) + [
             sysconfig.get_paths()["include"],
             os.path.join(msvc_dir, "include"),
             os.path.join(sdk, "ucrt"),
@@ -88,8 +88,8 @@ class BuildExtensionClang(BuildExtension):
             obj = os.path.join(self.build_temp,
                                os.path.splitext(os.path.basename(src))[0] + ".obj")
             os.makedirs(os.path.dirname(obj) or ".", exist_ok=True)
-            cmd = [clang, "/c", "/nologo", "/O2", "/arch:AVX2", "/std:c++17",
-                   "/EHsc", "/MD", f"/FI{shim}", f"/Fo{obj}"] + defines
+            cmd = [clang, "/c", "/nologo", "/O2", "/arch:AVX2", "/clang:-nobuiltininc", "/std:c++17",
+                   "/EHsc", "/MD", "/FIimmintrin.h", f"/Fo{obj}"] + defines
             cmd += [f"-I{d}" for d in include_dirs] + [src]
             print("nnue_extension:", " ".join(cmd))
             subprocess.check_call(cmd)

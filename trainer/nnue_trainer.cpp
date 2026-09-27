@@ -4,6 +4,7 @@
 // hand its parameter and gradient buffers to process_batch() without copying
 // the record data or duplicating the feature/derivative logic.
 
+#include <immintrin.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -96,27 +97,63 @@ static bool load_net(const std::string& path, Net& net) {
 }
 
 static int quant_i8(float x) {
-    int q = int(std::lround(x));
-    return std::max(-128, std::min(127, q));
+    // Clamp before float->int conversion; trainer weights are finite.
+    x = std::max(-128.0f, std::min(127.0f, x));
+    int q = int(x);
+    float fraction = x - float(q);
+    return q + int(fraction >= 0.5f) - int(fraction <= -0.5f);
 }
 
 static int quant_i16(float x) {
-    int q = int(std::lround(x));
-    return std::max(-32768, std::min(32767, q));
+    // Clamp before float->int conversion; trainer weights are finite.
+    x = std::max(-32768.0f, std::min(32767.0f, x));
+    int q = int(x);
+    float fraction = x - float(q);
+    return q + int(fraction >= 0.5f) - int(fraction <= -0.5f);
 }
 
 static int arithmetic_shift(int value, int shift) {
     return value >> shift;
 }
 
+// The production experiment targets this AVX2 machine and fixed N=64 shape.
+static inline __m256i round8(__m256 values, float low, float high) {
+    values = _mm256_max_ps(_mm256_set1_ps(low),
+                          _mm256_min_ps(values, _mm256_set1_ps(high)));
+    __m256i whole = _mm256_cvttps_epi32(values);
+    __m256 fraction = _mm256_sub_ps(values, _mm256_cvtepi32_ps(whole));
+    __m256i up = _mm256_castps_si256(_mm256_cmp_ps(
+        fraction, _mm256_set1_ps(0.5f), _CMP_GE_OQ));
+    __m256i down = _mm256_castps_si256(_mm256_cmp_ps(
+        fraction, _mm256_set1_ps(-0.5f), _CMP_LE_OQ));
+    return _mm256_add_epi32(_mm256_sub_epi32(whole, up), down);
+}
+
+static inline __m128i quant8_words(const float* values) {
+    __m256i q = round8(_mm256_loadu_ps(values), -128.0f, 127.0f);
+    return _mm_packs_epi32(_mm256_castsi256_si128(q),
+                          _mm256_extracti128_si256(q, 1));
+}
+
 static QuantizedNet quantize_net(const Net& net) {
+    static_assert(HIDDEN == 64 && FEATURES == 704 && PERSPECTIVES == 2,
+                  "AVX2 experiment requires the fixed 704->2x64 architecture");
     QuantizedNet q;
-    for (size_t i = 0; i < q.w1.size(); ++i) q.w1[i] = uint16_t(int16_t(quant_i8(net.w1[i])));
-    for (size_t i = 0; i < q.b1.size(); ++i) q.b1[i] = uint16_t(int16_t(quant_i8(net.b1[i])));
-    for (size_t i = 0; i < q.w2.size(); ++i) q.w2[i] = int8_t(quant_i8(net.w2[i]));
+    for (int i = 0; i < FEATURES * HIDDEN; i += 8)
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(q.w1.data() + i),
+                         quant8_words(net.w1.data() + i));
+    for (int i = 0; i < HIDDEN; i += 8)
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(q.b1.data() + i),
+                         quant8_words(net.b1.data() + i));
+    for (int i = 0; i < PERSPECTIVES * HIDDEN; i += 8) {
+        __m128i bytes = _mm_packs_epi16(quant8_words(net.w2.data() + i),
+                                       _mm_setzero_si128());
+        _mm_storel_epi64(reinterpret_cast<__m128i*>(q.w2.data() + i), bytes);
+    }
     q.bias = int16_t(quant_i16(net.bias));
     return q;
 }
+
 
 struct Gradients {
     std::vector<float> w1;
