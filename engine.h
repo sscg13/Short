@@ -91,7 +91,8 @@ typedef struct {
     Sig sig;          /* incremental Zobrist signature of this position */
 } Pos;
 
-typedef struct { i16 cap, castle, ep; } Undo;
+/* Save the parent signature once; undo must not repeat the far-key walk. */
+typedef struct { i16 cap, castle, ep; Sig sig; } Undo;
 
 /* staged move generator state (see chess.c). One per active search node. */
 typedef struct {
@@ -227,6 +228,8 @@ int xboard_main(void);
 extern i16 nnue_enabled;     /* a net is loaded */
 extern i16 nnue_active;      /* incremental accumulators are live (during search) */
 void nnue_reset(Pos *p);
+/* Make records pending deltas; eval materializes the required accumulator
+   chain. Undo restores the parent ply without applying unused deltas. */
 void nnue_make(Pos *p, u16 m, Undo *u);
 void nnue_undo(Pos *p);
 Score nnue_eval(Pos *p);

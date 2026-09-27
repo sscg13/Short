@@ -13,3 +13,8 @@ __pycache__/
 trainer/*
 !trainer/*.py
 !trainer/*.cpp
+# Local speedup experiments: frozen builds, VM images, and timing outputs.
+/artifacts/engine-speedups/
+/artifacts/nnue-speedups/
+/artifacts/speedup-validation/
+/artifacts/tt-correctness/

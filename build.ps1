@@ -43,7 +43,9 @@ $objs += "nnue_opt.obj"
 
 $linkArgs = @("system", "dos", "name", "chess.exe")
 foreach ($o in $objs) { $linkArgs += "file"; $linkArgs += $o }
-& "$ow\binnt\wlink.exe" @linkArgs
+# Search can reach MAXPLY=32; its recursive frames and helper calls exceed
+# the linker's 2 KB default. Reserve 8 KB, including saved Undo signatures.
+& "$ow\binnt\wlink.exe" @linkArgs option stack=8192 option map
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host "Built chess.exe (16-bit, $Model model)"

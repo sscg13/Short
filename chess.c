@@ -39,6 +39,9 @@ static u64 zep[65];
 #endif
 
 static u64 zseed = 0x9E3779B97F4A7C15ULL;
+/* The side transition is identical in both directions. Keep its four words
+   near so every move needs one XOR instead of two far-table reads. */
+static Sig zside_delta;
 
 /* 64-bit xorshift (Marsaglia, period 2^64-1). The state is unsigned long long
    = 64 bits on EVERY build (16-bit Watcom, Windows and Linux gcc), so the
@@ -61,6 +64,7 @@ void zob_init(void) {
         for (sq = 0; sq < 64; sq++)
             zpsq[pc][sq] = zkey();
     zside[0] = zkey(); zside[1] = zkey();
+    zside_delta = zside[0] ^ zside[1];
     for (i = 0; i < 16; i++) zcastle[i] = zkey();
     for (i = 0; i < 65; i++) zep[i] = zkey();
 }
@@ -68,11 +72,9 @@ void zob_init(void) {
 /* ep-square key index: -1 (no ep) -> 64, else compact square */
 #define ZEPI(ep) ((ep) < 0 ? 64 : (i16)sq2c(ep))
 
-/* XOR the move's signature delta into p->sig. Called from BOTH do_make (after
-   the board/castle/ep updates, before the side flip) and undo_move (after the
-   side flip back, before the restores), when board[to] still holds the moved
-   piece, board[from] is empty, p->castle/ep hold the NEW values and u the OLD.
-   XOR is its own inverse, so make and undo apply the same keys and round-trip. */
+/* XOR the move's signature delta into p->sig after board/castle/ep updates,
+   before the side flip. board[to] holds the moved piece, board[from] is empty,
+   p->castle/ep hold the NEW values and u the OLD. Undo restores u->sig. */
 static void zob_apply(Pos *p, u16 m, const Undo *u) {
     i16 from = mfrom(m), to = mto(m), fl = mfl(m);
     i16 side = p->side;                       /* old side to move (pre-flip) */
@@ -96,12 +98,16 @@ static void zob_apply(Pos *p, u16 m, const Undo *u) {
         p->sig ^= zpsq[side ? BR : WR][sq2c(rf)];
         p->sig ^= zpsq[side ? BR : WR][sq2c(rt)];
     }
-    p->sig ^= zcastle[u->castle];
-    p->sig ^= zcastle[p->castle];
-    p->sig ^= zep[ZEPI(u->ep)];
-    p->sig ^= zep[ZEPI(p->ep)];
-    p->sig ^= zside[side];
-    p->sig ^= zside[side ^ 1];
+    /* Equal old/new state keys cancel. Most moves change neither component. */
+    if (u->castle != p->castle) {
+        p->sig ^= zcastle[u->castle];
+        p->sig ^= zcastle[p->castle];
+    }
+    if (u->ep != p->ep) {
+        p->sig ^= zep[ZEPI(u->ep)];
+        p->sig ^= zep[ZEPI(p->ep)];
+    }
+    p->sig ^= zside_delta;
 }
 
 /* compute the signature from scratch (used at parse_fen) */
@@ -142,6 +148,7 @@ void do_make(Pos *p, u16 m, Undo *u) {
     u->cap = p->board[to];
     u->castle = p->castle;
     u->ep = p->ep;
+    u->sig = p->sig;
 
     p->board[to] = promo ? promo : piece;
     p->board[from] = EMPTY;
@@ -187,11 +194,7 @@ void undo_move(Pos *p, u16 m, Undo *u) {
 
     p->side ^= 1;
 
-    /* sig: new -> old. Must run before the board/castle/ep restores, while
-       board[to] holds the moved piece, board[from] is empty, p->castle/ep are
-       still the NEW values and u the OLD - the same state zob_apply saw in
-       do_make (after its updates, before its side flip). */
-    zob_apply(p, m, u);
+    p->sig = u->sig;
 
     if (ispromo(m)) piece = (p->side == 0) ? WP : BP;
     p->board[from] = piece;
@@ -229,7 +232,7 @@ void undo_move(Pos *p, u16 m, Undo *u) {
    and undo are the same operation. */
 void nm_make(Pos *p) {
     p->side ^= 1;
-    p->sig  ^= zside[0] ^ zside[1];
+    p->sig  ^= zside_delta;
 }
 void nm_undo(Pos *p) {
     nm_make(p);
@@ -257,10 +260,12 @@ i16 is_attacked(Pos *p, i16 sq, i16 by) {
         to = sq + kn[i];
         if ((to & 0x88) == 0 && p->board[to] == (by ? BN : WN)) return 1;
     }
-    for (i = 0; i < 8; i++) {
-        to = sq + ki[i];
-        if ((to & 0x88) == 0 && p->board[to] == (by ? BK : WK)) return 1;
-    }
+    /* Both king squares are maintained by make/undo. Bit 1 of king_line
+       marks adjacency, so a single difference lookup replaces eight probes.
+       The board check also handles a missing/captured king in diagnostic FENs. */
+    to = p->ks[by];
+    if (to >= 0 && p->board[to] == (by ? BK : WK) &&
+        (king_line[(u8)(to - sq)] & 2)) return 1;
     for (i = 0; i < 4; i++) {
         d = rb[i]; to = sq + d;
         while ((to & 0x88) == 0) {
@@ -519,7 +524,10 @@ static void king_line_build(void) {
         for (sq = 0; sq < 128; sq += ((sq & 7) == 7) ? 9 : 1) {
             i16 sr = sq >> 4, sf = sq & 7;
             if (kr == sr || kf == sf || kr + kf == sr + sf || kr - kf == sr - sf)
-                king_line[(u8)(sq - k)] = 1;
+                king_line[(u8)(sq - k)] |= 1;
+            if (sq != k && sr - kr >= -1 && sr - kr <= 1 &&
+                sf - kf >= -1 && sf - kf <= 1)
+                king_line[(u8)(sq - k)] |= 2;
         }
     }
 }

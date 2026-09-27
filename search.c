@@ -733,6 +733,7 @@ int bench(int depth) {
 #endif
     b0 = clock();
 #endif
+    MAME_MARK(0x30);
     for (i = 0; i < BENCH_N; i++) {
         Pos p;
         i32 pos_nodes = 0;
@@ -818,6 +819,7 @@ int bench(int depth) {
                i + 1, BENCH_N, depth, bestscore, bf, bt, (long)pos_nodes, secs);
     }
 #ifndef VCLOCK
+    MAME_MARK(0x31);
     b1 = clock();
 #if defined(TIMING_DETAIL) && defined(__WATCOMC__)
     bios1 = timing_bios_ticks();

@@ -236,10 +236,10 @@ static i16 vperiod_started; /* first period not yet granted */
 /* scalar cycles/node, NNUE / material (16-bit build) */
 #ifndef VCLOCK
 static const i32 cpn_tab[4][2] = {
-    { 47446L,  23802L },   /* VCPU_80286: 79.37 s * 6 MHz / 10037 nodes */
-    { 142100L, 76064L },   /* VCPU_8088:  89.14 s * 16 MHz / 10037 nodes */
-    { 118859L, 67573L },   /* VCPU_8086: 86Box Deskpro @ 8 MHz */
-    { 65416L,  41713L },   /* VCPU_80186: MAME Nimbus exact cycle markers */
+    { 35493L,  23618L },   /* 80286: 59.374 / 39.162 s @ 6 MHz */
+    { 111110L, 69341L },   /* 8088: 69.701 / 43.117 s @ 16 MHz */
+    { 96750L,  59005L },   /* 8086: 121.385 / 73.380 s @ 8 MHz */
+    { 53905L,  34411L },   /* 80186: 541041249 / 342356749 exact cycles */
 };
 #endif
 
@@ -249,11 +249,26 @@ static i64 vbudget_cyc;   /* weighted cycle budget for the current move */
 typedef struct { i32 att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm, tp, ts; } VW;
 static const VW vw_tab[4] = {
     /*   att    ps     gc     gq      gm     mk    nm   rf    ev     rn      rm      tp    ts */
-    {  2316,     0, 16890, 18810, 170268, 1977, 1488, 3570,  5436,   1342,   8723,   654,  534 }, /* 80286 */
-    {  6576,     0, 47232, 54192, 610048, 6336, 4261,10227, 17136,   3050,  31934,  2240, 1856 }, /* 8088 */
-    {  5547,     0, 35520, 42657, 492500, 5286, 3847, 9234, 14282,  14514,  24116,  1867, 1567 }, /* 8086 */
-    {  3317,   140, 21358, 24698, 263943, 2748, 2025, 4860,  7834,   8252,  16790,  1165, 1009 }, /* 80186 */
+    {  1894,     0, 13868, 15792, 162305, 1009, 1059, 3164,  5109,   6984,   9962,   660,  495 }, /* 80286 */
+    {  5237,     0, 41727, 47613, 551447, 3268, 3433,10370, 15600,  22717,  28357,  2195, 2087 }, /* 8088 */
+    {  4504,     0, 35890, 41003, 491587, 2842, 3068, 9535, 13072,  19297,  23663,  1840, 1648 }, /* 8086 */
+    {  2714,   140, 21359, 24059, 250050, 1595, 1641, 5059,  7535,  10174,  13609,  1165, 1009 }, /* 80186 */
 };
+/* CURRENT CALIBRATION (2026-09-26): measured after Zobrist/king-attack changes,
+   generated forward/batch improvements, and lazy NNUE accumulator updates.
+   Board primitives use the unchanged full sbench driver. Forward is measured
+   with valid accumulators; nbench separately measures plan-only and fully
+   materialized quiet/capture pairs. nm is the average plan-only pair minus
+   the board pair, divided by two; rf is the average additional materialization
+   cost per perspective. The quiet/capture and mirror-refresh cost differences
+   remain approximations covered by fitted rn/rm, not separately exact terms.
+   Native profile-1 counters and uninstrumented full NNUE/material timings fit
+   the remaining per-node overhead. All four rows reproduce their measured
+   10037/9949-node calibration totals within integer rounding. 86Box pos_sig
+   samples are below useful timer resolution, so ps remains absorbed in rn/rm;
+   Nimbus uses its exact marker measurement. See SPEEDUP_VALIDATION.md and
+   artifacts/speedup-validation/calibration.json for inputs and reproduction.
+   The calibration notes below are historical and their numbers are superseded. */
 /* CURRENT 86BOX RE-MEASURE (2026-08-29): sbench values are converted by the
    configured MHz; make10k is a make+undo pair, hence /2 for mk. The NNUE
    nbench timer is not a usable cross-CPU cycle source under the host-bound
