@@ -243,7 +243,7 @@ static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd)
 static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 half) {
     MGen mg;
     u16 m, ttm = 0, bestmove = 0;
-    Score best = -INF;
+    Score best = -INF, original_alpha = alpha;
     i16 legal = 0, in_check = 0, move_count = 0;
 
     PCOUNT(c_anodes);
@@ -457,7 +457,9 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
         return r;
     }
     if (!stop_now) {
-        i16 flag = (best <= alpha) ? TT_UPPER : (best >= beta) ? TT_LOWER : TT_EXACT;
+        /* Classify against the entry window; alpha has risen during search. */
+        i16 flag = (best >= beta) ? TT_LOWER :
+                   (best <= original_alpha) ? TT_UPPER : TT_EXACT;
         tt_store(p, bestmove, depth, best, flag, ply);
     }
     return best;
