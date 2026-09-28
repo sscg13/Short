@@ -58,6 +58,8 @@ static u64 zkey(void) {
 }
 
 /* one-time table build (dedicated init, run at main start) */
+#include "repetition.inc"
+
 void zob_init(void) {
     i16 pc, sq, i;
     for (pc = 1; pc < 15; pc++)
@@ -67,6 +69,7 @@ void zob_init(void) {
     zside_delta = zside[0] ^ zside[1];
     for (i = 0; i < 16; i++) zcastle[i] = zkey();
     for (i = 0; i < 65; i++) zep[i] = zkey();
+    rep_table_init();
 }
 
 /* ep-square key index: -1 (no ep) -> 64, else compact square */
@@ -845,6 +848,9 @@ static const u32 expv[6][6] = {
     { 46, 2079, 89890, 3894594, 164075551, 0 }
 };
 
+#ifdef REP_TEST
+int repetition_selftest(void);
+#endif
 int main(int argc, char **argv) {
     i16 maxd = 5, test = 0, i, splitsel = 0;
     i16 j, nn_log = 1;
@@ -875,6 +881,9 @@ int main(int argc, char **argv) {
     if (nn_log && nnue_enabled)
         printf("NNUE: net loaded (features=%d N=%d)\n", NNUE_FEATURES, NNUE_N);
 
+#ifdef REP_TEST
+    if (argc > 1 && strcmp(argv[1], "reptest") == 0) return repetition_selftest();
+#endif
     if (argc > 1 && strcmp(argv[1], "nn") == 0)
         return nnue_selftest((argc > 2) ? argv[2] : NULL);
 

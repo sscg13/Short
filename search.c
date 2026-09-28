@@ -12,12 +12,76 @@ i32 deadline = 0;                   /* ms deadline, 0 = no limit */
 
 #if defined(PROFILE) || defined(VCLOCK)
 i32 c_anodes = 0;                   /* alphabeta entries */
+i32 c_rep_scan = 0, c_rep_upscan = 0, c_rep_lookup = 0;
 i32 c_qnodes = 0;                   /* qsearch entries */
 #endif
 
 static i32 nodes_search;
 static Sig rep_path[MAX_REP_PATH];   /* position sigs along the current search line */
 static i16 rep_n;
+
+/* Current node is the last rep_path entry. A null move starts a new history
+   window; no actual-game or earlier search position may cross that boundary. */
+static i16 rep_floor;
+static i16 rep_game = 1;
+static i16 rep_prev_game[MAX_G_SIGS], rep_prev_path[MAX_REP_PATH];
+static void rep_reset(void) {
+    i16 i, j;
+    rep_n = 0; rep_floor = 0; rep_game = 1;
+    for (i = 0; i < g_sigs_n; ++i) {
+        rep_prev_game[i] = -1;
+        for (j = i - 2; j >= 0; j -= 2)
+            if (g_sigs[j] == g_sigs[i]) { rep_prev_game[i] = j; break; }
+    }
+}
+#ifndef NO_UPCOMING_REPETITION
+static i16 rep_prev(i16 index) {
+    return index < g_sigs_n ? rep_prev_game[index] : rep_prev_path[index - g_sigs_n];
+}
+#endif
+static Sig rep_at(i16 index) {
+    return index < g_sigs_n ? g_sigs[index] : rep_path[index - g_sigs_n];
+}
+static i16 rep_begin(i16 half, i16 current) {
+    i16 first = current - half;
+    i16 floor = rep_game ? 0 : g_sigs_n + rep_floor;
+    return first > floor ? first : floor;
+}
+static i16 rep_enter(Pos *p, i16 half) {
+    i16 current = g_sigs_n + rep_n, first = rep_begin(half, current);
+    i16 i, count = 0, previous = -1;
+    for (i = current - 2; i >= first; i -= 2) {
+        PCOUNT(c_rep_scan);
+        if (rep_at(i) == p->sig) {
+            if (++count == 2) return 1;
+            previous = i;
+        }
+    }
+    rep_prev_path[rep_n] = previous;
+    rep_path[rep_n++] = p->sig;
+    return 0;
+}
+static i16 rep_upcoming(Pos *p, i16 half) {
+#ifndef NO_UPCOMING_REPETITION
+    i16 current = g_sigs_n + rep_n - 1, first, i;
+    /* Preserve the existing strict threefold policy: the destination must
+       already occur twice. Twofold search-cycle pruning is a separate change. */
+    if (half < 7) return 0;
+    first = rep_begin(half, current);
+    for (i = current - 3; i >= first + 4; i -= 2) {
+        PCOUNT(c_rep_upscan);
+        if (rep_prev(i) >= first) {
+            PCOUNT(c_rep_lookup);
+            if (repetition_move(p, rep_at(i))) return 1;
+        }
+    }
+
+#else
+    (void)p; (void)half;
+#endif
+    return 0;
+}
+
 
 /* principal-variation lines for the `post` search-info output (CECP §10).
    pv[ply][0..pv_len[ply]-1] is the best line from ply, in move encoding. */
@@ -191,10 +255,15 @@ static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd)
     if (qd <= 0) return evaluate(p);             /* ply budget spent: static eval */
     if (ply >= MAXPLY - 4) return evaluate(p);   /* stay clear of movebuf aux rows */
     if (half >= MAX_HALF) return 0;
+    if (rep_enter(p, half)) return 0;
+    if (alpha < 0 && rep_upcoming(p, half)) {
+        best = 0; alpha = 0;
+        if (alpha >= beta) { rep_n--; return 0; }
+    }
     in_check = is_attacked(p, p->ks[p->side], p->side ^ 1);    if (!in_check) {
         stand = evaluate(p);
-        best = stand;                            /* fail-soft baseline = stand-pat */
-        if (stand >= beta) return stand;         /* stand-pat cutoff */
+        if (stand > best) best = stand;                            /* fail-soft baseline = stand-pat */
+        if (stand >= beta) { rep_n--; return stand; }         /* stand-pat cutoff */
         if (stand > alpha) alpha = stand;
     }
 
@@ -231,6 +300,7 @@ static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd)
         }
     }
 
+    rep_n--;
     if (!legal && in_check)
         return -(MATE - ply);                    /* mated in the qsearch */
     return best;                                 /* fail-soft */
@@ -244,7 +314,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
     MGen mg;
     u16 m, ttm = 0, bestmove = 0;
     Score best = -INF, original_alpha = alpha;
-    i16 legal = 0, in_check = 0, move_count = 0;
+    i16 legal = 0, in_check = 0, move_count = 0, upcoming = 0;
 
     PCOUNT(c_anodes);
     nodes_search++;
@@ -257,18 +327,10 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
     if (ply >= MAXPLY) return evaluate(p);   /* hard depth cap: never index past pv/killers/movebuf */
     pv_len[ply] = 0;                                 /* no best line yet at this ply */
 
-    /* threefold repetition (game history + current line) is a draw */
-    {
-        Sig sig = pos_sig(p);
-        i16 prior = 0;
-        i16 i;
-        for (i = 0; i < g_sigs_n && i < MAX_G_SIGS; i++)
-            if (g_sigs[i] == sig) { prior++; if (prior >= 2) break; }
-        if (prior < 2)
-            for (i = 0; i < rep_n && i < MAX_REP_PATH; i++)
-                if (rep_path[i] == sig) { prior++; if (prior >= 2) break; }
-        if (prior >= 2) return 0;               /* 3rd occurrence */
-        if (rep_n < MAX_REP_PATH) rep_path[rep_n++] = sig;
+    if (rep_enter(p, half)) return 0;
+    if (alpha < 0 && rep_upcoming(p, half)) {
+        upcoming = 1; best = 0; alpha = 0;
+        if (alpha >= beta) { rep_n--; return 0; }
     }
 
     /* 50-move rule: 100 half-moves without a pawn move or capture is a draw */
@@ -288,7 +350,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
         if (tt_probe(p, ply, &tmv, &tsc, &tfl, &tdep)) {
             if (tmv && CO(p->board[mfrom(tmv)]) == (p->side ? 8 : 0))
                 ttm = tmv;
-            if (beta - alpha == 1 && tdep >= depth) {
+            if (beta - alpha == 1 && tdep >= depth && tsc >= best) {
                 if (tfl == TT_EXACT) { rep_n--; return tsc; }
                 if (tfl == TT_LOWER && tsc >= beta) { rep_n--; return tsc; }
                 if (tfl == TT_UPPER && tsc <= alpha) { rep_n--; return tsc; }
@@ -335,10 +397,13 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                 i16 R = NMP_RED + depth / 6;
                 i16 nd = depth - 1 - R;         /* the null move spends a ply */
                 Score sc;
+                i16 saved_floor = rep_floor, saved_game = rep_game;
+                rep_floor = rep_n; rep_game = 0;
                 nm_make(p);
                 if (nd > 0) sc = -alphabeta(p, nd, -beta, -beta + 1, ply + 1, half + 1);
                 else        sc = -qsearch(p, -beta, -beta + 1, ply + 1, half + 1, MAX_QDEPTH);
                 nm_undo(p);
+                rep_floor = saved_floor; rep_game = saved_game;
                 if (sc >= beta && !stop_now) {
                     rep_n--;
                     return sc;
@@ -456,7 +521,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
         if (!stop_now) tt_store(p, 0, depth, r, TT_EXACT, ply);
         return r;
     }
-    if (!stop_now) {
+    if (!stop_now && (!upcoming || best > 0)) {
         /* Classify against the entry window; alpha has risen during search. */
         i16 flag = (best >= beta) ? TT_LOWER :
                    (best <= original_alpha) ? TT_UPPER : TT_EXACT;
@@ -485,7 +550,7 @@ void search_root(Pos *p, i16 maxdepth) {
         }
         nodes_search = 0;
         t0 = clock();
-        rep_n = 0;
+        rep_reset();
         for (;;) {
             Score alpha = asp_lo, beta = asp_hi;
             sort_root();
@@ -590,7 +655,7 @@ u16 think(Pos *p, i16 maxdepth) {
         }
         nodes_search = 0;
         stop_now = 0;
-        rep_n = 0;
+        rep_reset();
         for (;;) {
             Score alpha = asp_lo, beta = asp_hi;
             sort_root();
@@ -763,7 +828,7 @@ int bench(int depth) {
                 asp_hi = prev + delta;
             }
             nodes_search = 0;
-            rep_n = 0;
+            rep_reset();
             stop_now = 0;
             for (;;) {
                 Score alpha = asp_lo, beta = asp_hi;
@@ -837,6 +902,10 @@ int bench(int depth) {
 #endif
 #endif
 
+#ifdef PROFILE
+    printf("repcost scan=%ld upscan=%ld lookup=%ld\n", (long)c_rep_scan,
+           (long)c_rep_upscan, (long)c_rep_lookup);
+#endif
     /* these two lines must stay the last output: OpenBench matches them
        scanning up from the bottom of stdout */
 #ifdef VCLOCK
@@ -910,7 +979,7 @@ int profile(int depth) {
                 asp_hi = prev + delta;
             }
             nodes_search = 0;
-            rep_n = 0;
+            rep_reset();
             stop_now = 0;
             for (;;) {
                 Score alpha = asp_lo, beta = asp_hi;
@@ -1112,3 +1181,7 @@ static u32 timing_bios_ticks(void) {
 }
 #endif
 
+
+#ifdef REP_TEST
+#include "repetition_test.inc"
+#endif

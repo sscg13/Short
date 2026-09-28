@@ -236,10 +236,10 @@ static i16 vperiod_started; /* first period not yet granted */
 /* scalar cycles/node, NNUE / material (16-bit build) */
 #ifndef VCLOCK
 static const i32 cpn_tab[4][2] = {
-    { 35493L,  23618L },   /* 80286: 59.374 / 39.162 s @ 6 MHz */
-    { 111110L, 69341L },   /* 8088: 69.701 / 43.117 s @ 16 MHz */
-    { 96750L,  59005L },   /* 8086: 121.385 / 73.380 s @ 8 MHz */
-    { 53905L,  34411L },   /* 80186: 541041249 / 342356749 exact cycles */
+    { 36150L, 24275L }, /* 286: repetition fixed overhead; material delta estimated */
+    { 115224L, 73455L }, /* 8088: repetition fixed overhead; material delta estimated */
+    { 100034L, 62289L }, /* 8086: repetition fixed overhead; material delta estimated */
+    { 55056L, 35562L }, /* 80186: repetition fixed overhead; material delta estimated */
 };
 #endif
 
@@ -308,6 +308,23 @@ static const VW vw_tab[4] = {
    nm/rf split the NNUE-only make-pair residual in the established 1:2.4 ratio;
    their sum is measured, while the individual split remains an estimate. */
 
+/* Upcoming repetition: fixed overhead measured on the identical 10037-node
+   bench-1 tree. The 286 scan terms were measured over 20000 isolated calls:
+   125 cycles/history comparison, 75/upcoming-history entry; the 940-cycle
+   wrong-side lookup sample is rounded up to 1000. Successful move checks also
+   charge the existing make/undo, NNUE-plan and attack counters. Other CPUs'
+   variable terms are estimates scaled by their measured fixed-overhead ratio.
+   Charge full history comparisons conservatively, including ones the old
+   alpha-beta repetition check already performed. No twofold-cycle policy.
+   See artifacts/upcoming-repetition/calibration.json in the experiment log. */
+typedef struct { i32 fixed, scan, upscan, lookup; } RepCost;
+static const RepCost rep_cost[4] = {
+    { 657, 125, 75, 1000 }, /* 286 */
+    { 4114, 783, 470, 6262 }, /* 8088 */
+    { 3284, 625, 375, 4998 }, /* 8086 */
+    { 1151, 219, 131, 1752 }, /* 80186 */
+};
+
 static i64 vclock_cyc(void) {
     const VW *w = &vw_tab[vcpu_model];
     i64 r = (i64)(nnue_enabled ? w->rn : w->rm) * (c_anodes + c_qnodes);
@@ -322,6 +339,10 @@ static i64 vclock_cyc(void) {
     r += (i64)w->ev  * c_nn_eval;
     r += (i64)w->tp  * c_tt_probe;
     r += (i64)w->ts  * c_tt_store;
+    r += (i64)rep_cost[vcpu_model].fixed * (c_anodes + c_qnodes);
+    r += (i64)rep_cost[vcpu_model].scan * c_rep_scan;
+    r += (i64)rep_cost[vcpu_model].upscan * c_rep_upscan;
+    r += (i64)rep_cost[vcpu_model].lookup * c_rep_lookup;
     return r;
 }
 
@@ -371,6 +392,7 @@ void vclock_reset(void) {
     c_nn_make = c_nn_undo = c_nn_eval = c_refresh = c_flip = 0;
     c_isattacked = 0;
     c_possig = 0;
+    c_rep_scan = c_rep_upscan = c_rep_lookup = 0;
     c_tt_probe = 0;
     c_tt_store = 0;
 #endif
