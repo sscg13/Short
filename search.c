@@ -47,13 +47,13 @@ static i16 rep_begin(i16 half, i16 current) {
     i16 floor = rep_game ? 0 : g_sigs_n + rep_floor;
     return first > floor ? first : floor;
 }
-static i16 rep_enter(Pos *p, i16 half) {
+static i16 rep_enter(Pos *p, i16 half, i16 ply) {
     i16 current = g_sigs_n + rep_n, first = rep_begin(half, current);
     i16 i, count = 0, previous = -1;
     for (i = current - 2; i >= first; i -= 2) {
         PCOUNT(c_rep_scan);
         if (rep_at(i) == p->sig) {
-            if (++count == 2) return 1;
+            if (i > current - ply || ++count == 2) return 1;
             previous = i;
         }
     }
@@ -61,23 +61,24 @@ static i16 rep_enter(Pos *p, i16 half) {
     rep_path[rep_n++] = p->sig;
     return 0;
 }
-static i16 rep_upcoming(Pos *p, i16 half) {
+static i16 rep_upcoming(Pos *p, i16 half, i16 ply) {
 #ifndef NO_UPCOMING_REPETITION
     i16 current = g_sigs_n + rep_n - 1, first, i;
-    /* Preserve the existing strict threefold policy: the destination must
-       already occur twice. Twofold search-cycle pruning is a separate change. */
-    if (half < 7) return 0;
+    /* A single earlier occurrence strictly after the search root closes a
+       search cycle. At/before root require two earlier occurrences instead.
+       g_sigs includes the current root in normal XBoard play. */
+    if (half < 3) return 0;
     first = rep_begin(half, current);
-    for (i = current - 3; i >= first + 4; i -= 2) {
+    for (i = current - 3; i >= first; i -= 2) {
         PCOUNT(c_rep_upscan);
-        if (rep_prev(i) >= first) {
+        if (i > current - ply || rep_prev(i) >= first) {
             PCOUNT(c_rep_lookup);
             if (repetition_move(p, rep_at(i))) return 1;
         }
     }
 
 #else
-    (void)p; (void)half;
+    (void)p; (void)half; (void)ply;
 #endif
     return 0;
 }
@@ -255,8 +256,8 @@ static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd)
     if (qd <= 0) return evaluate(p);             /* ply budget spent: static eval */
     if (ply >= MAXPLY - 4) return evaluate(p);   /* stay clear of movebuf aux rows */
     if (half >= MAX_HALF) return 0;
-    if (rep_enter(p, half)) return 0;
-    if (alpha < 0 && rep_upcoming(p, half)) {
+    if (rep_enter(p, half, ply)) return 0;
+    if (alpha < 0 && rep_upcoming(p, half, ply)) {
         best = 0; alpha = 0;
         if (alpha >= beta) { rep_n--; return 0; }
     }
@@ -327,8 +328,8 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
     if (ply >= MAXPLY) return evaluate(p);   /* hard depth cap: never index past pv/killers/movebuf */
     pv_len[ply] = 0;                                 /* no best line yet at this ply */
 
-    if (rep_enter(p, half)) return 0;
-    if (alpha < 0 && rep_upcoming(p, half)) {
+    if (rep_enter(p, half, ply)) return 0;
+    if (alpha < 0 && rep_upcoming(p, half, ply)) {
         upcoming = 1; best = 0; alpha = 0;
         if (alpha >= beta) { rep_n--; return 0; }
     }

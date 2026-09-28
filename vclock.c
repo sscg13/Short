@@ -236,10 +236,10 @@ static i16 vperiod_started; /* first period not yet granted */
 /* scalar cycles/node, NNUE / material (16-bit build) */
 #ifndef VCLOCK
 static const i32 cpn_tab[4][2] = {
-    { 36150L, 24275L }, /* 286: repetition fixed overhead; material delta estimated */
-    { 115224L, 73455L }, /* 8088: repetition fixed overhead; material delta estimated */
-    { 100034L, 62289L }, /* 8086: repetition fixed overhead; material delta estimated */
-    { 55056L, 35562L }, /* 80186: repetition fixed overhead; material delta estimated */
+    { 36150L, 24275L }, /* 286: fixed repetition overhead; material delta estimated */
+    { 115224L, 73455L }, /* 8088: fixed repetition overhead; material delta estimated */
+    { 100034L, 62289L }, /* 8086: fixed repetition overhead; material delta estimated */
+    { 55034L, 35540L }, /* 80186: fixed repetition overhead; material delta estimated */
 };
 #endif
 
@@ -308,21 +308,20 @@ static const VW vw_tab[4] = {
    nm/rf split the NNUE-only make-pair residual in the established 1:2.4 ratio;
    their sum is measured, while the individual split remains an estimate. */
 
-/* Upcoming repetition: fixed overhead measured on the identical 10037-node
-   bench-1 tree. The 286 scan terms were measured over 20000 isolated calls:
-   125 cycles/history comparison, 75/upcoming-history entry; the 940-cycle
-   wrong-side lookup sample is rounded up to 1000. Successful move checks also
-   charge the existing make/undo, NNUE-plan and attack counters. Other CPUs'
-   variable terms are estimates scaled by their measured fixed-overhead ratio.
-   Charge full history comparisons conservatively, including ones the old
-   alpha-beta repetition check already performed. No twofold-cycle policy.
-   See artifacts/upcoming-repetition/calibration.json in the experiment log. */
+/* Upcoming twofold: fixed overhead measured on the identical 10037-node
+   bench-1 tree. Revised 286 scans measured over 20000 isolated calls:
+   125 cycles/history comparison, 107/upcoming-history entry. The 956-cycle
+   wrong-side lookup sample rounds up to 1000. Successful move checks also
+   charge existing make/undo, NNUE-plan and attack counters. Other CPUs'
+   variable terms are estimates scaled by measured fixed-overhead ratios.
+   Full comparisons are charged conservatively, including ones the old
+   alpha-beta repetition check already performed. See REPETITION_EXPERIMENT.md. */
 typedef struct { i32 fixed, scan, upscan, lookup; } RepCost;
 static const RepCost rep_cost[4] = {
-    { 657, 125, 75, 1000 }, /* 286 */
-    { 4114, 783, 470, 6262 }, /* 8088 */
-    { 3284, 625, 375, 4998 }, /* 8086 */
-    { 1151, 219, 131, 1752 }, /* 80186 */
+    { 657, 125, 107, 1000 }, /* 286 */
+    { 4114, 783, 670, 6262 }, /* 8088 */
+    { 3284, 625, 535, 4998 }, /* 8086 */
+    { 1129, 215, 184, 1718 }, /* 80186 */
 };
 
 static i64 vclock_cyc(void) {
