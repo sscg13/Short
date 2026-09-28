@@ -151,6 +151,7 @@ extern i32 c_nn_eval;       /* nnue_eval entry */
 extern i32 c_refresh;       /* feature-row deltas applied (nn_delta_apply) */
 extern i32 c_flip;          /* mirror-flip recompute paths (nnue_make) */
 extern i32 c_isattacked;    /* is_attacked entry */
+extern i32 c_rep_scan, c_rep_upscan, c_rep_lookup;
 extern i32 c_possig;        /* pos_sig entry */
 extern i32 c_tt_probe;      /* transposition-table probe entry */
 extern i32 c_tt_store;      /* transposition-table store entry */
@@ -187,6 +188,7 @@ extern u8 king_line[256];
 i16 gen_moves(Pos *p, u16 *list);
 i32 perft(Pos *p, i16 depth);
 Sig pos_sig(Pos *p);
+u16 repetition_move(Pos *p, Sig target);
 void search_root(Pos *p, i16 maxdepth);
 u16 think(Pos *p, i16 maxdepth);
 
