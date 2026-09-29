@@ -278,6 +278,11 @@ static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd)
         if (stop_now) break;                     /* abort: stop trying moves at this node */
         pc = p->board[mfrom(m)];
         if (!pc || CO(pc) != (p->side ? 8 : 0)) continue;  /* not our piece: skip */
+#ifndef NO_SEE_PRUNING
+        /* Keep every check evasion and special move. Ordinary captures whose
+           least-attacker exchange loses material do not enter qsearch. */
+        if (!in_check && !see_nonnegative(p, m)) continue;
+#endif
         do_make(p, m, &u);
         us = p->side ^ 1;
         if (!in_check && TY(pc) != 6 && mfl(m) != MF_EP &&
@@ -951,6 +956,7 @@ int profile(int depth) {
     c_possig = 0;
     c_tt_probe = 0;
     c_tt_store = 0;
+    c_see = c_see_step = 0;
 
     b0 = clock();
     for (i = 0; i < BENCH_N; i++) {
@@ -1054,6 +1060,7 @@ int profile(int depth) {
            (long)c_nn_make, (long)c_nn_undo, (long)c_nn_eval, (long)c_refresh, (long)c_flip);
     printf("profile is_attacked=%ld pos_sig=%ld\n", (long)c_isattacked, (long)c_possig);
     printf("profile tt_probe=%ld tt_store=%ld\n", (long)c_tt_probe, (long)c_tt_store);
+    printf("profile see=%ld see_step=%ld\n", (long)c_see, (long)c_see_step);
     return 0;
 }
 #endif /* PROFILE */
@@ -1185,4 +1192,8 @@ static u32 timing_bios_ticks(void) {
 
 #ifdef REP_TEST
 #include "repetition_test.inc"
+#endif
+
+#ifdef SEE_TEST
+#include "see_test.inc"
 #endif

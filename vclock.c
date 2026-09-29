@@ -236,10 +236,10 @@ static i16 vperiod_started; /* first period not yet granted */
 /* scalar cycles/node, NNUE / material (16-bit build) */
 #ifndef VCLOCK
 static const i32 cpn_tab[4][2] = {
-    { 36150L, 24275L }, /* 286: fixed repetition overhead; material delta estimated */
-    { 115224L, 73455L }, /* 8088: fixed repetition overhead; material delta estimated */
-    { 100034L, 62289L }, /* 8086: fixed repetition overhead; material delta estimated */
-    { 55034L, 35540L }, /* 80186: fixed repetition overhead; material delta estimated */
+    { 41400L, 24275L }, /* 286 NNUE: measured SEE bench 1; material remains estimated */
+    { 130300L, 73455L }, /* 8088 NNUE: candidate weighted-model estimate */
+    { 113000L, 62289L }, /* 8086 NNUE: candidate weighted-model estimate */
+    { 62800L, 35540L }, /* 80186 NNUE: candidate weighted-model estimate */
 };
 #endif
 
@@ -324,6 +324,23 @@ static const RepCost rep_cost[4] = {
     { 1129, 215, 184, 1718 }, /* 80186 */
 };
 
+/* SEE: uninstrumented 286 @ 6 MHz, 4000 calls per fixture. Cheap entries
+   cost at most 413 cycles; round to 450. After removing that entry cost and
+   the already-charged is_attacked calls, the largest attacker-scan residual
+   is 4658 cycles (legal king recapture). A whole-search cross-check needs
+   another ~1400 cycles/scan to cover the averaged primitive costs' residual;
+   use 6200, predicting slightly MORE than the measured 178950000 cycles.
+   Charge the full scan rate even when a pawn/knight exits early. Other CPU
+   rows are estimates scaled by their existing attack-cost ratios.
+   Reproduce with -DSEE_TEST, `chess seebench`; native PROFILE supplies counts. */
+typedef struct { i32 entry, step; } SeeCost;
+static const SeeCost see_cost[4] = {
+    { 450, 6200 },    /* 80286: measured with whole-search headroom */
+    { 1300, 17200 },  /* 8088: estimate */
+    { 1100, 14800 },  /* 8086: estimate */
+    { 650, 8900 },    /* 80186: estimate */
+};
+
 static i64 vclock_cyc(void) {
     const VW *w = &vw_tab[vcpu_model];
     i64 r = (i64)(nnue_enabled ? w->rn : w->rm) * (c_anodes + c_qnodes);
@@ -342,6 +359,8 @@ static i64 vclock_cyc(void) {
     r += (i64)rep_cost[vcpu_model].scan * c_rep_scan;
     r += (i64)rep_cost[vcpu_model].upscan * c_rep_upscan;
     r += (i64)rep_cost[vcpu_model].lookup * c_rep_lookup;
+    r += (i64)see_cost[vcpu_model].entry * c_see;
+    r += (i64)see_cost[vcpu_model].step * c_see_step;
     return r;
 }
 
@@ -392,6 +411,7 @@ void vclock_reset(void) {
     c_isattacked = 0;
     c_possig = 0;
     c_rep_scan = c_rep_upscan = c_rep_lookup = 0;
+    c_see = c_see_step = 0;
     c_tt_probe = 0;
     c_tt_store = 0;
 #endif

@@ -134,6 +134,7 @@ i32 c_gen_quiets = 0;           /* gen_quiets entries */
 i32 c_nextmove = 0;             /* next_move entries */
 i32 c_isattacked = 0;           /* is_attacked entries */
 i32 c_possig = 0;               /* pos_sig entries */
+i32 c_see = 0, c_see_step = 0;  /* SEE entries and attacker scans */
 #endif
 
 /* ------------------------------------------------------------------ */
@@ -292,6 +293,95 @@ i16 is_attacked(Pos *p, i16 sq, i16 by) {
         }
     }
     return 0;
+}
+
+/* Test a recapture using board-only changes: no Zobrist or NNUE work. This
+   rejects pinned attackers and unsafe king captures, including pins revealed
+   by earlier exchanges. The caller's position is restored before returning. */
+static i16 see_legal(Pos *p, i16 from, i16 to, i16 side) {
+    i16 pc = p->board[from], cap = p->board[to], king = p->ks[side];
+    i16 legal;
+    p->board[from] = EMPTY;
+    p->board[to] = pc;
+    legal = !is_attacked(p, TY(pc) == 6 ? to : king, side ^ 1);
+    p->board[from] = pc;
+    p->board[to] = cap;
+    return legal;
+}
+
+/* Least valuable LEGAL attacker of to. Probe outwards from the destination
+   instead of sweeping the whole board. Re-scanning after each removal exposes
+   sliding x-rays without a bitboard, piece list, or persistent scratch data. */
+static i16 see_lva(Pos *p, i16 to, i16 side) {
+    i16 i, from, pc, type, best = -1, value = 1000;
+    i16 col = side ? 8 : 0, pawn = side ? BP : WP;
+    i16 back = side ? 16 : -16;
+    PCOUNT(c_see_step);
+    from = to + back - 1;
+    if (!(from & 0x88) && p->board[from] == pawn && see_legal(p, from, to, side))
+        return from;
+    from = to + back + 1;
+    if (!(from & 0x88) && p->board[from] == pawn && see_legal(p, from, to, side))
+        return from;
+    for (i = 0; i < 8; ++i) {
+        from = to + kn[i];
+        if (!(from & 0x88) && p->board[from] == (col | 2) &&
+            see_legal(p, from, to, side)) return from;
+    }
+    for (i = 0; i < 8; ++i) {
+        from = to + qd[i];
+        while (!(from & 0x88) && !p->board[from]) from += qd[i];
+        if (from & 0x88) continue;
+        pc = p->board[from]; type = TY(pc);
+        if (CO(pc) != col || type < 3 || type > 5) continue;
+        if (type != 5 && type != ((qd[i] == -16 || qd[i] == -1 ||
+                                  qd[i] == 1 || qd[i] == 16) ? 4 : 3)) continue;
+        if (mval[type] < value && see_legal(p, from, to, side)) {
+            best = from; value = mval[type];
+        }
+    }
+    if (best >= 0) return best;
+    from = p->ks[side];
+    if (from >= 0 && p->board[from] == (col | 6) &&
+        (king_line[(u8)(from - to)] & 2) && see_legal(p, from, to, side))
+        return from;
+    return -1;
+}
+
+/* Zero-threshold static exchange evaluation for qsearch captures. The balance
+   alternates between sides; once the next capture cannot change the sign, stop.
+   Equal exchanges pass. Only removed pieces need saving (128 bytes at most),
+   and all arithmetic fits in a signed 16-bit word. Special moves pass; a pawn
+   recapturing onto its promotion rank also passes conservatively.
+   This estimates a least-attacker exchange, not the value of a tactical move. */
+i16 see_nonnegative(Pos *p, u16 m) {
+    i16 squares[32], pieces[32];
+    i16 from = mfrom(m), to = mto(m), pc = p->board[from];
+    i16 cap = p->board[to], balance, side, result = 1, n = 1;
+    PCOUNT(c_see);
+    if (mfl(m) != 0 || TY(pc) == 6 || !cap) return 1;
+    balance = mval[TY(pc)] - mval[TY(cap)];
+    if (balance <= 0) return 1;
+    squares[0] = from; pieces[0] = pc;
+    p->board[from] = EMPTY; p->board[to] = pc;
+    side = p->side ^ 1;
+    while ((from = see_lva(p, to, side)) >= 0) {
+        pc = p->board[from];
+        if (TY(pc) == 1 && (to >> 4) == (side ? 0 : 7)) {
+            result = 1; break;
+        }
+        result ^= 1;
+        if (TY(pc) == 6) break;    /* legal king recapture ends the exchange */
+        balance = mval[TY(pc)] - balance;
+        if (balance < result) break;
+        if (n == 32) { result = 1; break; } /* malformed diagnostic FEN: keep move */
+        squares[n] = from; pieces[n++] = pc;
+        p->board[from] = EMPTY; p->board[to] = pc;
+        side ^= 1;
+    }
+    p->board[to] = cap;
+    while (n > 0) { --n; p->board[squares[n]] = pieces[n]; }
+    return result;
 }
 
 /* ------------------------------------------------------------------ */
@@ -851,6 +941,10 @@ static const u32 expv[6][6] = {
 #ifdef REP_TEST
 int repetition_selftest(void);
 #endif
+#ifdef SEE_TEST
+int see_selftest(void);
+int see_microbench(void);
+#endif
 int main(int argc, char **argv) {
     i16 maxd = 5, test = 0, i, splitsel = 0;
     i16 j, nn_log = 1;
@@ -883,6 +977,10 @@ int main(int argc, char **argv) {
 
 #ifdef REP_TEST
     if (argc > 1 && strcmp(argv[1], "reptest") == 0) return repetition_selftest();
+#endif
+#ifdef SEE_TEST
+    if (argc > 1 && strcmp(argv[1], "seetest") == 0) return see_selftest();
+    if (argc > 1 && strcmp(argv[1], "seebench") == 0) return see_microbench();
 #endif
     if (argc > 1 && strcmp(argv[1], "nn") == 0)
         return nnue_selftest((argc > 2) ? argv[2] : NULL);
