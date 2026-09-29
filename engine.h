@@ -178,7 +178,7 @@ void undo_move(Pos *p, u16 m, Undo *u);
 void nm_make(Pos *p);            /* null-move make: side flip + Zobrist side toggle */
 void nm_undo(Pos *p);            /* null-move undo (same op: XOR is self-inverse) */
 i16 is_attacked(Pos *p, i16 sq, i16 by);
-i16 see_nonnegative(Pos *p, u16 m);
+i16 see_ge(Pos *p, u16 m, i16 threshold);
 /* A move can expose its own king only when its from-square shares a rank,
    file, or diagonal with that king.  The relation depends solely on the
    signed 0x88-square difference; the valid range (-119..119) has no aliases

@@ -348,19 +348,21 @@ static i16 see_lva(Pos *p, i16 to, i16 side) {
     return -1;
 }
 
-/* Zero-threshold static exchange evaluation for qsearch captures. The balance
+/* Threshold static exchange evaluation for ordinary captures and quiets. The balance
    alternates between sides; once the next capture cannot change the sign, stop.
-   Equal exchanges pass. Only removed pieces need saving (128 bytes at most),
+   Equality with the threshold passes. Only removed pieces need saving (128 bytes at most),
    and all arithmetic fits in a signed 16-bit word. Special moves pass; a pawn
    recapturing onto its promotion rank also passes conservatively.
    This estimates a least-attacker exchange, not the value of a tactical move. */
-i16 see_nonnegative(Pos *p, u16 m) {
+i16 see_ge(Pos *p, u16 m, i16 threshold) {
     i16 squares[32], pieces[32];
     i16 from = mfrom(m), to = mto(m), pc = p->board[from];
     i16 cap = p->board[to], balance, side, result = 1, n = 1;
     PCOUNT(c_see);
-    if (mfl(m) != 0 || TY(pc) == 6 || !cap) return 1;
-    balance = mval[TY(pc)] - mval[TY(cap)];
+    if (mfl(m) != 0 || TY(pc) == 6) return 1;
+    balance = mval[TY(cap)] - threshold;
+    if (balance < 0) return 0;
+    balance = mval[TY(pc)] - balance;
     if (balance <= 0) return 1;
     squares[0] = from; pieces[0] = pc;
     p->board[from] = EMPTY; p->board[to] = pc;

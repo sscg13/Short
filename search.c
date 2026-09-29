@@ -113,6 +113,21 @@ static void qhist_update(Pos *p, u16 m, i16 delta) {
 #define RFP_DEPTH  7
 #define RFP_MARGIN 100
 
+/* Shallow non-PV SEE pruning. Allow more material loss as depth grows:
+   quiets: -80 * depth; captures: -20 * depth^2, in material centipawns.
+   Constant rows avoid multiplication in the move loop. Preserve the first
+   searched move, evasions, checking moves, special moves and mate searches. */
+#define PVS_SEE_DEPTH 4
+#ifndef NO_PVS_SEE
+static const i16 pvs_see_threshold[2][PVS_SEE_DEPTH + 1] = {
+    { 0, -80, -160, -240, -320 },
+    { 0, -20,  -80, -180, -320 }
+};
+#endif
+#if defined(SEE_TEST) && !defined(NO_PVS_SEE)
+static i32 st_pvs_tries, st_pvs_prunes, st_pvs_checks_kept;
+#endif
+
 /* null-move pruning: NMP_DEPTH is the minimum node depth (2 keeps the null move
    active through most of the tree - a depth-4 bench search uses it, unlike the
    depth-4 gate of the first attempt), NMP_RED the base depth reduction (deeper
@@ -281,7 +296,7 @@ static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd)
 #ifndef NO_SEE_PRUNING
         /* Keep every check evasion and special move. Ordinary captures whose
            least-attacker exchange loses material do not enter qsearch. */
-        if (!in_check && !see_nonnegative(p, m)) continue;
+        if (!in_check && !see_ge(p, m, 0)) continue;
 #endif
         do_make(p, m, &u);
         us = p->side ^ 1;
@@ -425,11 +440,24 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
         while ((m = next_move(p, &mg)) != 0) {
             Undo u;
             i16 us, pc, is_cap, child_half, legal_move = 0;
+            i16 see_prune = 0;
             Score score, alpha0 = alpha;         /* window this move is searched against */
             if (stop_now) break;                 /* abort: stop trying moves at this node */
             pc = p->board[mfrom(m)];                 /* moving piece, before the make */
             if (!pc || CO(pc) != (p->side ? 8 : 0)) continue;  /* not our piece: skip
                                                                   (guards a bogus TT move) */
+#ifndef NO_PVS_SEE
+            if (!first && depth >= 1 && depth <= PVS_SEE_DEPTH &&
+                !in_check && beta - alpha == 1 && best > -MATE + MAXPLY &&
+                alpha > -MATE + MAXPLY && beta < MATE - MAXPLY &&
+                mfl(m) == 0 && TY(pc) != 6) {
+#ifdef SEE_TEST
+                ++st_pvs_tries;
+#endif
+                see_prune = !see_ge(p, m,
+                    pvs_see_threshold[p->board[mto(m)] != EMPTY][depth]);
+            }
+#endif
             do_make(p, m, &u);
             us = p->side ^ 1;                        /* mover */
             /* Legality: if not in check, a non-king, non-EP move from a square off
@@ -442,6 +470,20 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
             else if (!is_attacked(p, p->ks[us], p->side))
                 legal_move = 1;
             if (legal_move) {
+                if (see_prune) {
+                    /* Test checks on the real child board, only when SEE failed.
+                       Its attack work is charged by the existing clock counter. */
+                    if (!is_attacked(p, p->ks[p->side], us)) {
+#ifdef SEE_TEST
+                        ++st_pvs_prunes;
+#endif
+                        undo_move(p, m, &u);
+                        continue;
+                    }
+#ifdef SEE_TEST
+                    ++st_pvs_checks_kept;
+#endif
+                }
                 legal = 1;
                 move_count++;
                 is_cap = (u.cap != EMPTY) || (mfl(m) == MF_EP);
