@@ -31,17 +31,17 @@ int time_selftest(void) {
     post_on = 0;
     time_test_fake_clock = 1;
     time_limits_ms(7200000L, 40, 0, &soft, &hard);
-    tm_check(soft == 180000L && hard == 540000L, "2h/40 allocation");
+    tm_check(soft == 90000L && hard == 270000L, "2h/40 allocation");
     time_limits_ms(1000, 1, 0, &soft, &hard);
     tm_check(soft == 970 && hard == 970, "last move reserve");
     time_limits_ms(1000, 40, 2000, &soft, &hard);
-    tm_check(soft == 970 && hard == 970, "increment cannot exceed bank");
+    tm_check(soft == 485 && hard == 970, "increment cannot exceed bank");
     time_limits_ms(1000, 40, 0, &soft, &hard);
-    tm_check(soft == 25 && hard == 75, "short control");
+    tm_check(soft == 12 && hard == 37, "short control");
     time_limits_ms(1000, 0, -1, &soft, &hard);
-    tm_check(soft == 25 && hard == 75, "sudden death horizon");
+    tm_check(soft == 12 && hard == 37, "sudden death horizon");
     time_limits_ms(7200000L, 40, 2147483647L, &soft, &hard);
-    tm_check(soft == 7199970L && hard == soft, "large increment does not wrap");
+    tm_check(soft == 3599985L && hard == 7199970L, "large increment does not wrap");
     for (i = -1; i <= 100; ++i) {
         time_limits_ms(i, 40, 0, &soft, &hard);
         tm_check(soft >= 1 && hard >= soft &&

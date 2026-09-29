@@ -4,8 +4,8 @@
    `otim`, `st`, `level`) and paces itself as if it were a real CPU_model @
    CPU_KHz. Each move is granted a virtual time budget (180 s/move on average,
    time banked within the current period, hard flag at move 40 and every 20
-   after that). A completed depth can use up to 3x its average allocation,
-   bounded by the remaining period bank; stop deepening at the soft target.
+   after that). Stop deepening after half the average allocation, with a
+   1.5x-average hard cap. The last move before a refill can use the bank.
    Both limits use estimated work, never elapsed host time. See TESTING.md
    sections 2, 5 and 7.
 
@@ -424,9 +424,11 @@ void vclock_reset(void) {
 #endif
 }
 
-/* Once-per-move allocation shared by the real and virtual clocks. The
-   hard limit leaves output reserve even on the last move before a refill.
-   Increment is available after the move, so it cannot raise the bank cap. */
+/* Conservative allocation shared by the real and virtual clocks. Stop
+   after a complete depth at half the normal slice; the hard limit is 1.5x
+   that slice. This banks time rather than routinely overspending the average.
+   The last move before a refill can use the bank minus output reserve.
+   Increment arrives afterwards, so it cannot raise the current bank cap. */
 void time_limits_ms(i32 remaining_ms, i16 moves_left, i32 increment_ms,
                     i32 *soft_ms, i32 *hard_ms) {
     i32 available, target;
@@ -440,8 +442,13 @@ void time_limits_ms(i32 remaining_ms, i16 moves_left, i32 increment_ms,
     else target += increment_ms;
     if (target < 1) target = 1;
     if (target > available) target = available;
-    *soft_ms = target;
-    *hard_ms = target > available / 3 ? available : target * 3;
+    if (moves_left == 1) {
+        *soft_ms = *hard_ms = available;
+    } else {
+        *soft_ms = target / 2;
+        if (*soft_ms < 1) *soft_ms = 1;
+        *hard_ms = target > available - target / 2 ? available : target + target / 2;
+    }
 }
 
 /* Refill only after the requisite moves, regardless of how fast the host
@@ -574,7 +581,7 @@ i16 vclock_selftest(void) {
     vcpu_khz = 25000;
     vclock_newgame();
     vclock_limits_ms(&soft, &hard);
-    if (soft != 180000L || hard != 540000L || vperiod_left != 40) ++failures;
+    if (soft != 90000L || hard != 270000L || vperiod_left != 40) ++failures;
     bank = vperiod_ms;
     vclock_set_limits(soft, hard);
 #ifdef VCLOCK
@@ -586,13 +593,14 @@ i16 vclock_selftest(void) {
     if (spent <= 0 || vperiod_ms != bank - spent || vperiod_left != 39) ++failures;
     if (vclock_soft_hit() || vclock_budget_hit()) ++failures;
     vclock_limits_ms(&soft, &hard);
-    if (soft != vperiod_ms / 39 || hard != soft * 3) ++failures;
+    if (soft != (vperiod_ms / 39) / 2 ||
+        hard != vperiod_ms / 39 + (vperiod_ms / 39) / 2) ++failures;
     for (i = 1; i < 40; ++i) { vclock_reset(); vclock_charge(); }
     vclock_limits_ms(&soft, &hard);
-    if (soft != 180000L || hard != 540000L || vperiod_left != 20) ++failures;
+    if (soft != 90000L || hard != 270000L || vperiod_left != 20) ++failures;
     for (i = 0; i < 20; ++i) { vclock_reset(); vclock_charge(); }
     vclock_limits_ms(&soft, &hard);
-    if (soft != 180000L || hard != 540000L || vperiod_left != 20) ++failures;
+    if (soft != 90000L || hard != 270000L || vperiod_left != 20) ++failures;
     vperiod_ms = 1000; vperiod_left = 1;
     vclock_limits_ms(&soft, &hard);
     if (soft != 970 || hard != 970) ++failures;
@@ -601,7 +609,7 @@ i16 vclock_selftest(void) {
     if (soft != 1 || hard != 1 || vperiod_left != 10) ++failures;
     vclock_newgame();
     vclock_limits_ms(&soft, &hard);
-    if (soft != 180000L || hard != 540000L || vperiod_left != 40) ++failures;
+    if (soft != 90000L || hard != 270000L || vperiod_left != 40) ++failures;
     printf("virtual selftest: failures=%d\n", failures);
     vclock_newgame();
     return failures;

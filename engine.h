@@ -275,8 +275,8 @@ void vclock_set_khz(i32 khz);
 void vclock_set_enabled(const char *val);
 void vclock_newgame(void);              /* reset the period clock for a new game */
 void vclock_reset(void);                /* reset per-move state + counters before a move */
-/* Common allocation: average time is the soft target, up to 3x that target
-   is the hard limit, bounded by the remaining bank minus output reserve. */
+/* Common allocation: soft = half the normal slice, hard = 1.5x the slice,
+   bounded by the bank minus reserve. The last move can use that whole bank. */
 void time_limits_ms(i32 remaining_ms, i16 moves_left, i32 increment_ms,
                     i32 *soft_ms, i32 *hard_ms);
 void vclock_limits_ms(i32 *soft_ms, i32 *hard_ms); /* refills periods */
