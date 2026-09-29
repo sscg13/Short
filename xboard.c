@@ -11,7 +11,8 @@ i16 g_half, g_full;              /* halfmove clock, fullmove number */
    (remove/undo) support, so this is the only move-history structure. */
 Sig g_sigs[MAX_G_SIGS];
 i16 g_sigs_n;
-static i16 xb_st = 0, xb_time_cs = 0;
+static i16 xb_st = 0;
+static i32 xb_time_cs = -1; /* full 2-hour clock fits; -1 = GUI has not sent time */
 static i16 xb_level_mps = 0, xb_level_inc = 0;   /* "level mps base inc" control */
 
 static FILE *fdbg;                      /* protocol debug log (chess_debug.txt) */
@@ -177,41 +178,34 @@ static void xb_go(void) {
         game_over = 1;
         return;
     }
-    if (vtime_mode) {
-        /* virtual clock: ignore the GUI entirely; the budget is the 40/2h+
-           20/1h control at CPU_model/CPU_KHz speed (see vclock.c) */
-        i32 bms = vclock_budget_ms();
-        vclock_reset();
-        vclock_set_budget(bms);
-        deadline = 0;
-        dbgf("go(virtual): model=%d khz=%ld budget_ms=%ld\n",
-             vcpu_model, (long)vcpu_khz, (long)bms);
-    } else {
-        i32 budget = 3000;
-        i32 remaining_ms = (i32)xb_time_cs * 10;
-        if (xb_st > 0) {
-            budget = (i32)xb_st * 1000;         /* fixed seconds per move */
-        } else if (xb_level_mps > 0) {
-            /* tournament control "level mps base inc": remaining/mps + increment */
-            if (remaining_ms > 0)
-                budget = remaining_ms / xb_level_mps + (i32)xb_level_inc * 1000;
-        } else if (xb_time_cs > 0) {
-            i32 cs = xb_time_cs / 40;           /* ~1/40 of remaining clock */
-            if (cs < 50) cs = 50;
-            budget = cs * 10;                    /* centiseconds -> ms */
+    {
+        i32 soft_ms, hard_ms;
+        if (vtime_mode) {
+            vclock_limits_ms(&soft_ms, &hard_ms);
+            vclock_reset();
+            vclock_set_limits(soft_ms, hard_ms);
+            search_set_limits(0, 0);
+            dbgf("go(virtual): model=%d khz=%ld soft_ms=%ld hard_ms=%ld\n",
+                 vcpu_model, (long)vcpu_khz, (long)soft_ms, (long)hard_ms);
+        } else {
+            i32 remaining_ms = xb_time_cs >= 0 ? xb_time_cs * 10 : 0;
+            if (xb_st > 0) {
+                /* Fixed move time is a cap, not a bank to borrow from. */
+                i32 available = (i32)xb_st * 1000;
+                if (xb_time_cs >= 0 && remaining_ms < available) available = remaining_ms;
+                hard_ms = available > TIME_MARGIN_MS ? available - TIME_MARGIN_MS : 1;
+                soft_ms = hard_ms;
+            } else if (xb_time_cs >= 0) {
+                i16 moves_left = xb_level_mps > 0
+                    ? xb_level_mps - ((g_full > 0 ? g_full - 1 : 0) % xb_level_mps) : 40;
+                time_limits_ms(remaining_ms, moves_left, (i32)xb_level_inc * 1000,
+                               &soft_ms, &hard_ms);
+            } else soft_ms = hard_ms = 3000 - TIME_MARGIN_MS;
+            search_set_limits(soft_ms, hard_ms);
+            dbgf("go: side=%d st=%d time_cs=%ld level=%d+%d soft_ms=%ld hard_ms=%ld\n",
+                 gpos.side, xb_st, (long)xb_time_cs, xb_level_mps, xb_level_inc,
+                 (long)soft_ms, (long)hard_ms);
         }
-        /* never allocate more than the time actually left (minus the margin) */
-        if (remaining_ms > TIME_MARGIN_MS + 100 && budget > remaining_ms - TIME_MARGIN_MS)
-            budget = remaining_ms - TIME_MARGIN_MS;
-        if (budget < 100) budget = 100;
-        /* deadline is in clock() ticks; budget/TIME_MARGIN_MS are ms, so scale
-           by CLOCKS_PER_SEC/1000 (a no-op where CLOCKS_PER_SEC == 1000, exact
-           on Linux gcc where it is 1,000,000 - otherwise a 3 s move would
-           abort after ~3 ms there). */
-        deadline = (i32)(clock() + (long)(budget - TIME_MARGIN_MS) * CLOCKS_PER_SEC / 1000);
-        dbgf("go: side=%d st=%d time_cs=%ld level=%d+%d budget=%ld deadline=%ld\n",
-             gpos.side, xb_st, (long)xb_time_cs, xb_level_mps, xb_level_inc,
-             (long)budget, (long)deadline);
     }
     m = think(&gpos, 10);
     if (vtime_mode) {
@@ -219,7 +213,7 @@ static void xb_go(void) {
         i32 cms = vclock_charge();
         dbgf("vclock nodes=%ld consumed=%ldms\n", (long)cn, (long)cms);
     }
-    deadline = 0;
+    search_set_limits(0, 0);
     stop_now = 0;
     if (m == 0) m = first;
     move_to_coord(m, b);
@@ -233,8 +227,8 @@ static void xb_reset(void) {
     g_sigs[g_sigs_n++] = pos_sig(&gpos);
     tt_clear();                              /* fresh game: empty the TT */
     force_mode = 1; game_over = 0;
-    stop_now = 0; deadline = 0;          /* keep xb_time_cs/xb_st/post_on: WinBoard
-                                            re-sends them at each new game anyway */
+    stop_now = 0; search_set_limits(0, 0);
+    /* Keep time/st/post: WinBoard re-sends them at each new game. */
     vclock_newgame();
 }
 
@@ -300,7 +294,7 @@ int xboard_main(void) {
             g_sigs[g_sigs_n++] = pos_sig(&gpos);
             tt_clear();                              /* fresh position: empty the TT */
             force_mode = 1; game_over = 0;
-            stop_now = 0; deadline = 0;
+            stop_now = 0; search_set_limits(0, 0);
             vclock_newgame();
         } else if (strncmp(p, "force", 5) == 0) {
             force_mode = 1;
@@ -322,15 +316,18 @@ int xboard_main(void) {
                 if (!force_mode && !game_over) xb_go();
             }
         } else if (strncmp(p, "time", 4) == 0) {
-            xb_time_cs = atoi(skipsp(p + 4));
+            xb_time_cs = atol(skipsp(p + 4));
+            if (xb_time_cs < 0) xb_time_cs = 0;
+            if (xb_time_cs > 8640000L) xb_time_cs = 8640000L; /* at most 24 h */
         } else if (strncmp(p, "otim", 4) == 0) {
         } else if (strncmp(p, "st", 2) == 0) {
             xb_st = atoi(skipsp(p + 2));
         } else if (strncmp(p, "level", 5) == 0) {
             int mps = 0, base = 0, inc = 0;
             sscanf(skipsp(p + 5), "%d %d %d", &mps, &base, &inc);
-            xb_level_mps = mps;
-            xb_level_inc = inc;
+            xb_st = 0;                      /* level replaces fixed move time */
+            xb_level_mps = mps > 0 ? mps : 0;
+            xb_level_inc = inc > 0 ? inc : 0;
         } else if (strncmp(p, "ping", 4) == 0) {
             xb_outf("pong %s", skipsp(p + 4));
         } else if (strncmp(p, "quit", 4) == 0) {

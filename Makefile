@@ -32,7 +32,7 @@ EVALFILE ?= chess-v2-finetune.net
 CFLAGS  ?= -O2 -Wall -Wextra -Werror
 override CFLAGS += -DVCLOCK -DNN_EMBED_FILE=$(EVALFILE)
 SRCS    := chess.c search.c xboard.c nnue.c vclock.c tt.c
-HDRS    := engine.h repetition.inc repetition_test.inc see_test.inc
+HDRS    := engine.h repetition.inc repetition_test.inc see_test.inc time_test.inc
 OBJS    := $(SRCS:.c=.o)
 
 TARGET  := $(if $(EXE),$(EXE),chess_gcc)

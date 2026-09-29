@@ -169,7 +169,8 @@ extern Sig g_sigs[MAX_G_SIGS];          /* position signatures for repetition */
 extern i16 g_sigs_n;
 extern u16 movebuf[32][256];            /* move lists, one row per search ply + aux */
 extern volatile i16 stop_now;
-extern i32 deadline;                    /* ms deadline, 0 = no limit */
+extern clock_t deadline, soft_deadline; /* clock() ticks; 0 = no limit */
+void search_set_limits(i32 soft_ms, i32 hard_ms);
 extern i16 post_on;
 
 /* ---- search.c ---- */
@@ -207,6 +208,10 @@ void lmr_build(void);             /* one-time LMR log-table generator (dedicated
 int bench(int depth);
 int profile(int depth);
 int sbench(void);
+#ifdef TIME_TEST
+int time_selftest(void);
+i16 vclock_selftest(void);
+#endif
 
 /* ---- xboard.c ---- */
 void dbgf(const char *fmt, ...);
@@ -270,9 +275,14 @@ void vclock_set_khz(i32 khz);
 void vclock_set_enabled(const char *val);
 void vclock_newgame(void);              /* reset the period clock for a new game */
 void vclock_reset(void);                /* reset per-move state + counters before a move */
-i32 vclock_budget_ms(void);             /* per-move virtual budget in ms (refills periods) */
-void vclock_set_budget(i32 budget_ms);  /* set the move's stop condition from its budget */
-i16 vclock_budget_hit(void);            /* 1 = the move's virtual budget is consumed */
+/* Common allocation: average time is the soft target, up to 3x that target
+   is the hard limit, bounded by the remaining bank minus output reserve. */
+void time_limits_ms(i32 remaining_ms, i16 moves_left, i32 increment_ms,
+                    i32 *soft_ms, i32 *hard_ms);
+void vclock_limits_ms(i32 *soft_ms, i32 *hard_ms); /* refills periods */
+void vclock_set_limits(i32 soft_ms, i32 hard_ms);
+i16 vclock_soft_hit(void);             /* checked only after a completed depth */
+i16 vclock_budget_hit(void);           /* hard limit; checked during search */
 i32 vclock_charge(void);                /* deduct the move's consumed time; returns consumed ms */
 #ifdef VCLOCK
 i32 vclock_est_nps(i32 nodes);          /* weighted-model NPS for the modeled CPU (bench output) */
