@@ -8,7 +8,31 @@ static u32 timing_bios_ticks(void);
 #endif
 
 volatile i16 stop_now = 0;
-i32 deadline = 0;                   /* ms deadline, 0 = no limit */
+clock_t deadline = 0, soft_deadline = 0; /* absolute clock() ticks */
+
+/* Convert without overflowing ms * CLOCKS_PER_SEC on 32-bit hosts. Limits
+   are set once per move; the search only compares native clock_t values. */
+static clock_t ms_ticks(i32 ms) {
+    clock_t ticks = (clock_t)(ms / 1000) * CLOCKS_PER_SEC
+                 + (clock_t)(ms % 1000) * CLOCKS_PER_SEC / 1000;
+    return ticks > 0 ? ticks : 1;
+}
+
+void search_set_limits(i32 soft_ms, i32 hard_ms) {
+    if (hard_ms > 0) {
+        clock_t now = clock();
+        deadline = now + ms_ticks(hard_ms);
+        soft_deadline = soft_ms > 0 ? now + ms_ticks(soft_ms) : 0;
+    } else deadline = soft_deadline = 0;
+}
+
+#ifdef TIME_TEST
+static i16 time_test_depth, time_test_clock_calls, time_test_fake_clock;
+static clock_t time_test_clock(void);
+#define search_clock() time_test_clock()
+#else
+#define search_clock() clock()
+#endif
 
 #if defined(PROFILE) || defined(VCLOCK)
 i32 c_anodes = 0;                   /* alphabeta entries */
@@ -260,7 +284,10 @@ static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd)
     PCOUNT(c_qnodes);
     nodes_search++;
     vtotal_nodes++;
-    if ((nodes_search & 0x3FF) == 0 && deadline > 0 && (long)clock() >= deadline)
+    /* Virtual mode must never consult the host clock for either limit.
+       Real time is polled every 64 nodes, including quiescence. */
+    if (!vtime_mode && (nodes_search & 63) == 0 &&
+        deadline > 0 && search_clock() >= deadline)
         stop_now = 1;
     if (vtime_mode && vclock_budget_hit())
         stop_now = 1;
@@ -340,7 +367,10 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
     PCOUNT(c_anodes);
     nodes_search++;
     vtotal_nodes++;
-    if ((nodes_search & 0x3FF) == 0 && deadline > 0 && (long)clock() >= deadline)
+    /* Virtual mode must never consult the host clock for either limit.
+       Real time is polled every 64 nodes, including quiescence. */
+    if (!vtime_mode && (nodes_search & 63) == 0 &&
+        deadline > 0 && search_clock() >= deadline)
         stop_now = 1;
     if (vtime_mode && vclock_budget_hit())
         stop_now = 1;
@@ -682,10 +712,13 @@ static void print_move(u16 m) {
 
 /* iterative deepening root search; returns best move (0 if aborted before any depth) */
 u16 think(Pos *p, i16 maxdepth) {
-    i16 d, i;
+    i16 d, i, completed_depth = 0;
     u16 bestm = 0;
     Score prev = -INF;
-    i32 t0 = (i32)clock();
+    clock_t t0 = clock();
+#ifdef TIME_TEST
+    time_test_depth = 0;
+#endif
     dbgf("think begin maxdepth=%d deadline=%ld\n", maxdepth, (long)deadline);
     root_n = gen_moves(p, root_m);
     for (i = 0; i < root_n; i++) root_score[i] = 0;
@@ -695,8 +728,9 @@ u16 think(Pos *p, i16 maxdepth) {
         u16 bm = 0;
         i16 delta = ASP_DELTA;
         pv_len[0] = 0;
-        if (deadline > 0 && (long)clock() >= deadline) break;
-        if (vtime_mode && vclock_budget_hit()) break;
+        if (vtime_mode) {
+            if (vclock_budget_hit()) break;
+        } else if (deadline > 0 && search_clock() >= deadline) break;
         if (d >= 2 && prev > -(MATE - MAXPLY) && prev < MATE - MAXPLY) {
             asp_lo = prev - delta;
             asp_hi = prev + delta;
@@ -762,6 +796,10 @@ u16 think(Pos *p, i16 maxdepth) {
         if (stop_now) break;
         prev = bsc;
         bestm = bm;
+        completed_depth = d;
+#ifdef TIME_TEST
+        time_test_depth = d;
+#endif
         if (post_on) {
             /* CECP §10 thinking output: ply score time(cs) nodes [*seldepth *speed *tbhits] pv.
                The optional ints are parsed seldepth speed tbhits (last = tbhits), so emit a
@@ -774,18 +812,21 @@ u16 think(Pos *p, i16 maxdepth) {
             printf("\n");
             fflush(stdout);
         }
+        /* A soft stop uses the last fully completed depth, including all
+           aspiration retries. A hard stop can interrupt those retries. */
+        if (vtime_mode ? vclock_soft_hit() :
+            (soft_deadline > 0 && search_clock() >= soft_deadline)) break;
     }
-    dbgf("think end bestm=%04X stop=%d d=%d\n", (unsigned)bestm, (int)stop_now, d - 1);
-    /* safety net: bestm must be one of the generated root moves. A corrupt
-       search/TT state must never leak an illegal move to the GUI; fall back
-       to the first legal root move and log it. */
+    dbgf("think end bestm=%04X stop=%d d=%d\n", (unsigned)bestm, (int)stop_now, completed_depth);
+    /* Zero means no depth completed: xb_go already has a legal fallback.
+       Do not return a merely pseudo-legal root move after an early timeout. */
     {
         i16 k2, have = 0;
         for (k2 = 0; k2 < root_n; k2++)
             if (root_m[k2] == bestm) { have = 1; break; }
         if (!have) {
-            dbgf("think bestm=%04X NOT a root move - fallback to root_m[0]\n", (unsigned)bestm);
-            bestm = (root_n > 0) ? root_m[0] : 0;
+            if (bestm) dbgf("think bestm=%04X NOT a root move\n", (unsigned)bestm);
+            bestm = 0;
         }
     }
     nnue_active = 0;
@@ -835,7 +876,7 @@ int bench(int depth) {
 
     if (depth < 1) depth = BENCH_DEPTH;
     if (depth > 20) depth = 20;
-    deadline = 0;                                /* keep the search timing-independent */
+    search_set_limits(0, 0);                     /* keep the search timing-independent */
     stop_now = 0;
     /* zero the per-move vclock state too (always present, not just under
        VCLOCK): a stale vmax_nodes from a prior virtual-time game in the same
@@ -987,7 +1028,7 @@ int profile(int depth) {
 
     if (depth < 1) depth = BENCH_DEPTH;
     if (depth > 20) depth = 20;
-    deadline = 0;                                /* keep the search timing-independent */
+    search_set_limits(0, 0);                     /* keep the search timing-independent */
     stop_now = 0;
     vclock_reset();   /* clear a stale virtual-time budget like bench() does */
 
@@ -1238,4 +1279,8 @@ static u32 timing_bios_ticks(void) {
 
 #ifdef SEE_TEST
 #include "see_test.inc"
+#endif
+
+#ifdef TIME_TEST
+#include "time_test.inc"
 #endif

@@ -4,8 +4,9 @@
    `otim`, `st`, `level`) and paces itself as if it were a real CPU_model @
    CPU_KHz. Each move is granted a virtual time budget (180 s/move on average,
    time banked within the current period, hard flag at move 40 and every 20
-   after that), and the search is stopped once the estimated cost of the work
-   it has done reaches that budget. See TESTING.md
+   after that). Stop deepening after half the average allocation, with a
+   1.5x-average hard cap. The last move before a refill can use the bank.
+   Both limits use estimated work, never elapsed host time. See TESTING.md
    sections 2, 5 and 7.
 
    Cost model:
@@ -226,7 +227,10 @@ i32 vcpu_khz = 25000;       /* CPU_KHz: cycles per ms of the modeled CPU */
 i16 vcpu_model = VCPU_80286; /* CPU_model index */
 
 i32 vtotal_nodes = 0;       /* nodes searched so far in the current move */
-i32 vmax_nodes = 0;         /* scalar node cap for the current move (0 = none) */
+i32 vmax_nodes = 0;         /* scalar hard node cap (0 = none) */
+#ifndef VCLOCK
+static i32 vsoft_nodes;
+#endif
 
 /* virtual period state: 40 moves in 2 h, then 20 moves per 1 h, repeating */
 static i32 vperiod_ms;      /* virtual ms left in the current period */
@@ -244,7 +248,7 @@ static const i32 cpn_tab[4][2] = {
 #endif
 
 #ifdef VCLOCK
-static i64 vbudget_cyc;   /* weighted cycle budget for the current move */
+static i64 vbudget_cyc, vsoft_cyc; /* weighted hard/soft limits */
 
 typedef struct { i32 att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm, tp, ts; } VW;
 static const VW vw_tab[4] = {
@@ -403,8 +407,11 @@ void vclock_newgame(void) {
 void vclock_reset(void) {
     vtotal_nodes = 0;
     vmax_nodes = 0;
+#ifndef VCLOCK
+    vsoft_nodes = 0;
+#endif
 #ifdef VCLOCK
-    vbudget_cyc = 0;
+    vbudget_cyc = vsoft_cyc = 0;
     c_anodes = c_qnodes = c_nextmove = 0;
     c_make = c_undo = c_gen_moves = c_gen_caps = c_gen_quiets = 0;
     c_nn_make = c_nn_undo = c_nn_eval = c_refresh = c_flip = 0;
@@ -417,32 +424,75 @@ void vclock_reset(void) {
 #endif
 }
 
-/* per-move virtual budget in ms; refills the current period when it is spent.
-   The first period is 40 moves in 2 h, every later period 20 moves in 1 h, so
-   the per-move average is 180 s throughout. */
-i32 vclock_budget_ms(void) {
+/* Conservative allocation shared by the real and virtual clocks. Stop
+   after a complete depth at half the normal slice; the hard limit is 1.5x
+   that slice. This banks time rather than routinely overspending the average.
+   The last move before a refill can use the bank minus output reserve.
+   Increment arrives afterwards, so it cannot raise the current bank cap. */
+void time_limits_ms(i32 remaining_ms, i16 moves_left, i32 increment_ms,
+                    i32 *soft_ms, i32 *hard_ms) {
+    i32 available, target;
+    if (remaining_ms < 0) remaining_ms = 0;
+    if (moves_left < 1) moves_left = 40;
+    if (increment_ms < 0) increment_ms = 0;
+    available = remaining_ms > TIME_MARGIN_MS ? remaining_ms - TIME_MARGIN_MS : 1;
+    target = remaining_ms / moves_left;
+    /* Avoid overflowing if a caller supplies a very large increment. */
+    if (increment_ms >= available - target) target = available;
+    else target += increment_ms;
+    if (target < 1) target = 1;
+    if (target > available) target = available;
+    if (moves_left == 1) {
+        *soft_ms = *hard_ms = available;
+    } else {
+        *soft_ms = target / 2;
+        if (*soft_ms < 1) *soft_ms = 1;
+        *hard_ms = target > available - target / 2 ? available : target + target / 2;
+    }
+}
+
+/* Refill only after the requisite moves, regardless of how fast the host
+   runs or what time/level/st the GUI sends. Charge actual work afterwards. */
+void vclock_limits_ms(i32 *soft_ms, i32 *hard_ms) {
     if (!vperiod_started || vperiod_left <= 0) {
-        if (!vperiod_started) {               /* period 1: 40 moves in 2 h */
+        if (!vperiod_started) {
             vperiod_ms = 7200L * 1000L;
             vperiod_left = 40;
             vperiod_started = 1;
-        } else {                              /* repeating: 20 moves in 1 h */
+        } else {
             vperiod_ms = 3600L * 1000L;
             vperiod_left = 20;
         }
     }
-    return vperiod_ms / vperiod_left;
+    time_limits_ms(vperiod_ms, vperiod_left, 0, soft_ms, hard_ms);
 }
 
-/* set the stop condition for the current move from its virtual budget */
-void vclock_set_budget(i32 budget_ms) {
+#ifndef VCLOCK
+static i32 vclock_node_limit(i32 ms) {
+    i32 cpn = cpn_tab[vcpu_model][nnue_enabled ? 0 : 1], cap;
+    if (ms <= 0) return 0;
+    cap = (i32)(((u32)ms / 100) * (u32)vcpu_khz / ((u32)cpn / 100));
+    /* A tiny or empty bank still has a stop condition. */
+    return cap > 0 ? cap : 1;
+}
+#endif
+
+void vclock_set_limits(i32 soft_ms, i32 hard_ms) {
 #ifdef VCLOCK
-    vbudget_cyc = (i64)budget_ms * vcpu_khz;
+    vsoft_cyc = (i64)soft_ms * vcpu_khz;
+    vbudget_cyc = (i64)hard_ms * vcpu_khz;
 #else
-    i32 cpn = cpn_tab[vcpu_model][nnue_enabled ? 0 : 1];
-    if (budget_ms <= 0 || cpn < 100) vmax_nodes = 0;
-    else vmax_nodes = (i32)(((u32)budget_ms / 100) * (u32)vcpu_khz
-                            / ((u32)cpn / 100));
+    vsoft_nodes = vclock_node_limit(soft_ms);
+    vmax_nodes = vclock_node_limit(hard_ms);
+#endif
+}
+
+/* The soft target never interrupts a partially searched depth. */
+i16 vclock_soft_hit(void) {
+#ifdef VCLOCK
+    return vsoft_cyc > 0 && vclock_cyc() >= vsoft_cyc;
+#else
+    return vsoft_nodes > 0 && vtotal_nodes >= vsoft_nodes;
 #endif
 }
 
@@ -473,8 +523,95 @@ i32 vclock_charge(void) {
     if (vperiod_left > 0) vperiod_left--;
     vtotal_nodes = 0;
     vmax_nodes = 0;
+#ifndef VCLOCK
+    vsoft_nodes = 0;
+#endif
 #ifdef VCLOCK
-    vbudget_cyc = 0;
+    vbudget_cyc = vsoft_cyc = 0;
 #endif
     return vms;
 }
+
+#ifdef TIME_TEST
+i16 vclock_selftest(void) {
+    i16 failures = 0, model, i;
+    i32 soft, hard, bank, spent;
+    for (model = VCPU_80286; model <= VCPU_80186; ++model) {
+        vcpu_model = model;
+        vcpu_khz = 25000;
+        vclock_reset();
+        vclock_set_limits(10000, 30000);
+#ifdef VCLOCK
+        {
+            const VW *w = &vw_tab[model];
+            i32 unit = (nnue_enabled ? w->rn : w->rm) + rep_cost[model].fixed;
+            i32 at_soft = (i32)((vsoft_cyc + unit - 1) / unit);
+            i32 at_hard = (i32)((vbudget_cyc + unit - 1) / unit);
+            c_qnodes = at_soft - 1;
+            if (vclock_soft_hit() || vclock_budget_hit()) ++failures;
+            c_qnodes = at_soft;
+            if (!vclock_soft_hit() || vclock_budget_hit()) ++failures;
+            c_qnodes = at_hard - 1;
+            if (!vclock_soft_hit() || vclock_budget_hit()) ++failures;
+            c_qnodes = at_hard;
+            if (!vclock_budget_hit()) ++failures;
+        }
+#else
+        vtotal_nodes = vsoft_nodes - 1;
+        if (vclock_soft_hit() || vclock_budget_hit()) ++failures;
+        vtotal_nodes = vsoft_nodes;
+        if (!vclock_soft_hit() || vclock_budget_hit()) ++failures;
+        vtotal_nodes = vmax_nodes - 1;
+        if (!vclock_soft_hit() || vclock_budget_hit()) ++failures;
+        vtotal_nodes = vmax_nodes;
+        if (!vclock_budget_hit()) ++failures;
+#endif
+        vclock_set_limits(0, 0);
+        if (vclock_soft_hit() || vclock_budget_hit()) ++failures;
+        vclock_reset();
+        vclock_set_limits(1, 1);
+#ifdef VCLOCK
+        c_qnodes = 100;
+#else
+        vtotal_nodes = 100;
+#endif
+        if (!vclock_soft_hit() || !vclock_budget_hit()) ++failures;
+    }
+    vcpu_model = VCPU_80286;
+    vcpu_khz = 25000;
+    vclock_newgame();
+    vclock_limits_ms(&soft, &hard);
+    if (soft != 90000L || hard != 270000L || vperiod_left != 40) ++failures;
+    bank = vperiod_ms;
+    vclock_set_limits(soft, hard);
+#ifdef VCLOCK
+    c_qnodes = 1000;
+#else
+    vtotal_nodes = 1000;
+#endif
+    spent = vclock_charge();
+    if (spent <= 0 || vperiod_ms != bank - spent || vperiod_left != 39) ++failures;
+    if (vclock_soft_hit() || vclock_budget_hit()) ++failures;
+    vclock_limits_ms(&soft, &hard);
+    if (soft != (vperiod_ms / 39) / 2 ||
+        hard != vperiod_ms / 39 + (vperiod_ms / 39) / 2) ++failures;
+    for (i = 1; i < 40; ++i) { vclock_reset(); vclock_charge(); }
+    vclock_limits_ms(&soft, &hard);
+    if (soft != 90000L || hard != 270000L || vperiod_left != 20) ++failures;
+    for (i = 0; i < 20; ++i) { vclock_reset(); vclock_charge(); }
+    vclock_limits_ms(&soft, &hard);
+    if (soft != 90000L || hard != 270000L || vperiod_left != 20) ++failures;
+    vperiod_ms = 1000; vperiod_left = 1;
+    vclock_limits_ms(&soft, &hard);
+    if (soft != 970 || hard != 970) ++failures;
+    vperiod_ms = 0; vperiod_left = 10;
+    vclock_limits_ms(&soft, &hard);
+    if (soft != 1 || hard != 1 || vperiod_left != 10) ++failures;
+    vclock_newgame();
+    vclock_limits_ms(&soft, &hard);
+    if (soft != 90000L || hard != 270000L || vperiod_left != 40) ++failures;
+    printf("virtual selftest: failures=%d\n", failures);
+    vclock_newgame();
+    return failures;
+}
+#endif

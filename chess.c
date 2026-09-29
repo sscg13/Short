@@ -980,6 +980,9 @@ int main(int argc, char **argv) {
 #ifdef REP_TEST
     if (argc > 1 && strcmp(argv[1], "reptest") == 0) return repetition_selftest();
 #endif
+#ifdef TIME_TEST
+    if (argc > 1 && strcmp(argv[1], "timetest") == 0) return time_selftest();
+#endif
 #ifdef SEE_TEST
     if (argc > 1 && strcmp(argv[1], "seetest") == 0) return see_selftest();
     if (argc > 1 && strcmp(argv[1], "seebench") == 0) return see_microbench();
