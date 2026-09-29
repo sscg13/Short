@@ -715,7 +715,7 @@ u16 think(Pos *p, i16 maxdepth) {
     i16 d, i, completed_depth = 0;
     u16 bestm = 0;
     Score prev = -INF;
-    clock_t t0 = clock();
+    clock_t t0 = vtime_mode ? 0 : clock();
 #ifdef TIME_TEST
     time_test_depth = 0;
 #endif
@@ -804,10 +804,14 @@ u16 think(Pos *p, i16 maxdepth) {
             /* CECP §10 thinking output: ply score time(cs) nodes [*seldepth *speed *tbhits] pv.
                The optional ints are parsed seldepth speed tbhits (last = tbhits), so emit a
                0 tbhits to keep speed from being misread. */
-            i32 cs = (i32)((clock() - t0) / (CLOCKS_PER_SEC / 100));
-            i32 nps = (cs > 0) ? (nodes_search / cs * 100 + (nodes_search % cs) * 100 / cs) : 0;
+            /* Virtual elapsed time includes earlier depths and aspiration
+               retries, so report their cumulative nodes and modeled NPS too. */
+            i32 cs = vtime_mode ? vclock_elapsed_ms() / 10
+                               : (i32)((clock() - t0) / (CLOCKS_PER_SEC / 100));
+            i32 reported_nodes = vtime_mode ? vtotal_nodes : nodes_search;
+            i32 nps = (cs > 0) ? (reported_nodes / cs * 100 + (reported_nodes % cs) * 100 / cs) : 0;
             printf("%d %ld %ld %ld %d %ld 0\t", d, (long)score_to_cecp(bsc), (long)cs,
-                   (long)nodes_search, d, (long)nps);
+                   (long)reported_nodes, d, (long)nps);
             for (i = 0; i < pv_len[0]; i++) print_move(pv[0][i]);
             printf("\n");
             fflush(stdout);

@@ -18,3 +18,9 @@ trainer/*
 /artifacts/nnue-speedups/
 /artifacts/speedup-validation/
 /artifacts/tt-correctness/
+# Local historical-opponent integrations and calibration runs.
+/opponents/
+/worktrees/
+/artifacts/hiarcs/
+/artifacts/virtual-post/
+/artifacts/cpu-recalibration/

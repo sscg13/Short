@@ -241,9 +241,9 @@ static i16 vperiod_started; /* first period not yet granted */
 #ifndef VCLOCK
 static const i32 cpn_tab[4][2] = {
     { 41400L, 24275L }, /* 286 NNUE: measured SEE bench 1; material remains estimated */
-    { 130300L, 73455L }, /* 8088 NNUE: candidate weighted-model estimate */
-    { 113000L, 62289L }, /* 8086 NNUE: candidate weighted-model estimate */
-    { 62800L, 35540L }, /* 80186 NNUE: candidate weighted-model estimate */
+    { 122600L, 76500L }, /* 8088: measured depth-2 NNUE / material */
+    { 106700L, 65600L }, /* 8086: measured depth-2 NNUE / material */
+    { 60800L, 43300L },  /* 80186: measured depth-3 NNUE / material */
 };
 #endif
 
@@ -254,11 +254,21 @@ typedef struct { i32 att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm, tp, ts; } VW;
 static const VW vw_tab[4] = {
     /*   att    ps     gc     gq      gm     mk    nm   rf    ev     rn      rm      tp    ts */
     {  1894,     0, 13868, 15792, 162305, 1009, 1059, 3164,  5109,   6984,   9962,   660,  495 }, /* 80286 */
-    {  5237,     0, 41727, 47613, 551447, 3268, 3433,10370, 15600,  22717,  28357,  2195, 2087 }, /* 8088 */
-    {  4504,     0, 35890, 41003, 491587, 2842, 3068, 9535, 13072,  19297,  23663,  1840, 1648 }, /* 8086 */
-    {  2714,   140, 21359, 24059, 250050, 1595, 1641, 5059,  7535,  10174,  13609,  1165, 1009 }, /* 80186 */
+    {  5237,     0, 41727, 47613, 551447, 3268, 3433,10370, 15600,  28317,  35057,  2195, 2087 }, /* 8088 */
+    {  4504,     0, 35890, 41003, 491587, 2842, 3068, 9535, 13072,  23997,  29563,  1840, 1648 }, /* 8086 */
+    {  2714,   140, 21359, 24059, 250050, 1595, 1641, 5059,  7535,  11674,  15909,  1165, 1009 }, /* 80186 */
 };
-/* CURRENT CALIBRATION (2026-09-26): measured after Zobrist/king-attack changes,
+/* LEGACY CPU RE-FIT (2026-09-29): current -0 -ml -ox DOS source on the 86Box
+   8088 @16 MHz and 8086 @8 MHz interpreter VMs and MAME Nimbus 80186 @8 MHz.
+   SEE microbenchmarks give maximum uninstrumented scan residuals of 7486,
+   6646 and 3706 cycles. The scan charges below round those up with at least
+   20% headroom. Keep the previously measured primitive weights and fit only
+   rn/rm to whole, unprofiled eight-position searches. Depths 1/2 are measured
+   on all three CPUs, plus depth 3 on Nimbus. Weighted NNUE errors are within
+   0.5% on 8088/8086 and 1.3% on 80186 across these suites; material errors
+   stay within 3.8%. Scalar rows use measured cycles/node from the deepest
+   suite on each CPU. The 286 row is unchanged. */
+/* PREVIOUS PRIMITIVE CALIBRATION (2026-09-26): measured after Zobrist/king-attack changes,
    generated forward/batch improvements, and lazy NNUE accumulator updates.
    Board primitives use the unchanged full sbench driver. Forward is measured
    with valid accumulators; nbench separately measures plan-only and fully
@@ -267,8 +277,8 @@ static const VW vw_tab[4] = {
    cost per perspective. The quiet/capture and mirror-refresh cost differences
    remain approximations covered by fitted rn/rm, not separately exact terms.
    Native profile-1 counters and uninstrumented full NNUE/material timings fit
-   the remaining per-node overhead. All four rows reproduce their measured
-   10037/9949-node calibration totals within integer rounding. 86Box pos_sig
+   the remaining per-node overhead. Before the re-fit above, all four rows
+   reproduced their 10037/9949-node calibration totals within integer rounding. 86Box pos_sig
    samples are below useful timer resolution, so ps remains absorbed in rn/rm;
    Nimbus uses its exact marker measurement. See SPEEDUP_VALIDATION.md and
    artifacts/speedup-validation/calibration.json for inputs and reproduction.
@@ -334,15 +344,16 @@ static const RepCost rep_cost[4] = {
    is 4658 cycles (legal king recapture). A whole-search cross-check needs
    another ~1400 cycles/scan to cover the averaged primitive costs' residual;
    use 6200, predicting slightly MORE than the measured 178950000 cycles.
-   Charge the full scan rate even when a pawn/knight exits early. Other CPU
-   rows are estimates scaled by their existing attack-cost ratios.
+   Charge the full scan rate even when a pawn/knight exits early. The 8088,
+   8086 and 80186 rows were remeasured directly on the current build, with
+   20% headroom over the slowest isolated scan and a whole-search rn/rm fit.
    Reproduce with -DSEE_TEST, `chess seebench`; native PROFILE supplies counts. */
 typedef struct { i32 entry, step; } SeeCost;
 static const SeeCost see_cost[4] = {
     { 450, 6200 },    /* 80286: measured with whole-search headroom */
-    { 1300, 17200 },  /* 8088: estimate */
-    { 1100, 14800 },  /* 8086: estimate */
-    { 650, 8900 },    /* 80186: estimate */
+    { 1300, 9000 },   /* 8088: measured, with headroom */
+    { 1100, 8000 },   /* 8086: measured, with headroom */
+    { 650, 5000 },    /* 80186: measured, with headroom */
 };
 
 static i64 vclock_cyc(void) {
@@ -505,19 +516,24 @@ i16 vclock_budget_hit(void) {
 #endif
 }
 
-/* charge the current period the virtual ms the completed move consumed and
-   close out its bookkeeping; returns the consumed virtual ms. */
-i32 vclock_charge(void) {
-    i32 vms;
+/* Read the same modeled elapsed time used to charge the bank. Thinking
+   output can query this after each depth without changing move bookkeeping. */
+i32 vclock_elapsed_ms(void) {
 #ifdef VCLOCK
-    vms = (i32)(vclock_cyc() / vcpu_khz);
+    return (i32)(vclock_cyc() / vcpu_khz);
 #else
     i32 cpn = cpn_tab[vcpu_model][nnue_enabled ? 0 : 1];
     if (vtotal_nodes > 0 && cpn >= 100 && vcpu_khz >= 100)
-        vms = (i32)(((u32)vtotal_nodes / 100) * (u32)cpn
-                    / ((u32)vcpu_khz / 100));
-    else vms = 0;
+        return (i32)(((u32)vtotal_nodes / 100) * (u32)cpn
+                     / ((u32)vcpu_khz / 100));
+    return 0;
 #endif
+}
+
+/* charge the current period the virtual ms the completed move consumed and
+   close out its bookkeeping; returns the consumed virtual ms. */
+i32 vclock_charge(void) {
+    i32 vms = vclock_elapsed_ms();
     vperiod_ms -= vms;
     if (vperiod_ms < 0) vperiod_ms = 0;
     if (vperiod_left > 0) vperiod_left--;

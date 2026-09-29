@@ -283,6 +283,7 @@ void vclock_limits_ms(i32 *soft_ms, i32 *hard_ms); /* refills periods */
 void vclock_set_limits(i32 soft_ms, i32 hard_ms);
 i16 vclock_soft_hit(void);             /* checked only after a completed depth */
 i16 vclock_budget_hit(void);           /* hard limit; checked during search */
+i32 vclock_elapsed_ms(void);           /* current move's modeled time; does not charge the bank */
 i32 vclock_charge(void);                /* deduct the move's consumed time; returns consumed ms */
 #ifdef VCLOCK
 i32 vclock_est_nps(i32 nodes);          /* weighted-model NPS for the modeled CPU (bench output) */
