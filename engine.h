@@ -153,6 +153,7 @@ extern i32 c_flip;          /* mirror-flip recompute paths (nnue_make) */
 extern i32 c_isattacked;    /* is_attacked entry */
 extern i32 c_rep_scan, c_rep_upscan, c_rep_lookup;
 extern i32 c_possig;        /* pos_sig entry */
+extern i32 c_see, c_see_step; /* SEE entry / least-attacker scan */
 extern i32 c_tt_probe;      /* transposition-table probe entry */
 extern i32 c_tt_store;      /* transposition-table store entry */
 #ifdef PROFILE
@@ -177,6 +178,7 @@ void undo_move(Pos *p, u16 m, Undo *u);
 void nm_make(Pos *p);            /* null-move make: side flip + Zobrist side toggle */
 void nm_undo(Pos *p);            /* null-move undo (same op: XOR is self-inverse) */
 i16 is_attacked(Pos *p, i16 sq, i16 by);
+i16 see_nonnegative(Pos *p, u16 m);
 /* A move can expose its own king only when its from-square shares a rank,
    file, or diagonal with that king.  The relation depends solely on the
    signed 0x88-square difference; the valid range (-119..119) has no aliases
