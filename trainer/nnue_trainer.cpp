@@ -24,6 +24,7 @@
 namespace short_trainer {
 
 constexpr int FEATURES = 704;
+constexpr int NET_VERSION = 5;
 constexpr int HIDDEN = 64;
 constexpr int PERSPECTIVES = 2;
 constexpr int RECORD_SIZE = 40;
@@ -76,7 +77,8 @@ static bool load_net(const std::string& path, Net& net) {
     uint8_t header[12];
     file.read(reinterpret_cast<char*>(header), sizeof(header));
     if (file.gcount() != 12 || std::memcmp(header, "NNUE", 4) != 0 ||
-        header[4] != 2 || header[5] != 0 || header[6] != 192 || header[7] != 2 ||
+        (header[4] != NET_VERSION && header[4] != 2) || header[5] != 0 ||
+        header[6] != 192 || header[7] != 2 ||
         header[8] != HIDDEN || header[9] != 0 || header[10] != 0 || header[11] != 0)
         return false;
     std::vector<uint8_t> bytes(FEATURES * HIDDEN + HIDDEN + 2 * HIDDEN);
@@ -85,6 +87,11 @@ static bool load_net(const std::string& path, Net& net) {
     auto signed_byte = [](uint8_t x) { return float(int8_t(x)); };
     size_t at = 0;
     for (float& x : net.w1) x = signed_byte(bytes[at++]);
+    if (header[4] == 2)
+        for (int rank = 1; rank < 8; ++rank)
+            for (int file = 0; file < 4; ++file)
+                std::copy_n(net.w1.begin() + (rank * 8 + file) * HIDDEN, HIDDEN,
+                            net.w1.begin() + (rank * 4 + file) * HIDDEN);
     for (float& x : net.b1) x = signed_byte(bytes[at++]);
     for (float& x : net.w2) x = signed_byte(bytes[at++]);
     uint8_t bias_bytes[2];
@@ -226,7 +233,7 @@ static int row_for_piece(int piece, int compact) {
     int type = piece & 7;
     bool enemy = (piece & 8) != 0;
     if (!enemy) {
-        if (type == 6) return compact;
+        if (type == 6) return (compact >> 3) * 4 + (compact & 3);
         if (type == 1) {
             int rank = compact >> 3;
             return (rank < 1 || rank > 6) ? -1 : 32 + (rank - 1) * 8 + (compact & 7);
@@ -749,7 +756,7 @@ int main(int argc, char** argv) {
         if ((argc == 4 || argc == 5) && std::strcmp(argv[1], "--net") == 0) {
             short_trainer::Net net;
             if (!short_trainer::load_net(argv[2], net))
-                throw std::runtime_error("cannot load v2 net");
+                throw std::runtime_error("cannot load single-output 704 net");
             short_trainer::RecordFile file(argv[3]);
             uint32_t count = argc == 5 ? uint32_t(std::stoul(argv[4])) : 1;
             count = std::min(count, file.count());

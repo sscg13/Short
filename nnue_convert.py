@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""nnue_convert.py - fold a 768-feature trainer net into the engine's 704 layout.
+"""nnue_convert.py - fold a legacy raw 768-feature net into dense 704 rows.
+
+The custom trainer exports engine blobs directly and does not need this tool.
 
 The engine (nnue.c) uses a 704 one-hot feature layout:
     rows 0..31     own king        32 buckets (file folded to a-d)
@@ -9,7 +11,7 @@ The engine (nnue.c) uses a 704 one-hot feature layout:
     rows 400..447  enemy pawns     48
     rows 448..703  enemy N,B,R,Q   4 x 64
 
-The trainer emits the plain 768 layout, row = type*64 + sq, with type IDs:
+The legacy raw input uses the plain 768 layout, row = type*64 + sq, with type IDs:
     0=WP 1=WN 2=WB 3=WR 4=WQ 5=WK 6=BP 7=BN 8=BB 9=BR 10=BQ 11=BK
 
 Converting is a fixed gather permutation (a subset of the 768 rows reordered
@@ -25,7 +27,7 @@ trainer's "bullet" padding are ignored):
 
 ENGINE BLOB (what the engine loads, little-endian):
     bytes  0..3   magic "NNUE"
-          4..5   version u16 = 2 (ReLU^2 - the only supported architecture)
+          4..5   version u16 = 5 (dense own-king rows, single-output ReLU^2)
           6..7   features u16 = 704
           8..9   N u16
          10..11  reserved u16 = 0
@@ -47,12 +49,13 @@ import struct
 import sys
 
 MAGIC = b"NNUE"
+NET_VERSION = 5
 
 
 def engine_to_768(row):
     """Engine 704 row index -> (768 type, 768 square) for the WHITE perspective."""
-    if row < 32:                 # own king, bucket = rank*8 + folded file (0..3)
-        return 5, row
+    if row < 32:                 # own king, bucket = rank*4 + folded file (0..3)
+        return 5, (row >> 2) * 8 + (row & 3)
     if row < 80:                 # own pawn, idx 0..47 -> rank 1..6, file 0..7
         i = row - 32
         return 0, ((i >> 3) + 1) * 8 + (i & 7)
@@ -88,7 +91,7 @@ def read_trainer(path):
 def write_net(path, w1, b1, w2, bias):
     with open(path, "wb") as f:
         f.write(MAGIC)
-        f.write(struct.pack("<HHHH", 2, 704, 64, 0))   # v2 ReLU^2
+        f.write(struct.pack("<HHHH", NET_VERSION, 704, 64, 0))
         f.write(w1)
         f.write(b1)
         f.write(w2)
@@ -110,7 +113,7 @@ def main():
     w1_out = b"".join(w1[r * 64:(r + 1) * 64] for r in rows)
 
     write_net(dst, w1_out, b1, w2, bias)
-    print(f"{src}: folded 768 -> 704, wrote {dst} (v2 ReLU^2 "
+    print(f"{src}: folded 768 -> 704, wrote {dst} (v{NET_VERSION} ReLU^2 "
           f"{len(w1_out)} + {len(b1)} + {len(w2)} + 2 + 12 bytes, bias={bias})")
 
 

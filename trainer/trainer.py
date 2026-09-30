@@ -14,6 +14,9 @@ import nnue_extension
 
 FEATURES = 704
 HIDDEN = 64
+NET_VERSION = 5
+if getattr(nnue_extension, "NET_VERSION", None) != NET_VERSION:
+    raise RuntimeError("Rebuild nnue_extension for dense 704 indexing: python setup.py build_ext --inplace")
 RECORD_SIZE = 40
 HEADER_SIZE = 16
 PARAM_COUNT = FEATURES * HIDDEN + HIDDEN + 2 * HIDDEN + 1
@@ -54,7 +57,7 @@ def export_net(weights, path):
     output.parent.mkdir(parents=True, exist_ok=True)
     temp = output.with_suffix(output.suffix + ".tmp")
     with open(temp, "wb") as target:
-        target.write(struct.pack("<4sHHHH", b"NNUE", 2, FEATURES, HIDDEN, 0))
+        target.write(struct.pack("<4sHHHH", b"NNUE", NET_VERSION, FEATURES, HIDDEN, 0))
         target.write(w1)
         target.write(b1)
         target.write(w2)
@@ -75,10 +78,16 @@ def load_net(path):
     if len(raw) != 12 + W1_END + HIDDEN + 2 * HIDDEN + 2:
         raise ValueError(f"unexpected net size: {path}")
     magic, version, features, hidden, reserved = struct.unpack("<4sHHHH", raw[:12])
-    if (magic, version, features, hidden, reserved) != (b"NNUE", 2, FEATURES, HIDDEN, 0):
+    if ((magic, features, hidden, reserved) != (b"NNUE", FEATURES, HIDDEN, 0)
+            or version not in (2, NET_VERSION)):
         raise ValueError(f"unsupported net header: {path}")
     offset = 12
     w1 = torch.tensor(struct.unpack(f"<{W1_END}b", raw[offset : offset + W1_END]))
+    if version == 2:
+        rows = w1.view(FEATURES, HIDDEN)
+        for rank in range(1, 8):
+            for file in range(4):
+                rows[rank * 4 + file].copy_(rows[rank * 8 + file])
     offset += W1_END
     b1 = torch.tensor(struct.unpack(f"<{HIDDEN}b", raw[offset : offset + HIDDEN]))
     offset += HIDDEN

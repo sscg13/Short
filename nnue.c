@@ -54,7 +54,7 @@ i32 c_flip = 0;                 /* mirror-flip recompute paths (nnue_make) */
 #endif
 
 #if defined(__WATCOMC__) && !defined(__386__)
-/* 45 KB won't fit the ~23 KB of free near data; put it in a far data segment. */
+/* Layer-1 weights live in a far data segment outside DGROUP. */
 i8 _far nn_w1[NNUE_W1_SIZE];
 #else
 i8 nn_w1[NNUE_W1_SIZE];
@@ -155,7 +155,7 @@ static void nn_mirrors(Pos *p, i16 m[2]) {
 static i16 nn_row_dispatch(i16 pc, i16 c) {
     i16 ty = TY(pc);
     if (CO(pc) == 0) {                /* own piece */
-        if (ty == 6) return (c >> 3) * 8 + (c & 7);   /* own king: file <= 3 by mirror */
+        if (ty == 6) return (c >> 3) * 4 + (c & 3);   /* dense own king: files a-d */
         if (ty == 1) { i16 r = c >> 3; if (r < 1 || r > 6) return -1; return 32 + (r - 1) * 8 + (c & 7); }
         if (ty >= 2 && ty <= 5) return 80 + (ty - 2) * 64 + c;
         return -1;
@@ -492,6 +492,20 @@ static void nn_fwd_build(void) {
 }
 #endif
 
+/* Legacy v2 shared some own-king and pawn rows. Copy king vectors into the
+   dense block without changing any feature contribution. Ascending copies
+   are safe in place: every source is above its destination, and pawn rows
+   (32+) are never overwritten. No temporary far/near allocation is needed. */
+static void nn_remap_legacy(void) {
+    i16 rank, file;
+    for (rank = 1; rank < 8; rank++)
+        for (file = 0; file < 4; file++) {
+            u16 dst = (u16)(rank * 4 + file) << 6;
+            u16 src = (u16)(rank * 8 + file) << 6;
+            memcpy(nn_w1 + dst, nn_w1 + src, NNUE_N);
+        }
+}
+
 /* parse a net blob (engine format, see NNUE.md) from memory */
 static int nnue_parse_blob(const u8 *p, i32 len) {
     u16 ver, feats, hN;
@@ -502,13 +516,15 @@ static int nnue_parse_blob(const u8 *p, i32 len) {
     ver   = (u16)p[4] | ((u16)p[5] << 8);
     feats = (u16)p[6] | ((u16)p[7] << 8);
     hN    = (u16)p[8] | ((u16)p[9] << 8);
-    if (ver != 2) return 0;                        /* v2 ReLU^2 is the only format */
+    if (ver != NNUE_NET_VERSION && ver != NNUE_LEGACY_VERSION) return 0;
+    if (p[10] != 0 || p[11] != 0) return 0;
     if (feats != NNUE_FEATURES || hN != NNUE_N) return 0;
     memcpy(nn_w1, p + 12, (size_t)w1sz);
     memcpy(nn_b1, p + 12 + w1sz, (size_t)NNUE_N);
     memcpy(nn_w2, p + 12 + w1sz + NNUE_N, (size_t)NNUE_W2_SIZE);
     nn_bias = (i16)((u16)(u8)p[12 + w1sz + NNUE_N + NNUE_W2_SIZE]
             | ((u16)(u8)p[13 + w1sz + NNUE_N + NNUE_W2_SIZE] << 8));
+    if (ver == NNUE_LEGACY_VERSION) nn_remap_legacy();
     nnue_enabled = 1;
     nnue_tables_init();
     return 1;
@@ -545,7 +561,8 @@ int nnue_load(const char *path) {
     ver   = (u16)hdr[4] | ((u16)hdr[5] << 8);
     feats = (u16)hdr[6] | ((u16)hdr[7] << 8);
     hN    = (u16)hdr[8] | ((u16)hdr[9] << 8);
-    if (ver != 2) { fclose(f); return 0; }       /* v2 ReLU^2 is the only format */
+    if (ver != NNUE_NET_VERSION && ver != NNUE_LEGACY_VERSION) { fclose(f); return 0; }
+    if (hdr[10] != 0 || hdr[11] != 0) { fclose(f); return 0; }
     if (feats != NNUE_FEATURES || hN != NNUE_N) { fclose(f); return 0; }
     if (fread(nn_w1, 1, (size_t)w1sz, f) != (size_t)w1sz) { fclose(f); return 0; }
     if (fread(nn_b1, 1, (size_t)NNUE_N, f) != NNUE_N) { fclose(f); return 0; }
@@ -553,6 +570,7 @@ int nnue_load(const char *path) {
     if (fread(hdr, 1, 2, f) != 2) { fclose(f); return 0; }
     nn_bias = (i16)((u16)(u8)hdr[0] | ((u16)(u8)hdr[1] << 8));
     fclose(f);
+    if (ver == NNUE_LEGACY_VERSION) nn_remap_legacy();
     nnue_enabled = 1;
     nnue_tables_init();
     return 1;
@@ -823,12 +841,12 @@ static i16 nn_chain_check(Pos *p, i16 fresh[2][NNUE_N]) {
 }
 
 int nnue_selftest(const char *fen) {
-    /* static: keeps the 16-bit test's ~2 KB of buffers off the 2048-byte stack */
+    /* static: keeps the 16-bit test's ~2 KB of buffers off the search stack */
     static Pos pos, flipped, hm;
     static i16 a[2][NNUE_N], b[2][NNUE_N];
     static i16 before[2][NNUE_N], incr[2][NNUE_N], fresh[2][NNUE_N];
     u16 *list = movebuf[28];
-    i16 n, i, fail = 0, asym = 0, asymH = 0, fwd_fail = 0;
+    i16 n, i, fail = 0, asym = 0, asymH = 0, fwd_fail = 0, map_fail = 0;
 
     parse_fen(&pos, fen ? fen : "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
 
@@ -843,6 +861,16 @@ int nnue_selftest(const char *fen) {
         nn_bias = 1000;
         nnue_enabled = 1;
         nnue_tables_init();
+    }
+
+    /* All 32 normalized own-king squares must occupy their own dense block,
+       including ranks 5-8 which formerly selected pawn weights. */
+    {
+        i16 rank, file, row = 0;
+        for (rank = 0; rank < 8; rank++)
+            for (file = 0; file < 4; file++, row++)
+                if (nn_rowtab[WK][rank * 8 + file] != row) map_fail++;
+        if (nn_rowtab[WK][35] == nn_rowtab[WP][11]) map_fail++;
     }
 
     /* color symmetry: acc_black(x) must equal acc_white(rot180 + colorflip x) */
@@ -944,7 +972,7 @@ int nnue_selftest(const char *fen) {
     }
 
     nnue_reset(&pos);
-    printf("nn selftest: moves=%d  acc-sym(R180)=%d  acc-sym(H)=%d  roundtrip-fails=%d  fwd-fails=%d  eval=%d\n",
-           n, asym, asymH, fail, fwd_fail, nnue_eval(&pos));
-    return (fail == 0 && asym == 0 && asymH == 0 && fwd_fail == 0) ? 0 : 1;
+    printf("nn selftest: moves=%d  acc-sym(R180)=%d  acc-sym(H)=%d  roundtrip-fails=%d  fwd-fails=%d  map-fails=%d  eval=%d\n",
+           n, asym, asymH, fail, fwd_fail, map_fail, nnue_eval(&pos));
+    return (fail == 0 && asym == 0 && asymH == 0 && fwd_fail == 0 && map_fail == 0) ? 0 : 1;
 }

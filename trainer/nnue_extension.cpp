@@ -74,6 +74,7 @@ static void set_threads(int threads) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.attr("NET_VERSION") = short_trainer::NET_VERSION;
     m.def("process_batch", &process_batch_torch,
           "SCReLU^2 forward, loss, and manual gradient accumulation");
     m.def("process_range", &process_range_torch,
