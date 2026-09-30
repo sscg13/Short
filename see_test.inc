@@ -194,9 +194,11 @@ int see_selftest(void) {
 #if defined(PROFILE) || defined(VCLOCK)
     nnue_enabled = 0; stop_now = 0; deadline = 0; vtime_mode = 0; g_sigs_n = 0;
     parse_fen(&p, see_cases[1].fen); before = p;
+    c_qnodes = c_see = 0;     /* PROFILE alone does not reset these in vclock_reset. */
     rep_reset(); vclock_reset(); qsearch(&p, -INF, INF, 0, 0, 1);
     if (c_qnodes != 1 || !c_see || rep_n || memcmp(&p,&before,sizeof p)) ++fails;
     parse_fen(&p,"7k/8/8/8/8/2p5/1p6/KQ6 w - - 0 1"); before = p;
+    c_qnodes = c_see = 0;
     rep_reset(); vclock_reset(); qsearch(&p, -INF, INF, 0, 0, 1);
     if (c_see || c_qnodes < 2 || rep_n || memcmp(&p,&before,sizeof p)) ++fails;
 #endif
@@ -204,26 +206,41 @@ int see_selftest(void) {
     /* Exercise main-search pruning and the forcing-move and PV safeguards. */
     nnue_enabled = 0; stop_now = 0; deadline = 0; vtime_mode = 0; g_sigs_n = 0;
     parse_fen(&p,"r6k/8/8/8/3Q4/8/8/1K6 w - - 0 1"); before = p;
-    rep_reset(); tt_clear();
-    tt_store(&p,MK(0x02,0x01,0,0),0,0,TT_UPPER,0);
-    st_pvs_tries = st_pvs_prunes = st_pvs_checks_kept = 0;
-    alphabeta(&p,1,1500,1501,0,0);
-    if (!st_pvs_tries || !st_pvs_prunes || !st_pvs_checks_kept || rep_n ||
-        memcmp(&p,&before,sizeof p)) { printf("SEE PVS integration failed\n"); ++fails; }
+    {
+        i16 nt;
+        Score score, cut_score = 0;
+        i32 cut_nodes = 0;
+        /* Window width alone must not enable SEE at a PV node. Cut and all
+           should search identically while their pruning gates are shared. */
+        for (nt = NODE_PV; nt <= NODE_ALL; ++nt) {
+            rep_reset(); tt_clear(); nodes_search = 0;
+            memset(killers,0,sizeof killers); memset(qhist,0,sizeof qhist);
+            tt_store(&p,MK(0x02,0x01,0,0),0,0,TT_UPPER,0);
+            st_pvs_tries = st_pvs_prunes = st_pvs_checks_kept = 0;
+            score = alphabeta(&p,1,1500,1501,0,0,(NodeType)nt);
+            if ((nt == NODE_PV ? st_pvs_tries != 0 :
+                 !st_pvs_tries || !st_pvs_prunes || !st_pvs_checks_kept) ||
+                rep_n || memcmp(&p,&before,sizeof p)) {
+                printf("SEE node-type integration failed type=%d\n",nt); ++fails;
+            }
+            if (nt == NODE_CUT) { cut_score = score; cut_nodes = nodes_search; }
+            if (nt == NODE_ALL && (score != cut_score || nodes_search != cut_nodes)) ++fails;
+        }
+    }
     rep_reset(); tt_clear(); st_pvs_tries = 0;
-    alphabeta(&p,1,-INF,INF,0,0);
+    alphabeta(&p,1,-INF,INF,0,0,NODE_PV);
     if (st_pvs_tries || rep_n || memcmp(&p,&before,sizeof p)) ++fails;
     parse_fen(&p,"7k/8/8/8/8/2p5/1p6/KQ6 w - - 0 1"); before = p;
     rep_reset(); tt_clear(); st_pvs_tries = 0;
-    alphabeta(&p,1,1500,1501,0,0);
+    alphabeta(&p,1,1500,1501,0,0,NODE_CUT);
     if (st_pvs_tries || rep_n || memcmp(&p,&before,sizeof p)) ++fails;
     parse_fen(&p,"8/8/8/8/8/1qk5/8/K7 w - - 0 1"); before = p;
     rep_reset(); tt_clear(); st_pvs_tries = 0;
-    if (alphabeta(&p,1,1500,1501,0,0) != 0 || st_pvs_tries || rep_n ||
+    if (alphabeta(&p,1,1500,1501,0,0,NODE_CUT) != 0 || st_pvs_tries || rep_n ||
         memcmp(&p,&before,sizeof p)) ++fails;
     parse_fen(&p,"8/8/8/8/8/2k5/1q6/K7 w - - 0 1"); before = p;
     rep_reset(); tt_clear(); st_pvs_tries = 0;
-    if (alphabeta(&p,1,1500,1501,0,0) != -MATE || st_pvs_tries || rep_n ||
+    if (alphabeta(&p,1,1500,1501,0,0,NODE_CUT) != -MATE || st_pvs_tries || rep_n ||
         memcmp(&p,&before,sizeof p)) ++fails;
 #endif
     nnue_enabled = old_enabled; nnue_active = old_active;

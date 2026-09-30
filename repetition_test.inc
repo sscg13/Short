@@ -79,7 +79,7 @@ static void rt_target(const char *fen, const char *target_fen, i16 want, const c
     if (want) {
         deadline = 0; stop_now = 0; vclock_reset(); tt_clear();
         if (qsearch(&p, -1, 0, 1, 7, 8) != 0 || rep_n) ++rt_fails;
-        if (alphabeta(&p, 2, -1, 0, 1, 7) != 0 || rep_n) ++rt_fails;
+        if (alphabeta(&p, 2, -1, 0, 1, 7, NODE_CUT) != 0 || rep_n) ++rt_fails;
     }
 }
 /* Replay the XBoard history contract: game history includes the root, and
@@ -115,7 +115,7 @@ static void rt_search_cycle(void) {
                 --rep_n;
                 deadline = 0; stop_now = 0; vclock_reset(); tt_clear();
                 if (qsearch(&p, -1, 0, step, step, 8) != 0 || rep_n != 3) ++rt_fails;
-                if (alphabeta(&p, 2, -1, 0, step, step) != 0 || rep_n != 3) ++rt_fails;
+                if (alphabeta(&p, 2, -1, 0, step, step, NODE_CUT) != 0 || rep_n != 3) ++rt_fails;
                 if (rep_enter(&p, step, step)) ++rt_fails;
             }
         }

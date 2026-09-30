@@ -179,7 +179,7 @@ static i32 st_pvs_tries, st_pvs_prunes, st_pvs_checks_kept;
    d = node depth, m = legal moves already searched at this node. LMR_DEPTH 3
    keeps it out of the shallow nodes where move ordering is weakest; LMR_MOVES 4
    protects the TT move and both killers (typically the first 1-3 searched);
-   quiet-only (captures/promos/EP/castle keep full depth); non-PV (zero window)
+   quiet-only (captures/promos/EP/castle keep full depth); expected cut/all
    and non-check nodes only. */
 #define LMR_DEPTH 3
 #define LMR_MOVES 4
@@ -358,11 +358,21 @@ static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd)
 /* alpha-beta search                                                  */
 /* ------------------------------------------------------------------ */
 
-static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 half) {
+/* Expected node types, supplied by the caller rather than inferred from the
+   current window. A PV node stays PV even if alpha rises to beta - 1.
+   PV first moves and full-window re-searches stay PV; their
+   scouts expect a cut. Non-PV children (including null moves) alternate cut
+   and all. Reduced probes expect a cut; an unreduced retry restores the
+   parent's child expectation. Cut and all currently share every pruning gate. */
+typedef enum { NODE_PV, NODE_CUT, NODE_ALL } NodeType;
+
+static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 half,
+                      NodeType node_type) {
     MGen mg;
     u16 m, ttm = 0, bestmove = 0;
     Score best = -INF, original_alpha = alpha;
     i16 legal = 0, in_check = 0, move_count = 0, upcoming = 0;
+    NodeType child_type;     /* non-PV child expectation: PV scouts also expect cut */
 
     PCOUNT(c_anodes);
     nodes_search++;
@@ -391,7 +401,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
        (the stored move, if its from-square still holds a piece of the side to
        move, is tried first in the MG_TT stage) and the cutoff use. A stored
        result with depth >= this node's depth is trusted ONLY at a non-PV node
-       (zero window: beta == alpha+1): EXACT returns the score outright, and a
+       (expected cut or all): EXACT returns the score outright, and a
        matching LOWER/UPPER bound cuts off against beta/alpha. PV nodes are
        exempt so a bound never truncates the principal variation's exact score. */
     {
@@ -401,7 +411,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
         if (tt_probe(p, ply, &tmv, &tsc, &tfl, &tdep)) {
             if (tmv && CO(p->board[mfrom(tmv)]) == (p->side ? 8 : 0))
                 ttm = tmv;
-            if (beta - alpha == 1 && tdep >= depth && tsc >= best) {
+            if (node_type != NODE_PV && tdep >= depth && tsc >= best) {
                 if (tfl == TT_EXACT) { rep_n--; return tsc; }
                 if (tfl == TT_LOWER && tsc >= beta) { rep_n--; return tsc; }
                 if (tfl == TT_UPPER && tsc <= alpha) { rep_n--; return tsc; }
@@ -414,13 +424,14 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
        neither leave a check unresolved nor open a new line), so its legality
        is_attacked test can be skipped. */
     in_check = is_attacked(p, p->ks[p->side], p->side ^ 1);
+    child_type = node_type == NODE_CUT ? NODE_ALL : NODE_CUT;
 
     /* RFP and NMP both need the static eval, and only at a non-PV, non-check
        node is it trustworthy enough to prune on, so it is computed once here
        and shared by the two stages below. */
     {
         Score eval = 0;
-        if (depth >= 1 && !in_check && beta - alpha == 1)
+        if (depth >= 1 && !in_check && node_type != NODE_PV)
             eval = evaluate(p);
 
         /* reverse futility pruning. Skipped while in check (the eval is
@@ -428,7 +439,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
            true bound), and at depth 0 (qsearch already stand-pats the leaf).
            On a hit, pop this node's rep-path entry (pushed above) before
            returning. */
-        if (depth >= 1 && depth <= RFP_DEPTH && !in_check && beta - alpha == 1) {
+        if (depth >= 1 && depth <= RFP_DEPTH && !in_check && node_type != NODE_PV) {
             if (eval - depth * RFP_MARGIN >= beta) {
                 rep_n--;
                 return eval;
@@ -442,7 +453,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
            resolve a check) and when the side to move holds no non-pawn material
            (zugzwang-prone endings). The 50-move guard keeps the pass from
            walking into a forced draw. On a hit, pop this node's rep-path entry. */
-        if (depth >= NMP_DEPTH && !in_check && beta - alpha == 1 &&
+        if (depth >= NMP_DEPTH && !in_check && node_type != NODE_PV &&
             half + 1 < MAX_HALF) {
             if (eval >= beta + NMP_MARGIN && has_np_material(p)) {
                 i16 R = NMP_RED + depth / 6;
@@ -451,7 +462,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                 i16 saved_floor = rep_floor, saved_game = rep_game;
                 rep_floor = rep_n; rep_game = 0;
                 nm_make(p);
-                if (nd > 0) sc = -alphabeta(p, nd, -beta, -beta + 1, ply + 1, half + 1);
+                if (nd > 0) sc = -alphabeta(p, nd, -beta, -beta + 1, ply + 1, half + 1, child_type);
                 else        sc = -qsearch(p, -beta, -beta + 1, ply + 1, half + 1, MAX_QDEPTH);
                 nm_undo(p);
                 rep_floor = saved_floor; rep_game = saved_game;
@@ -478,7 +489,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                                                                   (guards a bogus TT move) */
 #ifndef NO_PVS_SEE
             if (!first && depth >= 1 && depth <= PVS_SEE_DEPTH &&
-                !in_check && beta - alpha == 1 && best > -MATE + MAXPLY &&
+                !in_check && node_type != NODE_PV && best > -MATE + MAXPLY &&
                 alpha > -MATE + MAXPLY && beta < MATE - MAXPLY &&
                 mfl(m) == 0 && TY(pc) != 6) {
 #ifdef SEE_TEST
@@ -519,10 +530,11 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                 is_cap = (u.cap != EMPTY) || (mfl(m) == MF_EP);
                 child_half = (TY(pc) == 1 || is_cap) ? 0 : half + 1;
                 if (first) {
-                    /* principal variation move: full window */
+                    /* First move: keep PV, or alternate cut/all. */
                     first = 0;
                     if (depth <= 0) score = -qsearch(p, -beta, -alpha, ply + 1, child_half, MAX_QDEPTH);
-                    else score = -alphabeta(p, depth - 1, -beta, -alpha, ply + 1, child_half);
+                    else score = -alphabeta(p, depth - 1, -beta, -alpha, ply + 1, child_half,
+                                           node_type == NODE_PV ? NODE_PV : child_type);
                 } else {
                     /* PVS: zero-window search; re-search full window only if it beats alpha.
                        score < beta avoids a wasted re-search on an already-proven cutoff.
@@ -532,7 +544,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                        reduced search that beats alpha is re-searched at full depth. */
                     i16 new_depth = depth - 1;
                     if (depth >= LMR_DEPTH && move_count >= LMR_MOVES &&
-                        beta - alpha == 1 && !in_check &&
+                        node_type != NODE_PV && !in_check &&
                         mfl(m) == 0 && u.cap == EMPTY) {
                         i16 R = lmr_tab[depth < LMR_TD ? depth : LMR_TD - 1]
                                        [move_count < LMR_TM ? move_count : LMR_TM - 1];
@@ -541,14 +553,14 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                     }
                     if (depth <= 0) score = -qsearch(p, -alpha - 1, -alpha, ply + 1, child_half, MAX_QDEPTH);
                     else if (new_depth < depth - 1) {
-                        score = -alphabeta(p, new_depth, -alpha - 1, -alpha, ply + 1, child_half);
+                        score = -alphabeta(p, new_depth, -alpha - 1, -alpha, ply + 1, child_half, NODE_CUT);
                         if (score > alpha && !stop_now)
-                            score = -alphabeta(p, depth - 1, -alpha - 1, -alpha, ply + 1, child_half);
+                            score = -alphabeta(p, depth - 1, -alpha - 1, -alpha, ply + 1, child_half, child_type);
                     } else
-                        score = -alphabeta(p, depth - 1, -alpha - 1, -alpha, ply + 1, child_half);
+                        score = -alphabeta(p, depth - 1, -alpha - 1, -alpha, ply + 1, child_half, child_type);
                     if (score > alpha && score < beta) {
                         if (depth <= 0) score = -qsearch(p, -beta, -alpha, ply + 1, child_half, MAX_QDEPTH);
-                        else score = -alphabeta(p, depth - 1, -beta, -alpha, ply + 1, child_half);
+                        else score = -alphabeta(p, depth - 1, -beta, -alpha, ply + 1, child_half, NODE_PV);
                     }
                 }
                 if (score > best) {
@@ -647,11 +659,11 @@ void search_root(Pos *p, i16 maxdepth) {
                         i16 child_half = (TY(pc) == 1 || is_cap) ? 0 : g_half + 1;
                         if (first) {
                             first = 0;
-                            score = -alphabeta(p, d - 1, -beta, -alpha, 1, child_half);
+                            score = -alphabeta(p, d - 1, -beta, -alpha, 1, child_half, NODE_PV);
                         } else {
-                            score = -alphabeta(p, d - 1, -alpha - 1, -alpha, 1, child_half);
+                            score = -alphabeta(p, d - 1, -alpha - 1, -alpha, 1, child_half, NODE_CUT);
                             if (score > alpha && score < beta)
-                                score = -alphabeta(p, d - 1, -beta, -alpha, 1, child_half);
+                                score = -alphabeta(p, d - 1, -beta, -alpha, 1, child_half, NODE_PV);
                         }
                         root_score[i] = score;
                         if (score > bsc) { bsc = score; bm = root_m[i]; }
@@ -756,11 +768,11 @@ u16 think(Pos *p, i16 maxdepth) {
                         i16 child_half = (TY(pc) == 1 || is_cap) ? 0 : g_half + 1;
                         if (first) {
                             first = 0;
-                            score = -alphabeta(p, d - 1, -beta, -alpha, 1, child_half);
+                            score = -alphabeta(p, d - 1, -beta, -alpha, 1, child_half, NODE_PV);
                         } else {
-                            score = -alphabeta(p, d - 1, -alpha - 1, -alpha, 1, child_half);
+                            score = -alphabeta(p, d - 1, -alpha - 1, -alpha, 1, child_half, NODE_CUT);
                             if (score > alpha && score < beta)
-                                score = -alphabeta(p, d - 1, -beta, -alpha, 1, child_half);
+                                score = -alphabeta(p, d - 1, -beta, -alpha, 1, child_half, NODE_PV);
                         }
                         root_score[i] = score;
                         if (score > bsc) {
@@ -941,11 +953,11 @@ int bench(int depth) {
                             i16 child_half = (TY(pc) == 1 || is_cap) ? 0 : g_half + 1;
                             if (first) {
                                 first = 0;
-                                score = -alphabeta(&p, d - 1, -beta, -alpha, 1, child_half);
+                                score = -alphabeta(&p, d - 1, -beta, -alpha, 1, child_half, NODE_PV);
                             } else {
-                                score = -alphabeta(&p, d - 1, -alpha - 1, -alpha, 1, child_half);
+                                score = -alphabeta(&p, d - 1, -alpha - 1, -alpha, 1, child_half, NODE_CUT);
                                 if (score > alpha && score < beta)
-                                    score = -alphabeta(&p, d - 1, -beta, -alpha, 1, child_half);
+                                    score = -alphabeta(&p, d - 1, -beta, -alpha, 1, child_half, NODE_PV);
                             }
                             root_score[k] = score;
                             if (score > bsc) { bsc = score; bm = root_m[k]; }
@@ -1093,11 +1105,11 @@ int profile(int depth) {
                             i16 child_half = (TY(pc) == 1 || is_cap) ? 0 : g_half + 1;
                             if (first) {
                                 first = 0;
-                                score = -alphabeta(&p, d - 1, -beta, -alpha, 1, child_half);
+                                score = -alphabeta(&p, d - 1, -beta, -alpha, 1, child_half, NODE_PV);
                             } else {
-                                score = -alphabeta(&p, d - 1, -alpha - 1, -alpha, 1, child_half);
+                                score = -alphabeta(&p, d - 1, -alpha - 1, -alpha, 1, child_half, NODE_CUT);
                                 if (score > alpha && score < beta)
-                                    score = -alphabeta(&p, d - 1, -beta, -alpha, 1, child_half);
+                                    score = -alphabeta(&p, d - 1, -beta, -alpha, 1, child_half, NODE_PV);
                             }
                             root_score[k] = score;
                             if (score > bsc) bsc = score;
