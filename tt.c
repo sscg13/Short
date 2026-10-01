@@ -7,7 +7,7 @@
    position signature's words, and a slot is used iff its stored key equals the
    probed position's key. Single tier by design - a near/L1 tier would only
    shorten the probe for positions the far table already answers, and near data
-   (DGROUP, ~19 KB free) is budgeted for strength, not cache tiers (see
+   (DGROUP) is budgeted for strength, not cache tiers (see
    MEMORY.md / OPTIMIZATION.md).
 
    Entry (16 bytes on both builds):

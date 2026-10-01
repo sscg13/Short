@@ -65,12 +65,12 @@ i16 nn_bias;        /* output bias, i16, quantized at 128*64 (WORD for the asm f
 
 #if !defined(__WATCOMC__)
 /* Embed the net into the binary (gcc build: OpenBench runs the bare binary, so
-   there is no runtime file dependency). The path defaults to chess.net and is
+   there is no runtime file dependency). The default is short-net2-finetune2.net,
    overridable at build time: OpenBench passes EVALFILE=<net> to make, which
    defines NN_EMBED_FILE=<path>; NN_STR stringifies it for the .incbin directive.
    Rebuild after re-converting a net. */
 #ifndef NN_EMBED_FILE
-#define NN_EMBED_FILE chess.net
+#define NN_EMBED_FILE short-net2-finetune2.net
 #endif
 #define NN_STR_(x) #x
 #define NN_STR(x) NN_STR_(x)
@@ -603,14 +603,14 @@ int nnue_ensure_loaded(const char *path) {
 /* ensure the default net is loaded; idempotent, so it is safe to call at every
    search entry point (bench/think/search_root/profile) to make NNUE the default.
    The gcc default is the embedded blob (Makefile's EVALFILE default, currently
-   chess-v2-finetune.net - the path below is ignored there). The 16-bit build has
+   short-net2-finetune2.net - the path below is ignored there). The 16-bit build has
    no embedded net and ships the net as the FAT 8.3 blob CHESS.NET on the emulator
-   floppies (chess-v2-finetune.net is not a valid 8.3 name, so it loads chess.net). */
+   floppies (the official net's long name is not valid 8.3, so it loads chess.net). */
 int nnue_ensure_default(void) {
 #if defined(__WATCOMC__)
     return nnue_ensure_loaded("chess.net");
 #else
-    return nnue_ensure_loaded("chess-v2-finetune.net");
+    return nnue_ensure_loaded("short-net2-finetune2.net");
 #endif
 }
 

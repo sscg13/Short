@@ -6,7 +6,7 @@
 #   make                -> chess_gcc   (Linux) / chess_gcc.exe   (Windows)
 #   make EXE=foo        -> foo         (Linux) / foo.exe         (Windows)
 #   make CFLAGS='...'   -> override compile flags
-#   make EVALFILE=<net> -> embed <net> instead of chess-v2-finetune.net (OpenBench)
+#   make EVALFILE=<net> -> embed <net> instead of short-net2-finetune2.net (OpenBench)
 #   make clean          -> remove objects and the binary
 
 # The gcc build is a fast SCALAR oracle for the 16-bit target: OpenBench measures
@@ -14,10 +14,9 @@
 # auto-vectorizes at -O2 (GCC >= 14 enables tree-loop/slp-vectorize), which would
 # inflate nps ~4x and break the speed-fidelity story, so keep it strictly scalar.
 CC      ?= gcc
-# default net: the finetuned v2 ReLU^2 blob (short-net2-finetune; +65 Elo over
-# short-net2 on OpenBench test 2038). OpenBench overrides via EVALFILE=<net>;
-# `make` with no args embeds this one.
-EVALFILE ?= chess-v2-finetune.net
+# Default net: dense 704 v5 ReLU^2, short-net2-finetune2 (hash 56329CCE).
+# OpenBench overrides via EVALFILE=<net>; `make` embeds this one by default.
+EVALFILE ?= short-net2-finetune2.net
 # -DVCLOCK compiles the weighted cycle counters used by the virtual clock
 # (vclock.c). The 16-bit build does NOT define it, so the counters stay out of
 # the shipped engine; the 16-bit build keeps the scalar vclock model.

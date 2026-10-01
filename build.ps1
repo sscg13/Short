@@ -48,4 +48,10 @@ foreach ($o in $objs) { $linkArgs += "file"; $linkArgs += $o }
 & "$ow\binnt\wlink.exe" @linkArgs option stack=8192 option map
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+if (-not $NoNNUE) {
+    # DOS loads the official net through its 8.3 filename.
+    Copy-Item -LiteralPath (Join-Path $root "short-net2-finetune2.net") `
+              -Destination (Join-Path $root "chess.net") -Force
+}
+
 Write-Host "Built chess.exe (16-bit, $Model model)"

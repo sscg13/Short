@@ -142,13 +142,11 @@ static void qhist_update(Pos *p, u16 m, i16 delta) {
    Constant rows avoid multiplication in the move loop. Preserve the first
    searched move, evasions, checking moves, special moves and mate searches. */
 #define PVS_SEE_DEPTH 4
-#ifndef NO_PVS_SEE
 static const i16 pvs_see_threshold[2][PVS_SEE_DEPTH + 1] = {
     { 0, -80, -160, -240, -320 },
     { 0, -20,  -80, -180, -320 }
 };
-#endif
-#if defined(SEE_TEST) && !defined(NO_PVS_SEE)
+#ifdef SEE_TEST
 static i32 st_pvs_tries, st_pvs_prunes, st_pvs_checks_kept;
 #endif
 
@@ -490,7 +488,6 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
             pc = p->board[mfrom(m)];                 /* moving piece, before the make */
             if (!pc || CO(pc) != (p->side ? 8 : 0)) continue;  /* not our piece: skip
                                                                   (guards a bogus TT move) */
-#ifndef NO_PVS_SEE
             if (!first && depth <= PVS_SEE_DEPTH &&
                 !in_check && node_type != NODE_PV && best > -MATE + MAXPLY &&
                 alpha > -MATE + MAXPLY && beta < MATE - MAXPLY &&
@@ -501,7 +498,6 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                 see_prune = !see_ge(p, m,
                     pvs_see_threshold[p->board[mto(m)] != EMPTY][depth]);
             }
-#endif
             do_make(p, m, &u);
             us = p->side ^ 1;                        /* mover */
             /* Legality: if not in check, a non-king, non-EP move from a square off
@@ -856,15 +852,9 @@ u16 think(Pos *p, i16 maxdepth) {
    (from the bottom) for a "nodes" count and an "nps" value. The bench
    MUST be deterministic: fixed positions searched to a fixed depth, no
    time-based cutoffs (deadline stays 0). Run "chess bench [depth]"
-   locally to tune BENCH_DEPTH so the whole run lands in ~1-5 seconds. */
+   with an explicit depth to compare builds at the same workload. */
 
-#if defined(__WATCOMC__) && !defined(__386__)
-#define BENCH_DEPTH 4   /* 16-bit DOS build: a manual DOSBox bench stays ~40s
-                           (depth 5 = 8M nodes ~= 4 min there; native builds are ~110x faster) */
-#else
-#define BENCH_DEPTH 5   /* calibrated: 8 positions at depth 5 ~= 2s on this machine
-                           (depth 6 ~= 8s; qsearch makes search nodes cheap per-node) */
-#endif
+#define BENCH_DEPTH 6   /* shared native/DOS default with the standard horizon */
 
 static const char *bench_fens[] = {
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",

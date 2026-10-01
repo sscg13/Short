@@ -237,7 +237,6 @@ int see_selftest(void) {
         }
     }
 #endif
-#ifndef NO_PVS_SEE
     /* Exercise main-search pruning and the forcing-move and PV safeguards. */
     nnue_enabled = 0; stop_now = 0; deadline = 0; vtime_mode = 0; g_sigs_n = 0;
     parse_fen(&p,"r6k/8/8/8/3Q4/8/8/1K6 w - - 0 1"); before = p;
@@ -277,7 +276,6 @@ int see_selftest(void) {
     rep_reset(); tt_clear(); st_pvs_tries = 0;
     if (alphabeta(&p,1,1500,1501,0,0,NODE_CUT) != -MATE || st_pvs_tries || rep_n ||
         memcmp(&p,&before,sizeof p)) ++fails;
-#endif
     nnue_enabled = old_enabled; nnue_active = old_active;
     printf("SEE selftest: fixtures=%d oracle=%ld threshold=%ld restoration=%ld failures=%d\n",
            (int)(1+2*sizeof see_cases/sizeof see_cases[0]),(long)oracle_cases,

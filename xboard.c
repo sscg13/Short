@@ -246,7 +246,7 @@ static void xb_option(const char *nm, const char *val) {
     if (strcmp(lo, "threads") == 0) {
         /* single-threaded by design; accepted for OpenBench, ignored */
     } else if (strcmp(lo, "hash") == 0) {
-        /* no transposition table yet; accepted and ignored */
+        /* fixed 64 KB transposition table; compatibility option, ignored */
     } else if (strcmp(lo, "cpu_model") == 0) {
         vclock_set_model(val);
     } else if (strcmp(lo, "cpu_khz") == 0) {
