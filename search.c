@@ -174,12 +174,12 @@ static i32 st_pvs_tries, st_pvs_prunes, st_pvs_checks_kept;
    gcc and 16-bit builds compute IDENTICAL tables bit-for-bit (the old
    compile-time table was Python-generated from the same formula; the fixed-
    point generator reproduces it exactly, so the bench tree is unchanged).
-   d = node depth, m = legal moves already searched at this node. LMR_DEPTH 3
-   keeps it out of the shallow nodes where move ordering is weakest; LMR_MOVES 4
-   protects the TT move and both killers (typically the first 1-3 searched);
+   d = node depth, m = legal moves already searched at this node. The minimum
+   reduced child depth of 1 prevents reductions at node depths 1 and 2.
+   LMR_MOVES 4 protects the TT move and both killers (typically the first 1-3
+   searched);
    quiet-only (captures/promos/EP/castle keep full depth); expected cut/all
    and non-check nodes only. */
-#define LMR_DEPTH 3
 #define LMR_MOVES 4
 #define LMR_TD    32    /* lmr_tab rows: node depth 0..31 (row 31 saturates) */
 #define LMR_TM    64    /* lmr_tab cols: moves already searched 0..63 (col 63 saturates) */
@@ -541,7 +541,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                        a quiet move only sees captures and can miss quiet defenses). A
                        reduced search that beats alpha is re-searched at full depth. */
                     i16 new_depth = depth - 1;
-                    if (depth >= LMR_DEPTH && move_count >= LMR_MOVES &&
+                    if (move_count >= LMR_MOVES &&
                         node_type != NODE_PV && !in_check &&
                         mfl(m) == 0 && u.cap == EMPTY) {
                         i16 R = lmr_tab[depth < LMR_TD ? depth : LMR_TD - 1]
