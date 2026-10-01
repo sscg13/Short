@@ -156,6 +156,7 @@ extern i32 c_possig;        /* pos_sig entry */
 extern i32 c_see, c_see_step; /* SEE entry / least-attacker scan */
 extern i32 c_tt_probe;      /* transposition-table probe entry */
 extern i32 c_tt_store;      /* transposition-table store entry */
+extern i32 c_tt_eval;       /* eager static-eval store attempts */
 #ifdef PROFILE
 int profile(int depth);
 #endif
@@ -254,11 +255,21 @@ int nnue_bench(void);
 /* ---- transposition table (tt.c) ----
    One far 64 KB table on the 16-bit target (4096 x 16-byte entries), plain
    array on gcc. Probe/store keyed on the full Pos.sig; see tt.c. */
-enum { TT_EXACT = 0, TT_LOWER = 1, TT_UPPER = 2 };  /* stored score bound */
+enum { TT_EXACT = 0, TT_LOWER = 1, TT_UPPER = 2, TT_NONE = 3 };
+/* Probe returns the selected slot even on a miss, for an eager eval write.
+   Eval validity is independent of the search bound/depth. */
+typedef struct {
+    u16 move;
+    Score score, eval;
+    i16 flag, depth;
+    u16 slot;
+    i16 eval_valid;
+} TTData;
 void tt_clear(void);                                    /* empty the table */
-i16 tt_probe(Pos *p, i16 ply, u16 *move_out, Score *score_out,
-             i16 *flag_out, i16 *depth_out);           /* 1 = hit */
-void tt_store(Pos *p, u16 move, i16 depth, Score score, i16 flag, i16 ply);
+i16 tt_probe(Pos *p, i16 ply, TTData *data);             /* 1 = hit */
+void tt_store_eval(Pos *p, u16 slot, Score eval);
+void tt_store(Pos *p, u16 move, i16 depth, Score score, i16 flag, i16 ply,
+              Score eval, i16 eval_valid);
 
 /* ---- virtual time clock (vclock.c) ----
    VirtualTime=1 makes the engine ignore the GUI's time commands and pace
