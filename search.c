@@ -374,6 +374,10 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
     i16 legal = 0, in_check = 0, move_count = 0, upcoming = 0;
     NodeType child_type;     /* non-PV child expectation: PV scouts also expect cut */
 
+    /* Quiescence owns horizon nodes, including their counters, limits and
+       repetition entry. The main search below always has depth >= 1. */
+    if (depth <= 0) return qsearch(p, alpha, beta, ply, half, MAX_QDEPTH);
+
     PCOUNT(c_anodes);
     nodes_search++;
     vtotal_nodes++;
@@ -431,15 +435,15 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
        and shared by the two stages below. */
     {
         Score eval = 0;
-        if (depth >= 1 && !in_check && node_type != NODE_PV)
+        if (!in_check && node_type != NODE_PV)
             eval = evaluate(p);
 
         /* reverse futility pruning. Skipped while in check (the eval is
            unreliable with the king exposed), at PV nodes (their score becomes a
-           true bound), and at depth 0 (qsearch already stand-pats the leaf).
+           true bound). Horizon nodes have already entered qsearch above.
            On a hit, pop this node's rep-path entry (pushed above) before
            returning. */
-        if (depth >= 1 && depth <= RFP_DEPTH && !in_check && node_type != NODE_PV) {
+        if (depth <= RFP_DEPTH && !in_check && node_type != NODE_PV) {
             if (eval - depth * RFP_MARGIN >= beta) {
                 rep_n--;
                 return eval;
@@ -462,8 +466,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                 i16 saved_floor = rep_floor, saved_game = rep_game;
                 rep_floor = rep_n; rep_game = 0;
                 nm_make(p);
-                if (nd > 0) sc = -alphabeta(p, nd, -beta, -beta + 1, ply + 1, half + 1, child_type);
-                else        sc = -qsearch(p, -beta, -beta + 1, ply + 1, half + 1, MAX_QDEPTH);
+                sc = -alphabeta(p, nd, -beta, -beta + 1, ply + 1, half + 1, child_type);
                 nm_undo(p);
                 rep_floor = saved_floor; rep_game = saved_game;
                 if (sc >= beta && !stop_now) {
@@ -488,7 +491,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
             if (!pc || CO(pc) != (p->side ? 8 : 0)) continue;  /* not our piece: skip
                                                                   (guards a bogus TT move) */
 #ifndef NO_PVS_SEE
-            if (!first && depth >= 1 && depth <= PVS_SEE_DEPTH &&
+            if (!first && depth <= PVS_SEE_DEPTH &&
                 !in_check && node_type != NODE_PV && best > -MATE + MAXPLY &&
                 alpha > -MATE + MAXPLY && beta < MATE - MAXPLY &&
                 mfl(m) == 0 && TY(pc) != 6) {
@@ -532,9 +535,8 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                 if (first) {
                     /* First move: keep PV, or alternate cut/all. */
                     first = 0;
-                    if (depth <= 0) score = -qsearch(p, -beta, -alpha, ply + 1, child_half, MAX_QDEPTH);
-                    else score = -alphabeta(p, depth - 1, -beta, -alpha, ply + 1, child_half,
-                                           node_type == NODE_PV ? NODE_PV : child_type);
+                    score = -alphabeta(p, depth - 1, -beta, -alpha, ply + 1, child_half,
+                                      node_type == NODE_PV ? NODE_PV : child_type);
                 } else {
                     /* PVS: zero-window search; re-search full window only if it beats alpha.
                        score < beta avoids a wasted re-search on an already-proven cutoff.
@@ -551,16 +553,14 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                         new_depth = depth - 1 - R;
                         if (new_depth < 1) new_depth = 1;
                     }
-                    if (depth <= 0) score = -qsearch(p, -alpha - 1, -alpha, ply + 1, child_half, MAX_QDEPTH);
-                    else if (new_depth < depth - 1) {
+                    if (new_depth < depth - 1) {
                         score = -alphabeta(p, new_depth, -alpha - 1, -alpha, ply + 1, child_half, NODE_CUT);
                         if (score > alpha && !stop_now)
                             score = -alphabeta(p, depth - 1, -alpha - 1, -alpha, ply + 1, child_half, child_type);
                     } else
                         score = -alphabeta(p, depth - 1, -alpha - 1, -alpha, ply + 1, child_half, child_type);
                     if (score > alpha && score < beta) {
-                        if (depth <= 0) score = -qsearch(p, -beta, -alpha, ply + 1, child_half, MAX_QDEPTH);
-                        else score = -alphabeta(p, depth - 1, -beta, -alpha, ply + 1, child_half, NODE_PV);
+                        score = -alphabeta(p, depth - 1, -beta, -alpha, ply + 1, child_half, NODE_PV);
                     }
                 }
                 if (score > best) {

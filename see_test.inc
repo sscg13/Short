@@ -202,6 +202,41 @@ int see_selftest(void) {
     rep_reset(); vclock_reset(); qsearch(&p, -INF, INF, 0, 0, 1);
     if (c_see || c_qnodes < 2 || rep_n || memcmp(&p,&before,sizeof p)) ++fails;
 #endif
+#if defined(PROFILE) || defined(VCLOCK)
+    /* Horizon nodes must behave exactly like direct quiescence, even with
+       a deep exact TT entry. Cover captures, evasions and mate for every
+       node type and for negative null-move depths; count each node once. */
+    {
+        static const char *horizon_fens[] = {
+            "r6k/8/8/8/3Q4/8/8/1K6 w - - 0 1",
+            "7k/8/8/8/8/2p5/1p6/KQ6 w - - 0 1",
+            "8/8/8/8/8/2k5/1q6/K7 w - - 0 1"
+        };
+        i16 fixture, hd, nt;
+        nnue_enabled = 0; stop_now = 0; deadline = 0; vtime_mode = 0; g_sigs_n = 0;
+        for (fixture = 0; fixture < 3; ++fixture) {
+            Score expected, got;
+            i32 expected_nodes;
+            parse_fen(&p,horizon_fens[fixture]); before = p;
+            tt_clear(); tt_store(&p,0,10,10000,TT_EXACT,0);
+            rep_reset(); vclock_reset(); nodes_search = 0;
+            expected = qsearch(&p,-INF,INF,0,0,MAX_QDEPTH);
+            expected_nodes = nodes_search;
+            for (hd = -1; hd <= 0; ++hd) for (nt = NODE_PV; nt <= NODE_ALL; ++nt) {
+                rep_reset(); vclock_reset(); nodes_search = 0;
+                c_anodes = c_qnodes = c_tt_probe = c_tt_store = 0;
+                pv_len[0] = 3;
+                got = alphabeta(&p,hd,-INF,INF,0,0,(NodeType)nt);
+                if (got != expected || nodes_search != expected_nodes ||
+                    c_anodes || c_qnodes != expected_nodes || c_tt_probe || c_tt_store ||
+                    pv_len[0] || rep_n || memcmp(&p,&before,sizeof p)) {
+                    printf("Horizon integration failed fixture=%d depth=%d type=%d\n",
+                           fixture,hd,nt); ++fails;
+                }
+            }
+        }
+    }
+#endif
 #ifndef NO_PVS_SEE
     /* Exercise main-search pruning and the forcing-move and PV safeguards. */
     nnue_enabled = 0; stop_now = 0; deadline = 0; vtime_mode = 0; g_sigs_n = 0;

@@ -76,7 +76,9 @@ int time_selftest(void) {
              "real hard stop keeps prior completed depth");
     tm_check(memcmp(&p, &original, sizeof p) == 0 && rep_n == 0 && !nnue_active,
              "hard stop restores position/history/NNUE");
-    tm_prepare(&p, bench_fens[0]);
+    /* This depth-1 search reaches the 64-node clock poll; the starting
+       position can finish before the first poll when its children qsearch. */
+    tm_prepare(&p, bench_fens[1]);
     deadline = 1;
     m = think(&p, 4);
     tm_check(m == 0 && time_test_depth == 0 && stop_now,
