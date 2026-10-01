@@ -371,6 +371,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
     Score best = -INF, original_alpha = alpha;
     i16 legal = 0, in_check = 0, move_count = 0, upcoming = 0;
     NodeType child_type;     /* non-PV child expectation: PV scouts also expect cut */
+    TTData tt;
 
     /* Quiescence owns horizon nodes, including their counters, limits and
        repetition entry. The main search below always has depth >= 1. */
@@ -407,16 +408,13 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
        matching LOWER/UPPER bound cuts off against beta/alpha. PV nodes are
        exempt so a bound never truncates the principal variation's exact score. */
     {
-        u16 tmv = 0;
-        Score tsc = 0;
-        i16 tfl = 0, tdep = 0;
-        if (tt_probe(p, ply, &tmv, &tsc, &tfl, &tdep)) {
-            if (tmv && CO(p->board[mfrom(tmv)]) == (p->side ? 8 : 0))
-                ttm = tmv;
-            if (node_type != NODE_PV && tdep >= depth && tsc >= best) {
-                if (tfl == TT_EXACT) { rep_n--; return tsc; }
-                if (tfl == TT_LOWER && tsc >= beta) { rep_n--; return tsc; }
-                if (tfl == TT_UPPER && tsc <= alpha) { rep_n--; return tsc; }
+        if (tt_probe(p, ply, &tt)) {
+            if (tt.move && CO(p->board[mfrom(tt.move)]) == (p->side ? 8 : 0))
+                ttm = tt.move;
+            if (node_type != NODE_PV && tt.depth >= depth && tt.score >= best) {
+                if (tt.flag == TT_EXACT) { rep_n--; return tt.score; }
+                if (tt.flag == TT_LOWER && tt.score >= beta) { rep_n--; return tt.score; }
+                if (tt.flag == TT_UPPER && tt.score <= alpha) { rep_n--; return tt.score; }
             }
         }
     }
@@ -433,8 +431,14 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
        and shared by the two stages below. */
     {
         Score eval = 0;
-        if (!in_check && node_type != NODE_PV)
-            eval = evaluate(p);
+        if (!in_check && node_type != NODE_PV) {
+            if (!tt.eval_valid) {
+                tt.eval = evaluate(p);
+                tt.eval_valid = 1;
+                tt_store_eval(p, tt.slot, tt.eval);
+            }
+            eval = tt.eval;
+        }
 
         /* reverse futility pruning. Skipped while in check (the eval is
            unreliable with the king exposed), at PV nodes (their score becomes a
@@ -604,14 +608,14 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
            in_check was computed at the top of this node (is_attacked on the
            stm king) and is unchanged by the move loop. */
         Score r = in_check ? (Score)-(MATE - ply) : 0;
-        if (!stop_now) tt_store(p, 0, depth, r, TT_EXACT, ply);
+        if (!stop_now) tt_store(p, 0, depth, r, TT_EXACT, ply, tt.eval, tt.eval_valid);
         return r;
     }
     if (!stop_now && (!upcoming || best > 0)) {
         /* Classify against the entry window; alpha has risen during search. */
         i16 flag = (best >= beta) ? TT_LOWER :
                    (best <= original_alpha) ? TT_UPPER : TT_EXACT;
-        tt_store(p, bestmove, depth, best, flag, ply);
+        tt_store(p, bestmove, depth, best, flag, ply, tt.eval, tt.eval_valid);
     }
     return best;
 }
@@ -1045,6 +1049,7 @@ int profile(int depth) {
     c_possig = 0;
     c_tt_probe = 0;
     c_tt_store = 0;
+    c_tt_eval = 0;
     c_see = c_see_step = 0;
 
     b0 = clock();
@@ -1148,7 +1153,8 @@ int profile(int depth) {
     printf("profile nn_make=%ld nn_undo=%ld nn_eval=%ld refresh_rows=%ld flips=%ld\n",
            (long)c_nn_make, (long)c_nn_undo, (long)c_nn_eval, (long)c_refresh, (long)c_flip);
     printf("profile is_attacked=%ld pos_sig=%ld\n", (long)c_isattacked, (long)c_possig);
-    printf("profile tt_probe=%ld tt_store=%ld\n", (long)c_tt_probe, (long)c_tt_store);
+    printf("profile tt_probe=%ld tt_store=%ld tt_eval=%ld\n",
+           (long)c_tt_probe, (long)c_tt_store, (long)c_tt_eval);
     printf("profile see=%ld see_step=%ld\n", (long)c_see, (long)c_see_step);
     return 0;
 }
@@ -1170,9 +1176,7 @@ int sbench(void) {
     clock_t t0, t1;
     i32 att = 0, caps = 0, quiets = 0, drain = 0, make10k = 0, sig = 0;
     i32 ttpr = 0, ttst = 0;
-    u16 mv;
-    Score tsc;
-    i16 tfl, tdp;
+    TTData tt;
 
     nnue_active = 0;                                /* board-only make/undo */
     for (p = 0; p < BENCH_N; p++) {
@@ -1237,16 +1241,16 @@ int sbench(void) {
         /* TT probe (hit path) + store, averaged over the 8 positions */
         iters = 2000;
         tt_clear();
-        tt_store(&pos, list[0], 5, 100, TT_EXACT, 0);
+        tt_store(&pos, list[0], 5, 100, TT_EXACT, 0, 100, 1);
         t0 = clock();
         MAME_MARK(0x1c);
-        for (i = 0; i < iters; i++) tt_probe(&pos, 0, &mv, &tsc, &tfl, &tdp);
+        for (i = 0; i < iters; i++) tt_probe(&pos, 0, &tt);
         MAME_MARK(0x1d);
         t1 = clock();
         ttpr += (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
         t0 = clock();
         MAME_MARK(0x1e);
-        for (i = 0; i < iters; i++) tt_store(&pos, list[0], 5, 100, TT_EXACT, 0);
+        for (i = 0; i < iters; i++) tt_store(&pos, list[0], 5, 100, TT_EXACT, 0, 100, 1);
         MAME_MARK(0x1f);
         t1 = clock();
         ttst += (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;

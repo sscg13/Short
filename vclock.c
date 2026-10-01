@@ -253,11 +253,19 @@ static i64 vbudget_cyc, vsoft_cyc; /* weighted hard/soft limits */
 typedef struct { i32 att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm, tp, ts; } VW;
 static const VW vw_tab[4] = {
     /*   att    ps     gc     gq      gm     mk    nm   rf    ev     rn      rm      tp    ts */
-    {  1894,     0, 13868, 15792, 162305, 1009, 1059, 3164,  5109,   6984,   9962,   660,  495 }, /* 80286 */
-    {  5237,     0, 41727, 47613, 551447, 3268, 3433,10370, 15600,  28317,  35057,  2195, 2087 }, /* 8088 */
-    {  4504,     0, 35890, 41003, 491587, 2842, 3068, 9535, 13072,  23997,  29563,  1840, 1648 }, /* 8086 */
-    {  2714,   140, 21359, 24059, 250050, 1595, 1641, 5059,  7535,  11674,  15909,  1165, 1009 }, /* 80186 */
+    {  1894,     0, 13868, 15792, 162305, 1009, 1059, 3164,  5109,   6984,   9962,   700,  600 }, /* 80286 */
+    {  5237,     0, 41727, 47613, 551447, 3268, 3433,10370, 15600,  28317,  35057,  2330, 2530 }, /* 8088 */
+    {  4504,     0, 35890, 41003, 491587, 2842, 3068, 9535, 13072,  23997,  29563,  1952, 1998 }, /* 8086 */
+    {  2714,   140, 21359, 24059, 250050, 1595, 1641, 5059,  7535,  11674,  15909,  1236, 1224 }, /* 80186 */
 };
+/* TT STATIC EVAL (2026-10-01): uninstrumented -0 -ml -ox, 86Box 286 @6 MHz,
+   100000 calls including loop overhead: hit probe 672.24 cycles, score store
+   586.62, eval-only stores <=448.20 (same key, protected collision, replacement).
+   Round probe/store up to 700/600, charging every eager attempt the full 600.
+   This covers the expanded probe/result fields and eager-write work. Secondary
+   CPUs use estimates scaling their prior tp/ts by these increases, rounded up.
+   An independent eight-position bench-4 run keeps the identical tree and drops
+   157471 -> 156043 guest ms. No per-node fit or scalar-clock change is made. */
 /* LEGACY CPU RE-FIT (2026-09-29): current -0 -ml -ox DOS source on the 86Box
    8088 @16 MHz and 8086 @8 MHz interpreter VMs and MAME Nimbus 80186 @8 MHz.
    SEE microbenchmarks give maximum uninstrumented scan residuals of 7486,
@@ -370,6 +378,9 @@ static i64 vclock_cyc(void) {
     r += (i64)w->ev  * c_nn_eval;
     r += (i64)w->tp  * c_tt_probe;
     r += (i64)w->ts  * c_tt_store;
+    /* Eager eval-only writes reuse the probed slot; conservatively charge the
+       full score-store cost even for a protected collision that exits early. */
+    r += (i64)w->ts  * c_tt_eval;
     r += (i64)rep_cost[vcpu_model].fixed * (c_anodes + c_qnodes);
     r += (i64)rep_cost[vcpu_model].scan * c_rep_scan;
     r += (i64)rep_cost[vcpu_model].upscan * c_rep_upscan;
@@ -432,6 +443,7 @@ void vclock_reset(void) {
     c_see = c_see_step = 0;
     c_tt_probe = 0;
     c_tt_store = 0;
+    c_tt_eval = 0;
 #endif
 }
 

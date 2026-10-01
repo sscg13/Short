@@ -218,7 +218,7 @@ int see_selftest(void) {
             Score expected, got;
             i32 expected_nodes;
             parse_fen(&p,horizon_fens[fixture]); before = p;
-            tt_clear(); tt_store(&p,0,10,10000,TT_EXACT,0);
+            tt_clear(); tt_store(&p,0,10,10000,TT_EXACT,0,0,0);
             rep_reset(); vclock_reset(); nodes_search = 0;
             expected = qsearch(&p,-INF,INF,0,0,MAX_QDEPTH);
             expected_nodes = nodes_search;
@@ -249,7 +249,7 @@ int see_selftest(void) {
         for (nt = NODE_PV; nt <= NODE_ALL; ++nt) {
             rep_reset(); tt_clear(); nodes_search = 0;
             memset(killers,0,sizeof killers); memset(qhist,0,sizeof qhist);
-            tt_store(&p,MK(0x02,0x01,0,0),0,0,TT_UPPER,0);
+            tt_store(&p,MK(0x02,0x01,0,0),0,0,TT_UPPER,0,0,0);
             st_pvs_tries = st_pvs_prunes = st_pvs_checks_kept = 0;
             score = alphabeta(&p,1,1500,1501,0,0,(NodeType)nt);
             if ((nt == NODE_PV ? st_pvs_tries != 0 :
