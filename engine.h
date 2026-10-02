@@ -106,6 +106,7 @@ typedef struct {
 } MGen;
 
 #define MAXPLY 32         /* killers[] rows; movebuf rows cover ply 0..MAXPLY-1 */
+#define MAX_QDEPTH 8      /* capture/evasion budget past the main-search leaf */
 #define MAX_G_SIGS 128    /* game-history position signatures. A capture or pawn
                              move irreversibly changes the position, so history
                              BEFORE the last zeroing move can never be a
@@ -256,6 +257,8 @@ int nnue_bench(void);
    One far 64 KB table on the 16-bit target (4096 x 16-byte entries), plain
    array on gcc. Probe/store keyed on the full Pos.sig; see tt.c. */
 enum { TT_EXACT = 0, TT_LOWER = 1, TT_UPPER = 2, TT_NONE = 3 };
+/* Qsearch depths run from 1-MAX_QDEPTH through 0; positive depths are main
+   search. The packed byte reserves -MAX_QDEPTH for eval-only/empty entries. */
 /* Probe returns the selected slot even on a miss, for an eager eval write.
    Eval validity is independent of the search bound/depth. */
 typedef struct {
@@ -309,7 +312,7 @@ void zob_init(void);              /* one-time Zobrist key tables (dedicated init
 i16 gen_caps(Pos *p, u16 *list);
 i16 gen_quiets(Pos *p, u16 *list);
 void mgen_init(Pos *p, MGen *g, i16 ply, u16 k0, u16 k1, u16 ttm);
-void mgen_init_q(Pos *p, MGen *g, i16 ply);   /* captures only (quiescence) */
+void mgen_init_q(Pos *p, MGen *g, i16 ply, u16 ttm); /* captures, TT move first */
 u16 next_move(Pos *p, MGen *g);
 
 #endif

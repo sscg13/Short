@@ -126,9 +126,6 @@ static void qhist_update(Pos *p, u16 m, i16 delta) {
     *h = v;
 }
 
-#define MAX_QDEPTH 8    /* longest capture chain past the search leaf; guards against
-                           qsearch explosions (deep recapture lines) */
-
 /* reverse futility pruning: a shallow, non-PV node whose static eval already
    beats beta by more than a depth-scaled margin returns that eval without
    searching - even a move that loses the whole margin keeps the score above
@@ -265,19 +262,25 @@ static void sort_root(void) {
 /* quiescence search                                                  */
 /* ------------------------------------------------------------------ */
 
+/* Expected node type is explicit in both searches; a PV node stays protected
+   from TT cutoffs even when its window narrows to one point. */
+typedef enum { NODE_PV, NODE_CUT, NODE_ALL } NodeType;
+
 /* Stand-pat alpha-beta over captures only, ordered by MVV-LVA (reuses the staged
    generator in caps-only mode). Called at every alpha-beta horizon (depth 0) so the
    eval is stable and material wins/losses don't hide behind the horizon.
    If the side to move is in check, stand-pat is invalid: generate ALL legal moves
    (full staged generator) to find evasions, and score a mate properly.
    Returns the score from the side-to-move's point of view (negamax). */
-static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd) {
+static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd,
+                     NodeType node_type) {
     MGen mg;
-    u16 m;
-    i16 in_check, legal = 0;
-    Score stand, best = -INF;    /* fail-soft: return the true best found, even
-                                    outside [alpha,beta] - gives the caller a
-                                    tighter bound than a fail-hard clamp would. */
+    u16 m, ttm = 0, bestmove = 0;
+    i16 in_check, legal = 0, upcoming = 0, tt_depth;
+    TTData tt;
+    NodeType child_type;
+    /* Return the true best found even outside [alpha,beta] (fail-soft). */
+    Score original_alpha = alpha, stand, best = -INF;
 
     PCOUNT(c_qnodes);
     nodes_search++;
@@ -298,27 +301,46 @@ static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd)
     if (half >= MAX_HALF) return 0;
     if (rep_enter(p, half, ply)) return 0;
     if (alpha < 0 && rep_upcoming(p, half, ply)) {
-        best = 0; alpha = 0;
+        upcoming = 1; best = 0; alpha = 0;
         if (alpha >= beta) { rep_n--; return 0; }
     }
+    /* Rank qsearch by its remaining capture/evasion budget, including the
+       absolute ply cap. A short-budget result cannot answer a longer search,
+       and every main-search depth outranks every qsearch result. */
+    tt_depth = qd;
+    if (tt_depth > MAXPLY - 4 - ply) tt_depth = MAXPLY - 4 - ply;
+    tt_depth -= MAX_QDEPTH;
+    if (tt_probe(p, ply, &tt)) {
+        if (tt.move && CO(p->board[mfrom(tt.move)]) == (p->side ? 8 : 0))
+            ttm = tt.move;
+        if (node_type != NODE_PV && tt.depth >= tt_depth && tt.score >= best) {
+            if (tt.flag == TT_EXACT ||
+                (tt.flag == TT_LOWER && tt.score >= beta) ||
+                (tt.flag == TT_UPPER && tt.score <= alpha)) {
+                rep_n--; return tt.score;
+            }
+        }
+    }
+    child_type = node_type == NODE_PV ? NODE_PV :
+                 node_type == NODE_CUT ? NODE_ALL : NODE_CUT;
     in_check = is_attacked(p, p->ks[p->side], p->side ^ 1);
     if (!in_check) {
-        TTData tt;
-        /* Cache the raw stand-pat eval. Qsearch still owns its score/bounds;
-           main-search results have a different horizon and are not stand pat. */
-        tt_probe(p, ply, &tt);
         if (tt.eval_valid) stand = tt.eval;
         else {
             stand = evaluate(p);
             tt_store_eval(p, tt.slot, stand);
+            tt.eval = stand; tt.eval_valid = 1;
         }
         if (stand > best) best = stand;                            /* fail-soft baseline = stand-pat */
-        if (stand >= beta) { rep_n--; return stand; }         /* stand-pat cutoff */
+        if (stand >= beta) {
+            tt_store(p, 0, tt_depth, stand, TT_LOWER, ply, tt.eval, tt.eval_valid);
+            rep_n--; return stand;
+        }
         if (stand > alpha) alpha = stand;
     }
 
-    if (in_check) mgen_init(p, &mg, ply, 0, 0, 0);  /* all legal evasions */
-    else          mgen_init_q(p, &mg, ply);          /* captures only, MVV-LVA */
+    if (in_check) mgen_init(p, &mg, ply, 0, 0, ttm); /* all legal evasions */
+    else          mgen_init_q(p, &mg, ply, ttm);     /* TT capture then MVV-LVA */
 
     while ((m = next_move(p, &mg)) != 0) {
         Undo u;
@@ -343,9 +365,9 @@ static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd)
             legal = 1;
             is_cap = (u.cap != EMPTY) || (mfl(m) == MF_EP);
             child_half = (TY(pc) == 1 || is_cap) ? 0 : half + 1;
-            score = -qsearch(p, -beta, -alpha, ply + 1, child_half, qd - 1);
+            score = -qsearch(p, -beta, -alpha, ply + 1, child_half, qd - 1, child_type);
             undo_move(p, m, &u);
-            if (score > best) best = score;      /* fail-soft: track the best move */
+            if (score > best) { best = score; bestmove = m; }
             if (score > alpha) {
                 alpha = score;
                 if (alpha >= beta) break;         /* beta cutoff */
@@ -356,8 +378,12 @@ static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd)
     }
 
     rep_n--;
-    if (!legal && in_check)
-        return -(MATE - ply);                    /* mated in the qsearch */
+    if (!legal && in_check) best = -(MATE - ply);
+    if (!stop_now && (!upcoming || best > 0)) {
+        i16 flag = best >= beta ? TT_LOWER :
+                   best <= original_alpha ? TT_UPPER : TT_EXACT;
+        tt_store(p, bestmove, tt_depth, best, flag, ply, tt.eval, tt.eval_valid);
+    }
     return best;                                 /* fail-soft */
 }
 
@@ -371,8 +397,6 @@ static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd)
    scouts expect a cut. Non-PV children (including null moves) alternate cut
    and all. Reduced probes expect a cut; an unreduced retry restores the
    parent's child expectation. Cut and all currently share every pruning gate. */
-typedef enum { NODE_PV, NODE_CUT, NODE_ALL } NodeType;
-
 static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 half,
                       NodeType node_type) {
     MGen mg;
@@ -384,7 +408,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
 
     /* Quiescence owns horizon nodes, including their counters, limits and
        repetition entry. The main search below always has depth >= 1. */
-    if (depth <= 0) return qsearch(p, alpha, beta, ply, half, MAX_QDEPTH);
+    if (depth <= 0) return qsearch(p, alpha, beta, ply, half, MAX_QDEPTH, node_type);
 
     PCOUNT(c_anodes);
     nodes_search++;

@@ -586,7 +586,7 @@ i16 gen_moves(Pos *p, u16 *list) {
 /* staged move generator                                              */
 /* ------------------------------------------------------------------ */
 
-#define MG_TT      0   /* transposition-table move (empty for now) */
+#define MG_TT      0   /* transposition-table move */
 #define MG_CAPS    1   /* captures/promotions, MVV-LVA selection */
 #define MG_KILLERS 2   /* two quiet killers */
 #define MG_QUIETS  3   /* remaining quiets (as generated) */
@@ -698,14 +698,12 @@ void mgen_init(Pos *p, MGen *g, i16 ply, u16 k0, u16 k1, u16 ttm) {
 }
 
 /* quiescence init: captures only (MVV-LVA), no killers/quiets */
-void mgen_init_q(Pos *p, MGen *g, i16 ply) {
-    (void)p;
-    g->list = movebuf[ply];
-    g->n = 0;
-    g->idx = 0;
-    g->stage = MG_CAPS;
-    g->ttm = 0;
-    g->k0 = g->k1 = 0;
+void mgen_init_q(Pos *p, MGen *g, i16 ply, u16 ttm) {
+    /* A main-search TT move can be quiet; qsearch admits only captures,
+       promotions and EP outside check. Evasions use the full picker. */
+    if (ttm && !p->board[mto(ttm)] && !ispromo(ttm) && mfl(ttm) != MF_EP)
+        ttm = 0;
+    mgen_init(p, g, ply, 0, 0, ttm);
     g->caps_only = 1;
 }
 
