@@ -204,7 +204,8 @@ int see_selftest(void) {
 #endif
 #if defined(PROFILE) || defined(VCLOCK)
     /* Horizon nodes must behave exactly like direct quiescence, even with
-       a deep exact TT entry. Cover captures, evasions and mate for every
+       a deep exact TT entry. Only its raw eval can affect stand pat.
+       Cover captures, evasions and mate for every
        node type and for negative null-move depths; count each node once. */
     {
         static const char *horizon_fens[] = {
@@ -216,25 +217,61 @@ int see_selftest(void) {
         nnue_enabled = 0; stop_now = 0; deadline = 0; vtime_mode = 0; g_sigs_n = 0;
         for (fixture = 0; fixture < 3; ++fixture) {
             Score expected, got;
-            i32 expected_nodes;
+            i32 expected_nodes, expected_probes;
             parse_fen(&p,horizon_fens[fixture]); before = p;
             tt_clear(); tt_store(&p,0,10,10000,TT_EXACT,0,0,0);
             rep_reset(); vclock_reset(); nodes_search = 0;
+            c_anodes = c_qnodes = c_tt_probe = c_tt_store = 0;
             expected = qsearch(&p,-INF,INF,0,0,MAX_QDEPTH);
             expected_nodes = nodes_search;
+            expected_probes = c_tt_probe;
             for (hd = -1; hd <= 0; ++hd) for (nt = NODE_PV; nt <= NODE_ALL; ++nt) {
                 rep_reset(); vclock_reset(); nodes_search = 0;
                 c_anodes = c_qnodes = c_tt_probe = c_tt_store = 0;
                 pv_len[0] = 3;
                 got = alphabeta(&p,hd,-INF,INF,0,0,(NodeType)nt);
                 if (got != expected || nodes_search != expected_nodes ||
-                    c_anodes || c_qnodes != expected_nodes || c_tt_probe || c_tt_store ||
+                    c_anodes || c_qnodes != expected_nodes ||
+                    c_tt_probe != expected_probes || c_tt_store ||
                     pv_len[0] || rep_n || memcmp(&p,&before,sizeof p)) {
                     printf("Horizon integration failed fixture=%d depth=%d type=%d\n",
                            fixture,hd,nt); ++fails;
                 }
             }
         }
+    }
+    /* A zero stand-pat cutoff is cached eagerly. A hit avoids another eager
+       attempt; filling a searched entry must preserve its result and move. */
+    {
+        TTData data;
+        Score expected, got;
+        parse_fen(&p,bench_fens[0]); before = p;
+        expected = evaluate(&p);
+        if (expected != 0) ++fails; /* material-only starting position */
+        tt_clear(); rep_reset(); vclock_reset(); c_tt_eval = 0;
+        got = qsearch(&p,-1,0,0,0,1);
+        if (got != expected || c_tt_eval != 1 ||
+            !tt_probe(&p,0,&data) || !data.eval_valid || data.eval != 0 ||
+            data.flag != TT_NONE || rep_n || memcmp(&p,&before,sizeof p)) ++fails;
+        rep_reset(); vclock_reset(); c_tt_eval = 0;
+        got = qsearch(&p,-1,0,0,0,1);
+        if (got != expected || c_tt_eval || rep_n ||
+            memcmp(&p,&before,sizeof p)) ++fails;
+        tt_clear(); tt_store(&p,MK(0x24,0x14,0,0),5,1234,TT_EXACT,0,0,0);
+        rep_reset(); vclock_reset(); c_tt_eval = 0;
+        got = qsearch(&p,-1,0,0,0,1);
+        if (got != expected || c_tt_eval != 1 ||
+            !tt_probe(&p,0,&data) || data.score != 1234 || data.depth != 5 ||
+            data.flag != TT_EXACT || data.move != MK(0x24,0x14,0,0) ||
+            !data.eval_valid || data.eval != expected || rep_n ||
+            memcmp(&p,&before,sizeof p)) ++fails;
+        /* Draw and emergency depth exits precede the cache probe. */
+        tt_store_eval(&p,data.slot,700);
+        rep_reset(); vclock_reset(); c_tt_probe = 0;
+        if (qsearch(&p,-INF,INF,0,MAX_HALF,1) != 0 || c_tt_probe || rep_n) ++fails;
+        rep_reset(); vclock_reset(); c_tt_probe = 0;
+        if (qsearch(&p,-INF,INF,0,0,0) != expected || c_tt_probe || rep_n) ++fails;
+        tt_clear();
     }
 #endif
     /* Exercise main-search pruning and the forcing-move and PV safeguards. */

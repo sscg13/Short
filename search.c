@@ -301,8 +301,17 @@ static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd)
         best = 0; alpha = 0;
         if (alpha >= beta) { rep_n--; return 0; }
     }
-    in_check = is_attacked(p, p->ks[p->side], p->side ^ 1);    if (!in_check) {
-        stand = evaluate(p);
+    in_check = is_attacked(p, p->ks[p->side], p->side ^ 1);
+    if (!in_check) {
+        TTData tt;
+        /* Cache the raw stand-pat eval. Qsearch still owns its score/bounds;
+           main-search results have a different horizon and are not stand pat. */
+        tt_probe(p, ply, &tt);
+        if (tt.eval_valid) stand = tt.eval;
+        else {
+            stand = evaluate(p);
+            tt_store_eval(p, tt.slot, stand);
+        }
         if (stand > best) best = stand;                            /* fail-soft baseline = stand-pat */
         if (stand >= beta) { rep_n--; return stand; }         /* stand-pat cutoff */
         if (stand > alpha) alpha = stand;

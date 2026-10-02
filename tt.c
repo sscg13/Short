@@ -14,7 +14,8 @@
      key(8) | move(2) | score(2) | eval(2) | info(1) | eval_valid(1)
    info = depth (6 bits, 0..63) | flag (2 bits: EXACT/LOWER/UPPER/NONE).
    NONE/depth 0 is an eval-only entry, never a search bound. The static eval
-   is saved as soon as main search computes it, before pruning can return.
+   is saved as soon as main search or qsearch computes it, before pruning
+   or stand pat can return.
 
    The stored key is the full incremental position signature (Pos.sig), which
    includes side/castle/ep, so a key match means the same position - the stored
