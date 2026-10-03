@@ -117,6 +117,12 @@ static u16 killers[MAXPLY][2];          /* two killer moves per ply (quiet only)
 
 i16 qhist[2][6][64];   /* quiet-history: side, piece-type-1, to-square-compact */
 
+/* A new game/position must not inherit ordering learned in earlier games. */
+void search_clear_ordering(void) {
+    memset(killers, 0, sizeof killers);
+    memset(qhist, 0, sizeof qhist);
+}
+
 /* bonus/penalty for a quiet move's history slot, clamped to +-QH_MAX */
 static void qhist_update(Pos *p, u16 m, i16 delta) {
     i16 *h = &qhist[p->side][TY(p->board[mfrom(m)]) - 1][(m >> 6) & 0x3F];
@@ -174,12 +180,11 @@ static i32 st_pvs_tries, st_pvs_prunes, st_pvs_checks_kept;
    gcc and 16-bit builds compute IDENTICAL tables bit-for-bit (the old
    compile-time table was Python-generated from the same formula; the fixed-
    point generator reproduces it exactly, so the bench tree is unchanged).
-   d = node depth, m = legal moves already searched at this node. LMR_DEPTH 3
-   keeps it out of the shallow nodes where move ordering is weakest; LMR_MOVES 4
+   d = node depth, m = legal moves already searched at this node. The minimum
+   reduced child depth of 1 prevents reductions at node depths 1 and 2. LMR_MOVES 4
    protects the TT move and both killers (typically the first 1-3 searched);
    quiet-only (captures/promos/EP/castle keep full depth); expected cut/all
    and non-check nodes only. */
-#define LMR_DEPTH 3
 #define LMR_MOVES 4
 #define LMR_TD    32    /* lmr_tab rows: node depth 0..31 (row 31 saturates) */
 #define LMR_TM    64    /* lmr_tab cols: moves already searched 0..63 (col 63 saturates) */
@@ -429,23 +434,21 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
     /* RFP and NMP both need the static eval, and only at a non-PV, non-check
        node is it trustworthy enough to prune on, so it is computed once here
        and shared by the two stages below. */
-    {
-        Score eval = 0;
-        if (!in_check && node_type != NODE_PV) {
-            if (!tt.eval_valid) {
-                tt.eval = evaluate(p);
-                tt.eval_valid = 1;
-                tt_store_eval(p, tt.slot, tt.eval);
-            }
-            eval = tt.eval;
+    if (!in_check && node_type != NODE_PV) {
+        Score eval;
+        if (!tt.eval_valid) {
+            tt.eval = evaluate(p);
+            tt.eval_valid = 1;
+            tt_store_eval(p, tt.slot, tt.eval);
         }
+        eval = tt.eval;
 
         /* reverse futility pruning. Skipped while in check (the eval is
            unreliable with the king exposed), at PV nodes (their score becomes a
            true bound). Horizon nodes have already entered qsearch above.
            On a hit, pop this node's rep-path entry (pushed above) before
            returning. */
-        if (depth <= RFP_DEPTH && !in_check && node_type != NODE_PV) {
+        if (depth <= RFP_DEPTH) {
             if (eval - depth * RFP_MARGIN >= beta) {
                 rep_n--;
                 return eval;
@@ -459,8 +462,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
            resolve a check) and when the side to move holds no non-pawn material
            (zugzwang-prone endings). The 50-move guard keeps the pass from
            walking into a forced draw. On a hit, pop this node's rep-path entry. */
-        if (depth >= NMP_DEPTH && !in_check && node_type != NODE_PV &&
-            half + 1 < MAX_HALF) {
+        if (depth >= NMP_DEPTH && half + 1 < MAX_HALF) {
             if (eval >= beta + NMP_MARGIN && has_np_material(p)) {
                 i16 R = NMP_RED + depth / 6;
                 i16 nd = depth - 1 - R;         /* the null move spends a ply */
@@ -545,7 +547,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                        a quiet move only sees captures and can miss quiet defenses). A
                        reduced search that beats alpha is re-searched at full depth. */
                     i16 new_depth = depth - 1;
-                    if (depth >= LMR_DEPTH && move_count >= LMR_MOVES &&
+                    if (move_count >= LMR_MOVES &&
                         node_type != NODE_PV && !in_check &&
                         mfl(m) == 0 && u.cap == EMPTY) {
                         i16 R = lmr_tab[depth < LMR_TD ? depth : LMR_TD - 1]
@@ -566,7 +568,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                 if (score > best) {
                     best = score;
                     bestmove = m;
-                    if (ply < MAXPLY) {                  /* extend this node's PV with the child's */
+                    { /* extend this node's PV with the child's */
                         i16 pl = pv_len[ply + 1], k;
                         pv[ply][0] = m;
                         for (k = 0; k < pl && k < MAXPLY - 1; k++) pv[ply][k + 1] = pv[ply + 1][k];
@@ -634,7 +636,7 @@ void search_root(Pos *p, i16 maxdepth) {
         clock_t t0, t1;
         double secs;
 
-        if (d >= 2 && prev > -(MATE - MAXPLY) && prev < MATE - MAXPLY) {
+        if (prev > -(MATE - MAXPLY) && prev < MATE - MAXPLY) {
             asp_lo = prev - delta;
             asp_hi = prev + delta;
         }
@@ -743,7 +745,7 @@ u16 think(Pos *p, i16 maxdepth) {
         if (vtime_mode) {
             if (vclock_budget_hit()) break;
         } else if (deadline > 0 && search_clock() >= deadline) break;
-        if (d >= 2 && prev > -(MATE - MAXPLY) && prev < MATE - MAXPLY) {
+        if (prev > -(MATE - MAXPLY) && prev < MATE - MAXPLY) {
             asp_lo = prev - delta;
             asp_hi = prev + delta;
         }
@@ -910,8 +912,7 @@ int bench(int depth) {
 
         parse_fen(&p, bench_fens[i]);
         g_sigs_n = 0;                            /* no game-history repetitions */
-        memset(killers, 0, sizeof killers);
-        memset(qhist, 0, sizeof qhist);
+        search_clear_ordering();
         tt_clear();                              /* no cross-position TT reuse */
         root_n = gen_moves(&p, root_m);
         for (k = 0; k < root_n; k++) root_score[k] = 0;
@@ -922,7 +923,7 @@ int bench(int depth) {
             Score asp_lo = -INF, asp_hi = INF, bsc = -INF;
             u16 bm = 0;
             i16 delta = ASP_DELTA;
-            if (d >= 2 && prev > -(MATE - MAXPLY) && prev < MATE - MAXPLY) {
+            if (prev > -(MATE - MAXPLY) && prev < MATE - MAXPLY) {
                 asp_lo = prev - delta;
                 asp_hi = prev + delta;
             }
@@ -1065,8 +1066,7 @@ int profile(int depth) {
 
         parse_fen(&p, bench_fens[i]);
         g_sigs_n = 0;                            /* no game-history repetitions */
-        memset(killers, 0, sizeof killers);
-        memset(qhist, 0, sizeof qhist);
+        search_clear_ordering();
         tt_clear();                              /* no cross-position TT reuse */
         root_n = gen_moves(&p, root_m);
         for (k = 0; k < root_n; k++) root_score[k] = 0;
@@ -1075,7 +1075,7 @@ int profile(int depth) {
         for (d = 1; d <= depth; d++) {
             Score asp_lo = -INF, asp_hi = INF, bsc = -INF;
             i16 delta = ASP_DELTA;
-            if (d >= 2 && prev > -(MATE - MAXPLY) && prev < MATE - MAXPLY) {
+            if (prev > -(MATE - MAXPLY) && prev < MATE - MAXPLY) {
                 asp_lo = prev - delta;
                 asp_hi = prev + delta;
             }
