@@ -117,6 +117,12 @@ static u16 killers[MAXPLY][2];          /* two killer moves per ply (quiet only)
 
 i16 qhist[2][6][64];   /* quiet-history: side, piece-type-1, to-square-compact */
 
+/* A new game/position must not inherit ordering learned in earlier games. */
+void search_clear_ordering(void) {
+    memset(killers, 0, sizeof killers);
+    memset(qhist, 0, sizeof qhist);
+}
+
 /* bonus/penalty for a quiet move's history slot, clamped to +-QH_MAX */
 static void qhist_update(Pos *p, u16 m, i16 delta) {
     i16 *h = &qhist[p->side][TY(p->board[mfrom(m)]) - 1][(m >> 6) & 0x3F];
@@ -910,8 +916,7 @@ int bench(int depth) {
 
         parse_fen(&p, bench_fens[i]);
         g_sigs_n = 0;                            /* no game-history repetitions */
-        memset(killers, 0, sizeof killers);
-        memset(qhist, 0, sizeof qhist);
+        search_clear_ordering();
         tt_clear();                              /* no cross-position TT reuse */
         root_n = gen_moves(&p, root_m);
         for (k = 0; k < root_n; k++) root_score[k] = 0;
@@ -1065,8 +1070,7 @@ int profile(int depth) {
 
         parse_fen(&p, bench_fens[i]);
         g_sigs_n = 0;                            /* no game-history repetitions */
-        memset(killers, 0, sizeof killers);
-        memset(qhist, 0, sizeof qhist);
+        search_clear_ordering();
         tt_clear();                              /* no cross-position TT reuse */
         root_n = gen_moves(&p, root_m);
         for (k = 0; k < root_n; k++) root_score[k] = 0;

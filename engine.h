@@ -195,6 +195,7 @@ Sig pos_sig(Pos *p);
 u16 repetition_move(Pos *p, Sig target);
 void search_root(Pos *p, i16 maxdepth);
 u16 think(Pos *p, i16 maxdepth);
+void search_clear_ordering(void);  /* clear killers and quiet history on game/position reset */
 
 /* quiet-history move-ordering table. Indexed by side to move (2), moving
    piece type-1 (6) and destination square in compact 0..63 (the move already
