@@ -198,7 +198,7 @@ static i32 st_pvs_tries, st_pvs_prunes, st_pvs_checks_kept;
    fallback re-searches are just wasted nodes. Mate scores never aspirate (the
    full window preserves the exact mate line) and the >4096 cap forces the full
    window so the loop terminates without i16 delta overflow. */
-#define ASP_DELTA 150
+#define ASP_DELTA 50
 
 static u8 lmr_tab[LMR_TD][LMR_TM];
 
