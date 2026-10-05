@@ -462,12 +462,14 @@ static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd)
    parent's child expectation. Cut and all currently share every pruning gate. */
 typedef enum { NODE_PV, NODE_CUT, NODE_ALL } NodeType;
 
+/* At ply zero, callers supply root_m/root_score and use NODE_PV. Root moves
+   retain the previous pass's order; descendants use the staged move picker. */
 static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 half,
                       NodeType node_type) {
     MGen mg;
     u16 m, ttm = 0, bestmove = 0;
     Score best = -INF, original_alpha = alpha;
-    i16 legal = 0, in_check = 0, move_count = 0, upcoming = 0;
+    i16 legal = 0, in_check = 0, move_count = 0, upcoming = 0, root_index = 0;
     NodeType child_type;     /* non-PV child expectation: PV scouts also expect cut */
     TTData tt;
 
@@ -475,44 +477,51 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
        repetition entry. The main search below always has depth >= 1. */
     if (depth <= 0) return qsearch(p, alpha, beta, ply, half, MAX_QDEPTH);
 
-    PCOUNT(c_anodes);
-    nodes_search++;
-    vtotal_nodes++;
-    /* Virtual mode must never consult the host clock for either limit.
-       Real time is polled every 64 nodes, including quiescence. */
-    if (!vtime_mode && (nodes_search & 63) == 0 &&
-        deadline > 0 && search_clock() >= deadline)
-        stop_now = 1;
-    if (vtime_mode && vclock_budget_hit())
-        stop_now = 1;
-    if (stop_now) return best;
-    if (ply >= MAXPLY) return evaluate(p);   /* hard depth cap: never index past pv/killers/movebuf */
-    pv_len[ply] = 0;                                 /* no best line yet at this ply */
+    /* The root already belongs to game history. Keep its move ordering and
+       accounting outside the recursive-node setup, but share the PVS loop. */
+    if (!ply) {
+        sort_root();
+        pv_len[0] = 0;
+    } else {
+        PCOUNT(c_anodes);
+        nodes_search++;
+        vtotal_nodes++;
+        /* Virtual mode must never consult the host clock for either limit.
+           Real time is polled every 64 nodes, including quiescence. */
+        if (!vtime_mode && (nodes_search & 63) == 0 &&
+            deadline > 0 && search_clock() >= deadline)
+            stop_now = 1;
+        if (vtime_mode && vclock_budget_hit())
+            stop_now = 1;
+        if (stop_now) return best;
+        if (ply >= MAXPLY) return evaluate(p);   /* hard depth cap: never index past pv/killers/movebuf */
+        pv_len[ply] = 0;                                 /* no best line yet at this ply */
 
-    if (rep_enter(p, half, ply)) return 0;
-    if (alpha < 0 && rep_upcoming(p, half, ply)) {
-        upcoming = 1; best = 0; alpha = 0;
-        if (alpha >= beta) { rep_n--; return 0; }
-    }
+        if (rep_enter(p, half, ply)) return 0;
+        if (alpha < 0 && rep_upcoming(p, half, ply)) {
+            upcoming = 1; best = 0; alpha = 0;
+            if (alpha >= beta) { rep_n--; return 0; }
+        }
 
-    /* 50-move rule: 100 half-moves without a pawn move or capture is a draw */
-    if (half >= MAX_HALF) { rep_n--; return 0; }
+        /* 50-move rule: 100 half-moves without a pawn move or capture is a draw */
+        if (half >= MAX_HALF) { rep_n--; return 0; }
 
-    /* transposition table. The probe is shared between the move-ordering use
-       (the stored move, if its from-square still holds a piece of the side to
-       move, is tried first in the MG_TT stage) and the cutoff use. A stored
-       result with depth >= this node's depth is trusted ONLY at a non-PV node
-       (expected cut or all): EXACT returns the score outright, and a
-       matching LOWER/UPPER bound cuts off against beta/alpha. PV nodes are
-       exempt so a bound never truncates the principal variation's exact score. */
-    {
-        if (tt_probe(p, ply, &tt)) {
-            if (tt.move && CO(p->board[mfrom(tt.move)]) == (p->side ? 8 : 0))
-                ttm = tt.move;
-            if (node_type != NODE_PV && tt.depth >= depth && tt.score >= best) {
-                if (tt.flag == TT_EXACT) { rep_n--; return tt.score; }
-                if (tt.flag == TT_LOWER && tt.score >= beta) { rep_n--; return tt.score; }
-                if (tt.flag == TT_UPPER && tt.score <= alpha) { rep_n--; return tt.score; }
+        /* transposition table. The probe is shared between the move-ordering use
+           (the stored move, if its from-square still holds a piece of the side to
+           move, is tried first in the MG_TT stage) and the cutoff use. A stored
+           result with depth >= this node's depth is trusted ONLY at a non-PV node
+           (expected cut or all): EXACT returns the score outright, and a
+           matching LOWER/UPPER bound cuts off against beta/alpha. PV nodes are
+           exempt so a bound never truncates the principal variation's exact score. */
+        {
+            if (tt_probe(p, ply, &tt)) {
+                if (tt.move && CO(p->board[mfrom(tt.move)]) == (p->side ? 8 : 0))
+                    ttm = tt.move;
+                if (node_type != NODE_PV && tt.depth >= depth && tt.score >= best) {
+                    if (tt.flag == TT_EXACT) { rep_n--; return tt.score; }
+                    if (tt.flag == TT_LOWER && tt.score >= beta) { rep_n--; return tt.score; }
+                    if (tt.flag == TT_UPPER && tt.score <= alpha) { rep_n--; return tt.score; }
+                }
             }
         }
     }
@@ -521,13 +530,13 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
        square NOT on the king's rank/file/diagonal is then always legal (it can
        neither leave a check unresolved nor open a new line), so its legality
        is_attacked test can be skipped. */
-    in_check = is_attacked(p, p->ks[p->side], p->side ^ 1);
+    if (ply) in_check = is_attacked(p, p->ks[p->side], p->side ^ 1);
     child_type = node_type == NODE_CUT ? NODE_ALL : NODE_CUT;
 
     /* RFP and NMP both need the static eval, and only at a non-PV, non-check
        node is it trustworthy enough to prune on, so it is computed once here
        and shared by the two stages below. */
-    if (!in_check && node_type != NODE_PV) {
+    if (ply && !in_check && node_type != NODE_PV) {
         Score eval;
         if (!tt.eval_valid) {
             tt.eval = evaluate(p);
@@ -574,11 +583,12 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
         }
     }
 
-    mgen_init(p, &mg, ply, killers[ply][0], killers[ply][1], ttm);
+    if (ply) mgen_init(p, &mg, ply, killers[ply][0], killers[ply][1], ttm);
 
     {
         i16 first = 1;                     /* PVS: first legal move gets the full window */
-        while ((m = next_move(p, &mg)) != 0) {
+        while ((m = ply ? next_move(p, &mg) :
+                    (root_index < root_n ? root_m[root_index++] : 0)) != 0) {
             Undo u;
             i16 us, pc, is_cap, child_half, legal_move = 0;
             i16 see_prune = 0;
@@ -587,7 +597,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
             pc = p->board[mfrom(m)];                 /* moving piece, before the make */
             if (!pc || CO(pc) != (p->side ? 8 : 0)) continue;  /* not our piece: skip
                                                                   (guards a bogus TT move) */
-            if (!first && depth <= PVS_SEE_DEPTH &&
+            if (ply && !first && depth <= PVS_SEE_DEPTH &&
                 !in_check && node_type != NODE_PV && best > -MATE + MAXPLY &&
                 alpha > -MATE + MAXPLY && beta < MATE - MAXPLY &&
                 mfl(m) == 0 && TY(pc) != 6) {
@@ -603,7 +613,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                the mover king's lines cannot leave the king attacked, so skip the
                is_attacked test. Otherwise (in check, king move, EP, or an aligned
                from-square) the real test decides. */
-            if (!in_check && TY(pc) != 6 && mfl(m) != MF_EP &&
+            if (ply && !in_check && TY(pc) != 6 && mfl(m) != MF_EP &&
                 !sq_on_king_line(p, mfrom(m), us))
                 legal_move = 1;
             else if (!is_attacked(p, p->ks[us], p->side))
@@ -658,6 +668,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                         score = -alphabeta(p, depth - 1, -beta, -alpha, ply + 1, child_half, NODE_PV);
                     }
                 }
+                if (!ply) root_score[root_index - 1] = score;
                 if (score > best) {
                     best = score;
                     bestmove = m;
@@ -674,7 +685,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                     /* killer + history: a true quiet (no promo/ep/castle flag, empty
                        target) that caused the cutoff gets a depth^2 bonus; the deeper
                        the cutoff, the more reliable the move, so it dominates. */
-                    if (mfl(m) == 0 && u.cap == EMPTY) {
+                    if (ply && mfl(m) == 0 && u.cap == EMPTY) {
                         i16 dd = depth * depth;
                         if (m != killers[ply][0]) {  /* a move already in killer slot 0 must
                                                         not be duplicated into slot 1 - the
@@ -685,7 +696,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                         qhist_update(p, m, dd);
                     }
                     break;                            /* beta cutoff */
-                } else if (score <= alpha0) {
+                } else if (ply && score <= alpha0) {
                     /* fail low: a quiet that failed to beat its window is penalized
                        (symmetric depth^2), so it sorts behind unsearched quiets. */
                     if (mfl(m) == 0 && u.cap == EMPTY)
@@ -697,16 +708,18 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
         }
     }
 
-    if (rep_n > 0) rep_n--;                  /* pop this node */
+    if (ply && rep_n > 0) rep_n--;           /* root has no search-path entry */
     if (!legal) {
         /* mate scores: -(MATE - ply) so the root prefers the SHORTEST mate.
-           in_check was computed at the top of this node (is_attacked on the
-           stm king) and is unchanged by the move loop. */
-        Score r = in_check ? (Score)-(MATE - ply) : 0;
-        if (!stop_now) tt_store(p, 0, depth, r, TT_EXACT, ply, tt.eval, tt.eval_valid);
+           Interior nodes already know their check status. Root moves always
+           get a full legality check, so query the parent only on this exit. */
+        Score r;
+        if (!ply) in_check = is_attacked(p, p->ks[p->side], p->side ^ 1);
+        r = in_check ? (Score)-(MATE - ply) : 0;
+        if (ply && !stop_now) tt_store(p, 0, depth, r, TT_EXACT, ply, tt.eval, tt.eval_valid);
         return r;
     }
-    if (!stop_now && (!upcoming || best > 0)) {
+    if (ply && !stop_now && (!upcoming || best > 0)) {
         /* Classify against the entry window; alpha has risen during search. */
         i16 flag = (best >= beta) ? TT_LOWER :
                    (best <= original_alpha) ? TT_UPPER : TT_EXACT;
@@ -737,39 +750,9 @@ void search_root(Pos *p, i16 maxdepth) {
         t0 = clock();
         rep_reset();
         for (;;) {
-            Score alpha = asp_lo, beta = asp_hi;
-            sort_root();
-            bsc = -INF;
-            {
-                i16 first = 1;         /* PVS: first root move gets the full window */
-                for (i = 0; i < root_n; i++) {
-                    Undo u;
-                    i16 us, pc = p->board[mfrom(root_m[i])];
-                    Score score;
-                    do_make(p, root_m[i], &u);
-                    us = p->side ^ 1;
-                    if (!is_attacked(p, p->ks[us], p->side)) {
-                        i16 is_cap = (u.cap != EMPTY) || (mfl(root_m[i]) == MF_EP);
-                        i16 child_half = (TY(pc) == 1 || is_cap) ? 0 : g_half + 1;
-                        if (first) {
-                            first = 0;
-                            score = -alphabeta(p, d - 1, -beta, -alpha, 1, child_half, NODE_PV);
-                        } else {
-                            score = -alphabeta(p, d - 1, -alpha - 1, -alpha, 1, child_half, NODE_CUT);
-                            if (score > alpha && score < beta)
-                                score = -alphabeta(p, d - 1, -beta, -alpha, 1, child_half, NODE_PV);
-                        }
-                        root_score[i] = score;
-                        if (score > bsc) { bsc = score; bm = root_m[i]; }
-                        if (score > alpha) alpha = score;
-                        undo_move(p, root_m[i], &u);
-                        if (alpha >= beta) break;
-                    } else {
-                        undo_move(p, root_m[i], &u);
-                    }
-                }
-            }
-            if (root_n == 0) break;
+            bsc = alphabeta(p, d, asp_lo, asp_hi, 0, g_half, NODE_PV);
+            bm = pv_len[0] ? pv[0][0] : 0;
+            if (!pv_len[0]) break;
             if (bsc > asp_lo && bsc < asp_hi) break;
             if (bsc <= asp_lo) {
                 asp_lo -= delta;
@@ -845,48 +828,10 @@ u16 think(Pos *p, i16 maxdepth) {
         stop_now = 0;
         rep_reset();
         for (;;) {
-            Score alpha = asp_lo, beta = asp_hi;
-            sort_root();
-            bsc = -INF;
-            {
-                i16 first = 1;         /* PVS: first root move gets the full window */
-                for (i = 0; i < root_n; i++) {
-                    Undo u;
-                    i16 us, pc = p->board[mfrom(root_m[i])];
-                    Score score;
-                    do_make(p, root_m[i], &u);
-                    us = p->side ^ 1;
-                    if (!is_attacked(p, p->ks[us], p->side)) {
-                        i16 is_cap = (u.cap != EMPTY) || (mfl(root_m[i]) == MF_EP);
-                        i16 child_half = (TY(pc) == 1 || is_cap) ? 0 : g_half + 1;
-                        if (first) {
-                            first = 0;
-                            score = -alphabeta(p, d - 1, -beta, -alpha, 1, child_half, NODE_PV);
-                        } else {
-                            score = -alphabeta(p, d - 1, -alpha - 1, -alpha, 1, child_half, NODE_CUT);
-                            if (score > alpha && score < beta)
-                                score = -alphabeta(p, d - 1, -beta, -alpha, 1, child_half, NODE_PV);
-                        }
-                        root_score[i] = score;
-                        if (score > bsc) {
-                            bsc = score;
-                            bm = root_m[i];
-                            pv[0][0] = root_m[i];          /* root move + the child line */
-                            {
-                                i16 pl = pv_len[1], k;
-                                for (k = 0; k < pl && k < MAXPLY - 1; k++) pv[0][k + 1] = pv[1][k];
-                                pv_len[0] = (pl >= MAXPLY) ? MAXPLY : pl + 1;
-                            }
-                        }
-                        if (score > alpha) alpha = score;
-                        undo_move(p, root_m[i], &u);
-                        if (alpha >= beta) break;
-                    } else undo_move(p, root_m[i], &u);
-                    if (stop_now) break;
-                }
-            }
+            bsc = alphabeta(p, d, asp_lo, asp_hi, 0, g_half, NODE_PV);
+            bm = pv_len[0] ? pv[0][0] : 0;
             if (stop_now) break;
-            if (root_n == 0) break;
+            if (!pv_len[0]) break;
             if (bsc > asp_lo && bsc < asp_hi) break;
             if (bsc <= asp_lo) {
                 asp_lo -= delta;
@@ -1022,37 +967,9 @@ int bench(int depth) {
             rep_reset();
             stop_now = 0;
             for (;;) {
-                Score alpha = asp_lo, beta = asp_hi;
-                sort_root();
-                bsc = -INF;
-                {
-                    i16 first = 1;         /* PVS: first root move gets the full window */
-                    for (k = 0; k < root_n; k++) {
-                        Undo u;
-                        i16 us, pc = p.board[mfrom(root_m[k])];
-                        Score score;
-                        do_make(&p, root_m[k], &u);
-                        us = p.side ^ 1;
-                        if (!is_attacked(&p, p.ks[us], p.side)) {
-                            i16 is_cap = (u.cap != EMPTY) || (mfl(root_m[k]) == MF_EP);
-                            i16 child_half = (TY(pc) == 1 || is_cap) ? 0 : g_half + 1;
-                            if (first) {
-                                first = 0;
-                                score = -alphabeta(&p, d - 1, -beta, -alpha, 1, child_half, NODE_PV);
-                            } else {
-                                score = -alphabeta(&p, d - 1, -alpha - 1, -alpha, 1, child_half, NODE_CUT);
-                                if (score > alpha && score < beta)
-                                    score = -alphabeta(&p, d - 1, -beta, -alpha, 1, child_half, NODE_PV);
-                            }
-                            root_score[k] = score;
-                            if (score > bsc) { bsc = score; bm = root_m[k]; }
-                            if (score > alpha) alpha = score;
-                            undo_move(&p, root_m[k], &u);
-                            if (alpha >= beta) break;
-                        } else undo_move(&p, root_m[k], &u);
-                    }
-                }
-                if (root_n == 0) break;
+                bsc = alphabeta(&p, d, asp_lo, asp_hi, 0, g_half, NODE_PV);
+                bm = pv_len[0] ? pv[0][0] : 0;
+                if (!pv_len[0]) break;
                 if (bsc > asp_lo && bsc < asp_hi) break;
                 if (bsc <= asp_lo) {
                     asp_lo -= delta;
@@ -1173,37 +1090,8 @@ int profile(int depth) {
             rep_reset();
             stop_now = 0;
             for (;;) {
-                Score alpha = asp_lo, beta = asp_hi;
-                sort_root();
-                bsc = -INF;
-                {
-                    i16 first = 1;         /* PVS: first root move gets the full window */
-                    for (k = 0; k < root_n; k++) {
-                        Undo u;
-                        i16 us, pc = p.board[mfrom(root_m[k])];
-                        Score score;
-                        do_make(&p, root_m[k], &u);
-                        us = p.side ^ 1;
-                        if (!is_attacked(&p, p.ks[us], p.side)) {
-                            i16 is_cap = (u.cap != EMPTY) || (mfl(root_m[k]) == MF_EP);
-                            i16 child_half = (TY(pc) == 1 || is_cap) ? 0 : g_half + 1;
-                            if (first) {
-                                first = 0;
-                                score = -alphabeta(&p, d - 1, -beta, -alpha, 1, child_half, NODE_PV);
-                            } else {
-                                score = -alphabeta(&p, d - 1, -alpha - 1, -alpha, 1, child_half, NODE_CUT);
-                                if (score > alpha && score < beta)
-                                    score = -alphabeta(&p, d - 1, -beta, -alpha, 1, child_half, NODE_PV);
-                            }
-                            root_score[k] = score;
-                            if (score > bsc) bsc = score;
-                            if (score > alpha) alpha = score;
-                            undo_move(&p, root_m[k], &u);
-                            if (alpha >= beta) break;
-                        } else undo_move(&p, root_m[k], &u);
-                    }
-                }
-                if (root_n == 0) break;
+                bsc = alphabeta(&p, d, asp_lo, asp_hi, 0, g_half, NODE_PV);
+                if (!pv_len[0]) break;
                 if (bsc > asp_lo && bsc < asp_hi) break;
                 if (bsc <= asp_lo) {
                     asp_lo -= delta;

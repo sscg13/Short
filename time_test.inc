@@ -84,6 +84,30 @@ int time_selftest(void) {
     tm_check(m == 0 && time_test_depth == 0 && stop_now,
              "no completed depth returns legal-fallback sentinel");
 
+    /* Pseudo-legal king moves can all be illegal. Root search must return a
+       terminal score and an empty PV instead of retrying aspiration forever. */
+    {
+        static const char *terminal_fens[] = {
+            "8/8/8/8/8/2k5/1q6/K7 w - - 0 1",
+            "8/8/8/8/8/1qk5/8/K7 w - - 0 1"
+        };
+        for (i = 0; i < 2; ++i) {
+            Score score;
+            tm_prepare(&p, terminal_fens[i]); original = p;
+            g_sigs_n = 1; g_sigs[0] = p.sig; rep_reset();
+            root_n = gen_moves(&p, root_m);
+            score = alphabeta(&p, 2, -INF, INF, 0, 0, NODE_PV);
+            tm_check(score == (i ? 0 : -MATE) && !pv_len[0] && !rep_n &&
+                     g_sigs_n == 1 && g_sigs[0] == p.sig &&
+                     memcmp(&p, &original, sizeof p) == 0,
+                     "terminal root score/PV/history");
+            m = think(&p, 4);
+            tm_check(!m && !pv_len[0] && !rep_n && !nnue_active &&
+                     memcmp(&p, &original, sizeof p) == 0,
+                     "terminal root driver returns no move");
+        }
+    }
+
     /* A target reached inside a failed aspiration pass must not publish a
        partial depth. Exercise all bench positions against a full depth 2. */
     for (i = 0; i < BENCH_N; ++i) {
