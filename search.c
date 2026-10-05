@@ -183,6 +183,9 @@ static i16 rep_upcoming(Pos *p, i16 half, i16 ply) {
    pv[ply][0..pv_len[ply]-1] is the best line from ply, in move encoding. */
 static u16 pv[MAXPLY + 1][MAXPLY];
 static i16 pv_len[MAXPLY + 1];
+/* Same-side static eval history. Check nodes have no usable eval; every
+   searched ancestor overwrites its slot before entering children. */
+static Score static_eval[MAXPLY];
 
 static u16 killers[MAXPLY][2];          /* two killer moves per ply (quiet only) */
 
@@ -239,15 +242,11 @@ static i32 st_pvs_tries, st_pvs_prunes, st_pvs_checks_kept;
    so the probe is a REAL search (a bare qsearch probe only sees the opponent's
    captures and can blunder past a quiet defense - the first attempt measured
    that regressing at bench pos 5); at depth 2-3 the reduction forces nd <= 0,
-   where the qsearch probe is the only option and is gated by NMP_MARGIN below. */
+   where the qsearch probe is the only option. Non-improving nodes require
+   NMP_MARGIN slack; improving nodes require eval >= beta. */
 #define NMP_DEPTH  2
 #define NMP_RED    2
-/* NMP_MARGIN: centipawn slack on eval >= beta before probing. The
-                            shallow (depth 2-3) probes are bare qsearch and can
-                            blunder past a quiet defense (measured regression at
-                            bench pos 5), so they must only fire when clearly
-                            winning; the slack keeps the bench tree identical to
-                            the reference everywhere except pos 4 */
+/* NMP_MARGIN is the centipawn slack required at non-improving nodes. */
 
 /* late move reduction. Default reduction comes from the log formula
    R = int(0.75 + ln(d)*ln(m)/2) (the Stockfish-shaped log curve), generated
@@ -530,20 +529,26 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
        square NOT on the king's rank/file/diagonal is then always legal (it can
        neither leave a check unresolved nor open a new line), so its legality
        is_attacked test can be skipped. */
-    if (ply) in_check = is_attacked(p, p->ks[p->side], p->side ^ 1);
+    in_check = is_attacked(p, p->ks[p->side], p->side ^ 1);
     child_type = node_type == NODE_CUT ? NODE_ALL : NODE_CUT;
 
-    /* RFP and NMP both need the static eval, and only at a non-PV, non-check
-       node is it trustworthy enough to prune on, so it is computed once here
-       and shared by the two stages below. */
-    if (ply && !in_check && node_type != NODE_PV) {
-        Score eval;
-        if (!tt.eval_valid) {
-            tt.eval = evaluate(p);
-            tt.eval_valid = 1;
-            tt_store_eval(p, tt.slot, tt.eval);
+    /* PV/root evals also supply the improving comparison for descendants.
+       Reuse the raw TT eval, never a search bound or a check-node eval. */
+    static_eval[ply] = -INF;
+    if (!in_check) {
+        if (!ply) static_eval[ply] = evaluate(p);
+        else {
+            if (!tt.eval_valid) {
+                tt.eval = evaluate(p);
+                tt.eval_valid = 1;
+                tt_store_eval(p, tt.slot, tt.eval);
+            }
+            static_eval[ply] = tt.eval;
         }
-        eval = tt.eval;
+    }
+
+    if (ply && !in_check && node_type != NODE_PV) {
+        Score eval = static_eval[ply];
 
         /* reverse futility pruning. Skipped while in check (the eval is
            unreliable with the king exposed), at PV nodes (their score becomes a
@@ -563,9 +568,18 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
            null score as a cutoff. Non-PV only, skipped in check (a pass cannot
            resolve a check) and when the side to move holds no non-pawn material
            (zugzwang-prone endings). The 50-move guard keeps the pass from
-           walking into a forced draw. On a hit, pop this node's rep-path entry. */
+           walking into a forced draw. Improving nodes waive the eval margin;
+           other nodes retain it. On a hit, pop this node's rep-path entry. */
         if (depth >= NMP_DEPTH && half + 1 < MAX_HALF) {
-            if (eval >= beta + NMP_MARGIN && has_np_material(p)) {
+            i16 improving = 1;
+            /* Compare the same side two plies back, or four if it was in
+               check. Without either reference, assume improving. Equality
+               counts as improvement. Current check nodes cannot reach NMP. */
+            if (ply >= 2 && static_eval[ply - 2] != -INF)
+                improving = eval >= static_eval[ply - 2];
+            else if (ply >= 4 && static_eval[ply - 4] != -INF)
+                improving = eval >= static_eval[ply - 4];
+            if (eval >= beta + (improving ? 0 : NMP_MARGIN) && has_np_material(p)) {
                 i16 R = NMP_RED + depth / 6;
                 i16 nd = depth - 1 - R;         /* the null move spends a ply */
                 Score sc;
@@ -710,11 +724,8 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
 
     if (ply && rep_n > 0) rep_n--;           /* root has no search-path entry */
     if (!legal) {
-        /* mate scores: -(MATE - ply) so the root prefers the SHORTEST mate.
-           Interior nodes already know their check status. Root moves always
-           get a full legality check, so query the parent only on this exit. */
+        /* mate scores: -(MATE - ply) so the root prefers the SHORTEST mate. */
         Score r;
-        if (!ply) in_check = is_attacked(p, p->ks[p->side], p->side ^ 1);
         r = in_check ? (Score)-(MATE - ply) : 0;
         if (ply && !stop_now) tt_store(p, 0, depth, r, TT_EXACT, ply, tt.eval, tt.eval_valid);
         return r;
