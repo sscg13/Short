@@ -237,7 +237,8 @@ int see_selftest(void) {
         }
     }
 #endif
-    /* Exercise main-search pruning and the forcing-move and PV safeguards. */
+    /* Exercise interior-node pruning and the forcing-move and PV safeguards.
+       Positive ply selects the staged picker rather than the prepared root list. */
     nnue_enabled = 0; stop_now = 0; deadline = 0; vtime_mode = 0; g_sigs_n = 0;
     parse_fen(&p,"r6k/8/8/8/3Q4/8/8/1K6 w - - 0 1"); before = p;
     {
@@ -251,7 +252,7 @@ int see_selftest(void) {
             memset(killers,0,sizeof killers); memset(qhist,0,sizeof qhist);
             tt_store(&p,MK(0x02,0x01,0,0),0,0,TT_UPPER,0,0,0);
             st_pvs_tries = st_pvs_prunes = st_pvs_checks_kept = 0;
-            score = alphabeta(&p,1,1500,1501,0,0,(NodeType)nt);
+            score = alphabeta(&p,1,1500,1501,1,0,(NodeType)nt);
             if ((nt == NODE_PV ? st_pvs_tries != 0 :
                  !st_pvs_tries || !st_pvs_prunes || !st_pvs_checks_kept) ||
                 rep_n || memcmp(&p,&before,sizeof p)) {
@@ -262,19 +263,19 @@ int see_selftest(void) {
         }
     }
     rep_reset(); tt_clear(); st_pvs_tries = 0;
-    alphabeta(&p,1,-INF,INF,0,0,NODE_PV);
+    alphabeta(&p,1,-INF,INF,1,0,NODE_PV);
     if (st_pvs_tries || rep_n || memcmp(&p,&before,sizeof p)) ++fails;
     parse_fen(&p,"7k/8/8/8/8/2p5/1p6/KQ6 w - - 0 1"); before = p;
     rep_reset(); tt_clear(); st_pvs_tries = 0;
-    alphabeta(&p,1,1500,1501,0,0,NODE_CUT);
+    alphabeta(&p,1,1500,1501,1,0,NODE_CUT);
     if (st_pvs_tries || rep_n || memcmp(&p,&before,sizeof p)) ++fails;
     parse_fen(&p,"8/8/8/8/8/1qk5/8/K7 w - - 0 1"); before = p;
     rep_reset(); tt_clear(); st_pvs_tries = 0;
-    if (alphabeta(&p,1,1500,1501,0,0,NODE_CUT) != 0 || st_pvs_tries || rep_n ||
+    if (alphabeta(&p,1,1500,1501,1,0,NODE_CUT) != 0 || st_pvs_tries || rep_n ||
         memcmp(&p,&before,sizeof p)) ++fails;
     parse_fen(&p,"8/8/8/8/8/2k5/1q6/K7 w - - 0 1"); before = p;
     rep_reset(); tt_clear(); st_pvs_tries = 0;
-    if (alphabeta(&p,1,1500,1501,0,0,NODE_CUT) != -MATE || st_pvs_tries || rep_n ||
+    if (alphabeta(&p,1,1500,1501,1,0,NODE_CUT) != -(MATE - 1) || st_pvs_tries || rep_n ||
         memcmp(&p,&before,sizeof p)) ++fails;
     nnue_enabled = old_enabled; nnue_active = old_active;
     printf("SEE selftest: fixtures=%d oracle=%ld threshold=%ld restoration=%ld failures=%d\n",
