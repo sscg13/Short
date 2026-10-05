@@ -254,6 +254,10 @@ static void xb_option(const char *nm, const char *val) {
         vclock_set_khz(atol(val));
     } else if (strcmp(lo, "virtualtime") == 0) {
         vclock_set_enabled(val);
+#ifdef TUNE
+    } else if (search_tune_option(lo, val) < 0) {
+        xb_outf("Error (invalid option value): %s", nm);
+#endif
     }
     /* unknown options are silently accepted (CECP requires tolerating them) */
     dbgf("option '%s'='%s'\n", lo, val ? val : "");
@@ -270,6 +274,15 @@ int xboard_main(void) {
     while (fgets(line, sizeof(line), stdin)) {
         char *p = line;
         i16 i;
+        /* Never apply a truncated option value: a long number with leading
+           zeros could otherwise become a valid short integer. Drain the rest
+           of this command so its tail cannot be treated as a new command. */
+        if (strlen(line) == sizeof(line) - 1 && line[sizeof(line) - 2] != '\n') {
+            int c;
+            do { c = fgetc(stdin); } while (c != '\n' && c != EOF);
+            xb_outf("Error (command too long): input line");
+            continue;
+        }
         for (i = 0; line[i] && line[i] != '\n' && line[i] != '\r'; i++);
         line[i] = 0;
         while (*p == ' ') p++;
@@ -284,6 +297,9 @@ int xboard_main(void) {
             xb_outf("feature option=\"CPU_model -combo *80286 /// 80186 /// 8088 /// 8086\"");
             xb_outf("feature option=\"CPU_KHz -spin 25000 1000 50000\"");
             xb_outf("feature option=\"VirtualTime -check 0\"");
+#ifdef TUNE
+            search_tune_features();
+#endif
             xb_outf("feature myname=\"Short\" setboard=1 usermove=1 ping=1 playother=1 done=1");
         } else if (strncmp(p, "new", 3) == 0) {
             xb_reset();

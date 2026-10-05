@@ -2,6 +2,77 @@
 
 #include "engine.h"
 
+#ifdef TUNE
+#include <errno.h>
+#define TUNE_DEFINE(name, value, min, max, step) i16 name = value;
+SEARCH_TUNABLES(TUNE_DEFINE)
+#undef TUNE_DEFINE
+
+typedef struct {
+    const char *name;
+    i16 *value;
+    i16 min, max, step;
+} TuneParam;
+
+#define TUNE_ENTRY(name, value, min, max, step) { #name, &name, min, max, step },
+static const TuneParam tune_params[] = { SEARCH_TUNABLES(TUNE_ENTRY) };
+#undef TUNE_ENTRY
+#define TUNE_COUNT ((i16)(sizeof tune_params / sizeof tune_params[0]))
+
+void search_tune_features(void) {
+    i16 i;
+    for (i = 0; i < TUNE_COUNT; ++i) {
+        const TuneParam *p = &tune_params[i];
+        xb_outf("feature option=\"%s -spin %d %d %d\"",
+                p->name, *p->value, p->min, p->max);
+    }
+}
+
+void search_tune_spsa(void) {
+    i16 i;
+    for (i = 0; i < TUNE_COUNT; ++i) {
+        const TuneParam *p = &tune_params[i];
+        printf("%s, int, %d, %d, %d, %d, 0.002\n",
+               p->name, *p->value, p->min, p->max, p->step);
+    }
+}
+
+static i16 tune_name_equal(const char *a, const char *b) {
+    while (*a && *b) {
+        char ca = *a++, cb = *b++;
+        if (ca >= 'A' && ca <= 'Z') ca += 'a' - 'A';
+        if (cb >= 'A' && cb <= 'Z') cb += 'a' - 'A';
+        if (ca != cb) return 0;
+    }
+    return *a == *b;
+}
+
+i16 search_tune_option(const char *name, const char *value) {
+    i16 i;
+    for (i = 0; i < TUNE_COUNT; ++i) {
+        const TuneParam *p = &tune_params[i];
+        if (tune_name_equal(name, p->name)) {
+            char *end;
+            long v;
+            if (!value) return -1;
+            errno = 0;
+            v = strtol(value, &end, 10);
+            if (end == value || errno == ERANGE) return -1;
+            while (*end == ' ' || *end == '\t') ++end;
+            if (*end || v < p->min || v > p->max) return -1;
+            if (*p->value != (i16)v) {
+                *p->value = (i16)v;
+                lmr_build();  /* refresh LMR and SEE tables outside search */
+                tt_clear();
+                search_clear_ordering();
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+#endif
+
 #if defined(TIMING_DETAIL) && defined(__WATCOMC__)
 #include <dos.h>
 static u32 timing_bios_ticks(void);
@@ -141,17 +212,22 @@ static void qhist_update(Pos *p, u16 m, i16 delta) {
    beta. RFP_DEPTH caps the window; RFP_MARGIN is the centipawn slack per ply
    (the deeper the node, the wider the margin it needs to be "safe"). */
 #define RFP_DEPTH  7
-#define RFP_MARGIN 100
 
 /* Shallow non-PV SEE pruning. Allow more material loss as depth grows:
    quiets: -80 * depth; captures: -20 * depth^2, in material centipawns.
    Constant rows avoid multiplication in the move loop. Preserve the first
    searched move, evasions, checking moves, special moves and mate searches. */
 #define PVS_SEE_DEPTH 4
+#ifdef TUNE
+static i16 pvs_see_threshold[2][PVS_SEE_DEPTH + 1];
+#else
 static const i16 pvs_see_threshold[2][PVS_SEE_DEPTH + 1] = {
-    { 0, -80, -160, -240, -320 },
-    { 0, -20,  -80, -180, -320 }
+    { 0, -SEE_QUIET_MARGIN, -2*SEE_QUIET_MARGIN,
+      -3*SEE_QUIET_MARGIN, -4*SEE_QUIET_MARGIN },
+    { 0, -SEE_CAPTURE_MARGIN, -4*SEE_CAPTURE_MARGIN,
+      -9*SEE_CAPTURE_MARGIN, -16*SEE_CAPTURE_MARGIN }
 };
+#endif
 #ifdef SEE_TEST
 static i32 st_pvs_tries, st_pvs_prunes, st_pvs_checks_kept;
 #endif
@@ -166,14 +242,14 @@ static i32 st_pvs_tries, st_pvs_prunes, st_pvs_checks_kept;
    where the qsearch probe is the only option and is gated by NMP_MARGIN below. */
 #define NMP_DEPTH  2
 #define NMP_RED    2
-#define NMP_MARGIN 60    /* centipawn slack on eval >= beta before probing. The
+/* NMP_MARGIN: centipawn slack on eval >= beta before probing. The
                             shallow (depth 2-3) probes are bare qsearch and can
                             blunder past a quiet defense (measured regression at
                             bench pos 5), so they must only fire when clearly
                             winning; the slack keeps the bench tree identical to
                             the reference everywhere except pos 4 */
 
-/* late move reduction. The reduction comes from the log formula
+/* late move reduction. Default reduction comes from the log formula
    R = int(0.75 + ln(d)*ln(m)/2) (the Stockfish-shaped log curve), generated
    ONCE at startup by lmr_build() into lmr_tab from Q12 fixed-point ln seeds
    (lmr_ln). Pure integer math - no runtime log(), no floating point - so the
@@ -198,7 +274,6 @@ static i32 st_pvs_tries, st_pvs_prunes, st_pvs_checks_kept;
    fallback re-searches are just wasted nodes. Mate scores never aspirate (the
    full window preserves the exact mate line) and the >4096 cap forces the full
    window so the loop terminates without i16 delta overflow. */
-#define ASP_DELTA 50
 
 static u8 lmr_tab[LMR_TD][LMR_TM];
 
@@ -215,17 +290,35 @@ static const u16 lmr_ln[64] = {
     16488, 16560, 16632, 16702, 16770, 16838, 16905, 16970
 };
 
-/* fill lmr_tab from the log formula using only i32 integer math. R is
-   computed in Q24 as 3*2^22 (0.75) + (lnQ[d]*lnQ[m]) >> 1 (ln(d)*ln(m)/2),
-   then shifted down: R = int(0.75 + ln(d)*ln(m)/2). The Q12 product fits i32
-   (max 16970^2 = 287,980,900). Call once at startup (main runs it with
-   zob_init()/mvv_build()); deterministic on gcc AND the 16-bit build. */
+/* Fill tables outside search using i32 integer math. Default LMR is exactly
+   int(0.75 + ln(d)*ln(m)/2); Q8 base/scale supply finer SPSA steps. Shipping
+   builds call once at startup; tuning builds also refresh on option changes.
+   Deterministic on gcc AND the 16-bit build. */
 void lmr_build(void) {
     i32 d, m;
+#ifdef TUNE
+    for (d = 0; d <= PVS_SEE_DEPTH; ++d) {
+        pvs_see_threshold[0][d] = (i16)(-SEE_QUIET_MARGIN * d);
+        pvs_see_threshold[1][d] = (i16)(-SEE_CAPTURE_MARGIN * d * d);
+    }
+#endif
     for (d = 0; d < LMR_TD; d++)
         for (m = 0; m < LMR_TM; m++) {
-            i32 v = ((i32)3 << 22) + (((i32)lmr_ln[d] * lmr_ln[m]) >> 1);
-            lmr_tab[d][m] = (u8)(v >> 24);
+            /* Keep the original cheap startup expression when scale=0.5.
+               The fixed release defaults fold this branch at compile time. */
+            if (LMR_SCALE_Q8 == 128) {
+                i32 v = ((i32)LMR_BASE_Q8 << 16)
+                      + (((i32)lmr_ln[d] * lmr_ln[m]) >> 1);
+                lmr_tab[d][m] = (u8)(v >> 24);
+            } else {
+                /* Exact Q24 result without overflowing product * Q8 scale.
+                   Max product=16970^2; scale<=192 and base<=384 fit i32. */
+                i32 product = (i32)lmr_ln[d] * lmr_ln[m];
+                i32 v = ((i32)LMR_BASE_Q8 << 16)
+                      + (product >> 8) * LMR_SCALE_Q8
+                      + (((product & 255) * LMR_SCALE_Q8) >> 8);
+                lmr_tab[d][m] = (u8)(v >> 24);
+            }
         }
 }
 

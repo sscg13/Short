@@ -7,6 +7,7 @@
 #   make EXE=foo        -> foo         (Linux) / foo.exe         (Windows)
 #   make CFLAGS='...'   -> override compile flags
 #   make EVALFILE=<net> -> embed <net> instead of short-net2-finetune2.net (OpenBench)
+#   make -B TUNE=0     -> compiled search constants, no SPSA option interface
 #   make clean          -> remove objects and the binary
 
 # The gcc build is a fast SCALAR oracle for the 16-bit target: OpenBench measures
@@ -30,8 +31,15 @@ EVALFILE ?= short-net2-finetune2.net
 # deterministic weighted-model NPS. Same for the embedded net.
 CFLAGS  ?= -O2 -Wall -Wextra -Werror
 override CFLAGS += -DVCLOCK -DNN_EMBED_FILE=$(EVALFILE)
+# OpenBench uses the ordinary native Makefile build. DOS release stays fixed;
+# build.ps1 only adds TUNE on an explicit -Tune diagnostic build.
+# Shared objects do not track flags: changing TUNE requires -B or make clean.
+TUNE    ?= 1
+ifeq ($(TUNE),1)
+override CFLAGS += -DTUNE
+endif
 SRCS    := chess.c search.c xboard.c nnue.c vclock.c tt.c
-HDRS    := engine.h repetition.inc repetition_test.inc see_test.inc time_test.inc
+HDRS    := engine.h tune.h repetition.inc repetition_test.inc see_test.inc time_test.inc
 OBJS    := $(SRCS:.c=.o)
 
 TARGET  := $(if $(EXE),$(EXE),chess_gcc)

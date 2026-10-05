@@ -32,6 +32,8 @@ typedef uint32_t  u32;
 typedef int64_t   i64;
 typedef uint64_t  u64;
 
+#include "tune.h"
+
 /* Calibration builds emit byte IDs to the Nimbus' otherwise-unused port E9.
    MAME debugger watchpoints attach exact CPU total-cycle values to them. */
 #ifdef MAME_MARKERS

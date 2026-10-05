@@ -955,6 +955,17 @@ int main(int argc, char **argv) {
     clock_t t0, t1;
     double secs;
 
+    /* Metadata export must work without loading a network or printing a banner. */
+    if (argc > 1 && strcmp(argv[1], "spsa") == 0) {
+#ifdef TUNE
+        search_tune_spsa();
+        return 0;
+#else
+        fprintf(stderr, "SPSA options disabled; rebuild with TUNE=1 or -Tune.\n");
+        return 1;
+#endif
+    }
+
     mvv_build();   /* one-time MVV-LVA table (dedicated init) */
     king_line_build(); /* one-time legality lookup (dedicated init) */
     zob_init();    /* one-time Zobrist key tables (dedicated init) */
