@@ -744,12 +744,11 @@ void search_root(Pos *p, i16 maxdepth) {
                 i16 first = 1;         /* PVS: first root move gets the full window */
                 for (i = 0; i < root_n; i++) {
                     Undo u;
-                    i16 us;
+                    i16 us, pc = p->board[mfrom(root_m[i])];
                     Score score;
                     do_make(p, root_m[i], &u);
                     us = p->side ^ 1;
                     if (!is_attacked(p, p->ks[us], p->side)) {
-                        i16 pc = p->board[mfrom(root_m[i])];   /* moving piece, before the make */
                         i16 is_cap = (u.cap != EMPTY) || (mfl(root_m[i]) == MF_EP);
                         i16 child_half = (TY(pc) == 1 || is_cap) ? 0 : g_half + 1;
                         if (first) {
@@ -853,12 +852,11 @@ u16 think(Pos *p, i16 maxdepth) {
                 i16 first = 1;         /* PVS: first root move gets the full window */
                 for (i = 0; i < root_n; i++) {
                     Undo u;
-                    i16 us;
+                    i16 us, pc = p->board[mfrom(root_m[i])];
                     Score score;
                     do_make(p, root_m[i], &u);
                     us = p->side ^ 1;
                     if (!is_attacked(p, p->ks[us], p->side)) {
-                        i16 pc = p->board[mfrom(root_m[i])];   /* moving piece, before the make */
                         i16 is_cap = (u.cap != EMPTY) || (mfl(root_m[i]) == MF_EP);
                         i16 child_half = (TY(pc) == 1 || is_cap) ? 0 : g_half + 1;
                         if (first) {
@@ -1031,12 +1029,11 @@ int bench(int depth) {
                     i16 first = 1;         /* PVS: first root move gets the full window */
                     for (k = 0; k < root_n; k++) {
                         Undo u;
-                        i16 us;
+                        i16 us, pc = p.board[mfrom(root_m[k])];
                         Score score;
                         do_make(&p, root_m[k], &u);
                         us = p.side ^ 1;
                         if (!is_attacked(&p, p.ks[us], p.side)) {
-                            i16 pc = p.board[mfrom(root_m[k])];
                             i16 is_cap = (u.cap != EMPTY) || (mfl(root_m[k]) == MF_EP);
                             i16 child_half = (TY(pc) == 1 || is_cap) ? 0 : g_half + 1;
                             if (first) {
@@ -1183,12 +1180,11 @@ int profile(int depth) {
                     i16 first = 1;         /* PVS: first root move gets the full window */
                     for (k = 0; k < root_n; k++) {
                         Undo u;
-                        i16 us;
+                        i16 us, pc = p.board[mfrom(root_m[k])];
                         Score score;
                         do_make(&p, root_m[k], &u);
                         us = p.side ^ 1;
                         if (!is_attacked(&p, p.ks[us], p.side)) {
-                            i16 pc = p.board[mfrom(root_m[k])];
                             i16 is_cap = (u.cap != EMPTY) || (mfl(root_m[k]) == MF_EP);
                             i16 child_half = (TY(pc) == 1 || is_cap) ? 0 : g_half + 1;
                             if (first) {

@@ -122,6 +122,51 @@ static void rt_search_cycle(void) {
     }
     g_sigs_n = 0; rep_reset();
 }
+/* At halfmove 99, quiet king moves draw while pawn moves can preserve the
+   material advantage. Exercise both root paths and non-capturing promotions. */
+static void rt_root_halfmove(const char *fen, i16 promotion) {
+    Pos p, original;
+    i16 path, i, pawns, quiets;
+    i16 save_post = post_on, save_virtual = vtime_mode;
+    i16 save_half = g_half, save_full = g_full;
+    post_on = vtime_mode = 0;
+    for (path = 0; path < 2; ++path) {
+        u16 best = 0;
+        Score best_score = -INF;
+        i16 failed = 0;
+        parse_fen(&p, fen); original = p;
+        search_clear_ordering(); tt_clear(); vclock_reset();
+        search_set_limits(0, 0); stop_now = 0;
+        g_sigs_n = 1; g_sigs[0] = p.sig; rep_reset();
+        if (path == 0) best = think(&p, 1);
+        else search_root(&p, 1);
+        pawns = quiets = 0;
+        for (i = 0; i < root_n; ++i) {
+            u16 m = root_m[i];
+            if (TY(p.board[mfrom(m)]) == 1) {
+                ++pawns;
+                if ((!!ispromo(m)) != promotion) failed = 1;
+            } else {
+                ++quiets;
+                if (root_score[i] != 0) failed = 1;
+            }
+            if (root_score[i] > best_score) {
+                best_score = root_score[i];
+                if (path) best = m;
+            }
+        }
+        ++rt_cases;
+        if (failed || !pawns || !quiets || !best || best_score <= 0 ||
+            TY(p.board[mfrom(best)]) != 1 ||
+            memcmp(&p, &original, sizeof p) || g_half != 99 || rep_n || nnue_active) {
+            ++rt_fails;
+            printf("FAIL root pawn halfmove path=%d promotion=%d\n", path, promotion);
+        }
+    }
+    post_on = save_post; vtime_mode = save_virtual;
+    g_half = save_half; g_full = save_full;
+    g_sigs_n = 0; rep_reset();
+}
 int repetition_selftest(void) {
     Pos p;
     u32 seed = 17;
@@ -195,6 +240,10 @@ int repetition_selftest(void) {
             if (!found || g_sigs_n >= 100) break;
         }
     }
+    rt_root_halfmove("7k/8/8/8/8/8/P7/K7 w - - 99 1", 0);
+    rt_root_halfmove("k7/p7/8/8/8/8/8/7K b - - 99 1", 0);
+    rt_root_halfmove("7k/P7/8/8/8/8/8/K7 w - - 99 1", 1);
+    rt_root_halfmove("k7/8/8/8/8/8/p7/7K b - - 99 1", 1);
     g_sigs_n = 0; rep_reset();
     printf("Repetition selftest: cases=%d hits=%d moves=%ld failures=%d\n", rt_cases, rt_hits, (long)rt_move_checks, rt_fails);
     return rt_fails != 0;
