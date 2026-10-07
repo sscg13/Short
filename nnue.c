@@ -807,7 +807,7 @@ static i16 nn_chain_check(Pos *p, i16 fresh[2][NNUE_N]) {
         { MK(0x70,0x60,0,WN), MK(0x07,0x17,0,BN), MK(0x13,0x04,0,0), MK(0x54,0x53,0,0) }
     };
     static Undo undo[4];
-    i16 c, pass, step, turn, j, fails = 0;
+    i16 c, pass, step, turn, j, saved_ep = -1, fails = 0;
     for (c = 0; c < 4; c++) {
         parse_fen(p, fens[c]);
         nnue_reset(p);
@@ -830,7 +830,7 @@ static i16 nn_chain_check(Pos *p, i16 fresh[2][NNUE_N]) {
                             out += (a * a * nn_w2[j]) >> NNUE_ACT2_SHIFT;
                         }
                         if (got != (Score)(out >> NNUE_SCALE_SHIFT)) fails++;
-                        if (!turn) nm_make(p); else nm_undo(p);
+                        if (!turn) saved_ep = nm_make(p); else nm_undo(p, saved_ep);
                     }
                 }
                 if (step) undo_move(p, moves[c][step - 1], &undo[step - 1]);
