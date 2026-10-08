@@ -242,12 +242,9 @@ static i32 st_pvs_tries, st_pvs_prunes, st_pvs_checks_kept;
    where the qsearch probe is the only option and is gated by NMP_MARGIN below. */
 #define NMP_DEPTH  2
 #define NMP_RED    2
-/* NMP_MARGIN: centipawn slack on eval >= beta before probing. The
-                            shallow (depth 2-3) probes are bare qsearch and can
-                            blunder past a quiet defense (measured regression at
-                            bench pos 5), so they must only fire when clearly
-                            winning; the slack keeps the bench tree identical to
-                            the reference everywhere except pos 4 */
+/* NMP_MARGIN: base centipawn slack before probing, reduced by 20 cp per
+   remaining search ply. Shallow probes require more static-eval confidence;
+   deeper probes can verify positions whose static eval is below beta. */
 
 /* late move reduction. Default reduction comes from the log formula
    R = int(0.75 + ln(d)*ln(m)/2) (the Stockfish-shaped log curve), generated
@@ -557,15 +554,16 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
             }
         }
 
-        /* null-move pruning: when the static eval already beats beta, the
-           opponent's best reply to a "pass" is searched at a reduced depth; if
+        /* null-move pruning: when the static eval meets the depth-dependent
+           margin around beta, search the opponent's best reply to a "pass" at
+           a reduced depth; if
            even that fails high the position is winning enough to return the
            null score as a cutoff. Non-PV only, skipped in check (a pass cannot
            resolve a check) and when the side to move holds no non-pawn material
            (zugzwang-prone endings). The 50-move guard keeps the pass from
            walking into a forced draw. On a hit, pop this node's rep-path entry. */
         if (depth >= NMP_DEPTH && half + 1 < MAX_HALF) {
-            if (eval >= beta + NMP_MARGIN && has_np_material(p)) {
+            if (eval >= beta + NMP_MARGIN - 20 * depth && has_np_material(p)) {
                 i16 R = NMP_RED + depth / 6;
                 i16 nd = depth - 1 - R;         /* the null move spends a ply */
                 Score sc;
