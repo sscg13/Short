@@ -78,7 +78,8 @@ static void rt_target(const char *fen, const char *target_fen, i16 want, const c
     rep_reset();
     if (want) {
         deadline = 0; stop_now = 0; vclock_reset(); tt_clear();
-        if (qsearch(&p, -1, 0, 1, 7, 8) != 0 || rep_n) ++rt_fails;
+        tt_store(&p,0,10,1234,TT_EXACT,1,0,0);
+        if (qsearch(&p, -1, 0, 1, 7, 8, NODE_CUT) != 0 || rep_n) ++rt_fails;
         if (alphabeta(&p, 2, -1, 0, 1, 7, NODE_CUT) != 0 || rep_n) ++rt_fails;
     }
 }
@@ -114,7 +115,8 @@ static void rt_search_cycle(void) {
                 rep_game = 1;
                 --rep_n;
                 deadline = 0; stop_now = 0; vclock_reset(); tt_clear();
-                if (qsearch(&p, -1, 0, step, step, 8) != 0 || rep_n != 3) ++rt_fails;
+                tt_store(&p,0,10,1234,TT_EXACT,step,0,0);
+                if (qsearch(&p, -1, 0, step, step, 8, NODE_CUT) != 0 || rep_n != 3) ++rt_fails;
                 if (alphabeta(&p, 2, -1, 0, step, step, NODE_CUT) != 0 || rep_n != 3) ++rt_fails;
                 if (rep_enter(&p, step, step)) ++rt_fails;
             }

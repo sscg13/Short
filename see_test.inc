@@ -195,16 +195,17 @@ int see_selftest(void) {
     nnue_enabled = 0; stop_now = 0; deadline = 0; vtime_mode = 0; g_sigs_n = 0;
     parse_fen(&p, see_cases[1].fen); before = p;
     c_qnodes = c_see = 0;     /* PROFILE alone does not reset these in vclock_reset. */
-    rep_reset(); vclock_reset(); qsearch(&p, -INF, INF, 0, 0, 1);
+    tt_clear(); rep_reset(); vclock_reset(); qsearch(&p, -INF, INF, 0, 0, 1, NODE_PV);
     if (c_qnodes != 1 || !c_see || rep_n || memcmp(&p,&before,sizeof p)) ++fails;
     parse_fen(&p,"7k/8/8/8/8/2p5/1p6/KQ6 w - - 0 1"); before = p;
     c_qnodes = c_see = 0;
-    rep_reset(); vclock_reset(); qsearch(&p, -INF, INF, 0, 0, 1);
+    tt_clear(); rep_reset(); vclock_reset(); qsearch(&p, -INF, INF, 0, 0, 1, NODE_PV);
     if (c_see || c_qnodes < 2 || rep_n || memcmp(&p,&before,sizeof p)) ++fails;
 #endif
 #if defined(PROFILE) || defined(VCLOCK)
-    /* Horizon nodes must behave exactly like direct quiescence, even with
-       a deep exact TT entry. Cover captures, evasions and mate for every
+    /* Horizon nodes must forward the expected type to direct quiescence.
+       A deep exact entry cuts non-PV nodes, but never PV nodes.
+       Cover captures, evasions and mate for every
        node type and for negative null-move depths; count each node once. */
     {
         static const char *horizon_fens[] = {
@@ -216,24 +217,143 @@ int see_selftest(void) {
         nnue_enabled = 0; stop_now = 0; deadline = 0; vtime_mode = 0; g_sigs_n = 0;
         for (fixture = 0; fixture < 3; ++fixture) {
             Score expected, got;
-            i32 expected_nodes;
+            i32 expected_nodes, expected_probes, expected_stores;
             parse_fen(&p,horizon_fens[fixture]); before = p;
-            tt_clear(); tt_store(&p,0,10,10000,TT_EXACT,0,0,0);
-            rep_reset(); vclock_reset(); nodes_search = 0;
-            expected = qsearch(&p,-INF,INF,0,0,MAX_QDEPTH);
-            expected_nodes = nodes_search;
             for (hd = -1; hd <= 0; ++hd) for (nt = NODE_PV; nt <= NODE_ALL; ++nt) {
+                tt_clear(); tt_store(&p,0,10,10000,TT_EXACT,0,0,0);
+                rep_reset(); vclock_reset(); nodes_search = 0;
+                c_anodes = c_qnodes = c_tt_probe = c_tt_store = 0;
+                expected = qsearch(&p,-INF,INF,0,0,MAX_QDEPTH,(NodeType)nt);
+                expected_nodes = nodes_search;
+                expected_probes = c_tt_probe;
+                expected_stores = c_tt_store;
+                tt_clear(); tt_store(&p,0,10,10000,TT_EXACT,0,0,0);
                 rep_reset(); vclock_reset(); nodes_search = 0;
                 c_anodes = c_qnodes = c_tt_probe = c_tt_store = 0;
                 pv_len[0] = 3;
                 got = alphabeta(&p,hd,-INF,INF,0,0,(NodeType)nt);
                 if (got != expected || nodes_search != expected_nodes ||
-                    c_anodes || c_qnodes != expected_nodes || c_tt_probe || c_tt_store ||
+                    c_anodes || c_qnodes != expected_nodes ||
+                    c_tt_probe != expected_probes || c_tt_store != expected_stores ||
                     pv_len[0] || rep_n || memcmp(&p,&before,sizeof p)) {
                     printf("Horizon integration failed fixture=%d depth=%d type=%d\n",
                            fixture,hd,nt); ++fails;
                 }
             }
+        }
+    }
+    /* A zero stand-pat cutoff is cached eagerly. A hit avoids another eager
+       attempt; filling a searched entry must preserve its result and move. */
+    {
+        TTData data;
+        Score expected, got;
+        parse_fen(&p,bench_fens[0]); before = p;
+        expected = evaluate(&p);
+        if (expected != 0) ++fails; /* material-only starting position */
+        tt_clear(); rep_reset(); vclock_reset(); c_tt_eval = 0;
+        got = qsearch(&p,-1,0,0,0,1,NODE_PV);
+        if (got != expected || c_tt_eval != 1 ||
+            !tt_probe(&p,0,&data) || !data.eval_valid || data.eval != 0 ||
+            data.flag != TT_LOWER || data.depth != 0 ||
+            rep_n || memcmp(&p,&before,sizeof p)) ++fails;
+        rep_reset(); vclock_reset(); c_tt_eval = 0;
+        got = qsearch(&p,-1,0,0,0,1,NODE_PV);
+        if (got != expected || c_tt_eval || rep_n ||
+            memcmp(&p,&before,sizeof p)) ++fails;
+        tt_clear(); tt_store(&p,MK(0x24,0x14,0,0),5,1234,TT_EXACT,0,0,0);
+        rep_reset(); vclock_reset(); c_tt_eval = 0;
+        got = qsearch(&p,-1,0,0,0,1,NODE_PV);
+        if (got != expected || c_tt_eval != 1 ||
+            !tt_probe(&p,0,&data) || data.score != 1234 || data.depth != 5 ||
+            data.flag != TT_EXACT || data.move != MK(0x24,0x14,0,0) ||
+            !data.eval_valid || data.eval != expected || rep_n ||
+            memcmp(&p,&before,sizeof p)) ++fails;
+        /* Draw and emergency depth exits precede the cache probe. */
+        tt_store_eval(&p,data.slot,700);
+        rep_reset(); vclock_reset(); c_tt_probe = 0;
+        if (qsearch(&p,-INF,INF,0,MAX_HALF,1,NODE_CUT) != 0 || c_tt_probe || rep_n) ++fails;
+        rep_reset(); vclock_reset(); c_tt_probe = 0;
+        if (qsearch(&p,-INF,INF,0,0,0,NODE_CUT) != expected || c_tt_probe || rep_n) ++fails;
+        tt_clear();
+    }
+    /* Qsearch result occupancy, bounds, PV exemption and uniform depth-0 reuse. */
+    {
+        TTData data;
+        i16 flag;
+        Score got;
+        parse_fen(&p,bench_fens[0]); before = p;
+        for (flag = TT_EXACT; flag <= TT_UPPER; ++flag) {
+            tt_clear(); tt_store(&p,0,0,77,flag,0,0,1);
+            if (!tt_probe(&p,0,&data) || data.depth != 0 || data.flag != flag) ++fails;
+            rep_reset(); vclock_reset(); c_tt_store = 0; nodes_search = 0;
+            got = qsearch(&p,flag == TT_UPPER ? 77 : -1,
+                          flag == TT_LOWER ? 77 : INF,0,0,MAX_QDEPTH,NODE_CUT);
+            if (got != 77 || nodes_search != 1 || c_tt_store || rep_n ||
+                memcmp(&p,&before,sizeof p)) ++fails;
+            /* Bounds in the wrong direction and PV entries cannot cut. */
+            rep_reset(); vclock_reset();
+            got = qsearch(&p,-1,1,0,0,MAX_QDEPTH,NODE_PV);
+            if (got != 0 || rep_n || memcmp(&p,&before,sizeof p)) ++fails;
+            if (flag != TT_EXACT) {
+                tt_clear(); tt_store(&p,0,0,flag == TT_LOWER ? -77 : 77,flag,0,0,1);
+                rep_reset(); vclock_reset();
+                if (qsearch(&p,-1,1,0,0,MAX_QDEPTH,NODE_CUT) != 0 || rep_n) ++fails;
+            }
+        }
+        /* An actual one-ply result can answer a fresh eight-ply qsearch. */
+        tt_clear(); rep_reset(); vclock_reset();
+        if (qsearch(&p,-1,1,0,0,1,NODE_PV) != 0 ||
+            !tt_probe(&p,0,&data) || data.depth != 0 || data.flag != TT_EXACT) ++fails;
+        rep_reset(); vclock_reset(); nodes_search = 0; c_tt_store = 0;
+        if (qsearch(&p,-1,1,0,0,MAX_QDEPTH,NODE_CUT) != 0 ||
+            nodes_search != 1 || c_tt_store || rep_n) ++fails;
+        /* A search near the absolute ply cap also stores depth 0. */
+        tt_clear(); rep_reset(); vclock_reset();
+        got = qsearch(&p,-INF,INF,MAXPLY-5,0,MAX_QDEPTH,NODE_PV);
+        if (got != 0 || !tt_probe(&p,0,&data) || data.depth != 0 ||
+            data.flag != TT_EXACT || rep_n) ++fails;
+        /* Main search cannot accept a qsearch-only result. */
+        tt_clear(); tt_store(&p,0,0,10000,TT_EXACT,0,0,1);
+        rep_reset(); vclock_reset();
+        if (alphabeta(&p,1,-INF,INF,1,0,NODE_CUT) == 10000 || rep_n) ++fails;
+        parse_fen(&p,"8/8/8/8/8/2k5/1q6/K7 w - - 0 1"); before = p;
+        tt_clear(); rep_reset(); vclock_reset();
+        got = qsearch(&p,-INF,INF,0,0,MAX_QDEPTH,NODE_PV);
+        if (got != -MATE || !tt_probe(&p,7,&data) ||
+            data.score != -(MATE-7) || data.flag != TT_EXACT || rep_n ||
+            memcmp(&p,&before,sizeof p)) ++fails;
+        rep_reset(); vclock_reset(); c_tt_store = 0; nodes_search = 0;
+        if (qsearch(&p,-INF,INF,7,0,MAX_QDEPTH,NODE_CUT) != -(MATE-7) ||
+            nodes_search != 1 || c_tt_store || rep_n) ++fails;
+        tt_clear(); stop_now = 1; rep_reset(); vclock_reset(); c_tt_probe = c_tt_store = 0;
+        qsearch(&p,-INF,INF,0,0,MAX_QDEPTH,NODE_CUT);
+        if (c_tt_probe || c_tt_store || rep_n) ++fails;
+        stop_now = 0; tt_clear();
+    }
+    /* A TT capture, EP or promotion comes first exactly once. Quiet TT moves
+       from main search are excluded outside check. */
+    {
+        static const char *order_fens[] = {
+            "7k/8/8/3r4/2Q5/8/8/K7 w - - 0 1",
+            "7k/8/8/3pP3/8/8/8/K7 w - d6 0 1",
+            "7k/P7/8/8/8/8/8/K7 w - - 0 1"
+        };
+        u16 ttmove, got;
+        i16 fixture, count;
+        MGen mg;
+        parse_fen(&p,bench_fens[0]);
+        mgen_init_q(&p,&mg,0,MK(0x34,0x14,0,0));
+        if (next_move(&p,&mg)) ++fails;
+        for (fixture = 0; fixture < 3; ++fixture) {
+            parse_fen(&p,order_fens[fixture]); before = p;
+            ttmove = fixture == 0 ? MK(0x43,0x32,0,0) :
+                     fixture == 1 ? MK(0x53,0x44,MF_EP,0) : MK(0x70,0x60,MF_PROMO_Q,0);
+            mgen_init_q(&p,&mg,0,ttmove);
+            got = next_move(&p,&mg);
+            if (got != ttmove) ++fails;
+            count = got == ttmove ? 1 : 0;
+            while ((got = next_move(&p,&mg)) != 0) if (got == ttmove) ++count;
+            if (count != 1 || memcmp(&p,&before,sizeof p)) ++fails;
         }
     }
 #endif

@@ -259,6 +259,8 @@ int nnue_bench(void);
    One far 64 KB table on the 16-bit target (4096 x 16-byte entries), plain
    array on gcc. Probe/store keyed on the full Pos.sig; see tt.c. */
 enum { TT_EXACT = 0, TT_LOWER = 1, TT_UPPER = 2, TT_NONE = 3 };
+/* Search depths: 0 for every qsearch result, positive for main search;
+   -1 is reserved for eval-only/empty entries. */
 /* Probe returns the selected slot even on a miss, for an eager eval write.
    Eval validity is independent of the search bound/depth. */
 typedef struct {
@@ -312,7 +314,7 @@ void zob_init(void);              /* one-time Zobrist key tables (dedicated init
 i16 gen_caps(Pos *p, u16 *list);
 i16 gen_quiets(Pos *p, u16 *list);
 void mgen_init(Pos *p, MGen *g, i16 ply, u16 k0, u16 k1, u16 ttm);
-void mgen_init_q(Pos *p, MGen *g, i16 ply);   /* captures only (quiescence) */
+void mgen_init_q(Pos *p, MGen *g, i16 ply, u16 ttm); /* captures, TT move first */
 u16 next_move(Pos *p, MGen *g);
 
 #endif

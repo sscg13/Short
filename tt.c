@@ -12,9 +12,10 @@
 
    Entry (16 bytes on both builds):
      key(8) | move(2) | score(2) | eval(2) | info(1) | eval_valid(1)
-   info = depth (6 bits, 0..63) | flag (2 bits: EXACT/LOWER/UPPER/NONE).
-   NONE/depth 0 is an eval-only entry, never a search bound. The static eval
-   is saved as soon as main search computes it, before pruning can return.
+   info = depth + 1 (6 bits) | flag (2 bits: EXACT/LOWER/UPPER/NONE).
+   Qsearch results have depth 0; main depths are 1..62. NONE/-1 is eval-only.
+   The bias keeps an exact depth-0 result distinct from the info=0 empty marker.
+   Static eval is saved eagerly by main search and qsearch before pruning.
 
    The stored key is the full incremental position signature (Pos.sig), which
    includes side/castle/ep, so a key match means the same position - the stored
@@ -38,7 +39,7 @@ typedef struct {
     u16 move;              /* best move (engine encoding) */
     Score score;           /* score with bound; mate values node-relative */
     Score eval;            /* raw side-to-move static eval, no mate conversion */
-    u8 info;               /* depth (0..63) | flag << 6 */
+    u8 info;               /* depth + 1 (0..63) | flag << 6 */
     u8 eval_valid;          /* zero is a valid score, so validity is explicit */
 } TTEnt;
 typedef char tt_entry_size_must_be_16[(sizeof(TTEnt) == 16) ? 1 : -1];
@@ -55,9 +56,9 @@ i32 c_tt_store = 0;                 /* tt_store entries */
 i32 c_tt_eval = 0;                  /* tt_store_eval attempts */
 #endif
 
-#define TT_DEPTH(i)  ((i16)((i) & 0x3F))
+#define TT_DEPTH(i)  ((i16)((i) & 0x3F) - 1)
 #define TT_FLAG(i)   ((i16)((i) >> 6))
-#define TT_INFO(d,f) ((u8)(((d) & 0x3F) | ((f) << 6)))
+#define TT_INFO(d,f) ((u8)((((d) + 1) & 0x3F) | ((f) << 6)))
 
 /* index: fold the four 16-bit words of the key (no 64-bit shifts or divides
    on the 16-bit target) and mask to the power-of-two size. The words are
@@ -140,7 +141,7 @@ void tt_store_eval(Pos *p, u16 slot, Score eval) {
         e->key = p->sig;
         e->move = 0;
         e->score = 0;
-        e->info = TT_INFO(0, TT_NONE);
+        e->info = TT_INFO(-1, TT_NONE);
     }
     e->eval = eval;
     e->eval_valid = 1;
@@ -156,7 +157,7 @@ void tt_store(Pos *p, u16 move, i16 depth, Score score, i16 flag, i16 ply,
     PCOUNT(c_tt_store);
 
     if (depth < TT_DEPTH(e->info)) return;         /* keep the deeper entry */
-    if (depth > 63) depth = 63;
+    if (depth > 62) depth = 62;
     score = tt_score_to_node(score, ply);
     /* A node that did not need eval can retain a same-position cached value.
        Never carry an eval over from a different position sharing this slot. */

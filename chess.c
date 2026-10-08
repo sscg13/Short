@@ -707,14 +707,12 @@ void mgen_init(Pos *p, MGen *g, i16 ply, u16 k0, u16 k1, u16 ttm) {
 }
 
 /* quiescence init: captures only (MVV-LVA), no killers/quiets */
-void mgen_init_q(Pos *p, MGen *g, i16 ply) {
-    (void)p;
-    g->list = movebuf[ply];
-    g->n = 0;
-    g->idx = 0;
-    g->stage = MG_CAPS;
-    g->ttm = 0;
-    g->k0 = g->k1 = 0;
+void mgen_init_q(Pos *p, MGen *g, i16 ply, u16 ttm) {
+    /* Main-search TT moves may be quiet. Only captures/promotions/EP belong
+       in qsearch outside check; evasions use the full picker. */
+    if (ttm && !p->board[mto(ttm)] && !ispromo(ttm) && mfl(ttm) != MF_EP)
+        ttm = 0;
+    mgen_init(p, g, ply, 0, 0, ttm);
     g->caps_only = 1;
 }
 
