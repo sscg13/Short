@@ -226,20 +226,28 @@ void undo_move(Pos *p, u16 m, Undo *u) {
 /* null move (search-only "pass": same position, opponent to move)    */
 /* ------------------------------------------------------------------ */
 
-/* Null-move make/undo: flip the side to move and toggle the Zobrist side key.
-   Nothing else changes - the board, castle rights, ep square and the NNUE
-   accumulators all stay (the accumulators encode the piece placement, and
-   nnue_eval picks the stm accumulator from p->side, so the null-move position
-   evaluates correctly with the same accumulators). The two sides are keyed by
-   distinct zside[] entries, so XOR of both toggles the side component of the
-   signature regardless of the current side; since XOR is its own inverse, make
-   and undo are the same operation. */
-void nm_make(Pos *p) {
+/* A pass expires en passant: retaining the target would let the wrong side
+   capture there. Save it in the caller's frame so nested nulls undo correctly.
+   Piece placement is unchanged, so the NNUE accumulators remain valid. */
+i16 nm_make(Pos *p) {
+    i16 ep = p->ep;
+    if (ep >= 0) {
+        p->sig ^= zep[ZEPI(ep)];
+        p->sig ^= zep[64];
+        p->ep = -1;
+    }
     p->side ^= 1;
     p->sig  ^= zside_delta;
+    return ep;
 }
-void nm_undo(Pos *p) {
-    nm_make(p);
+void nm_undo(Pos *p, i16 ep) {
+    p->side ^= 1;
+    p->sig  ^= zside_delta;
+    if (ep >= 0) {
+        p->sig ^= zep[64];
+        p->sig ^= zep[ZEPI(ep)];
+        p->ep = ep;
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -655,7 +663,8 @@ static i16 quiet_killer_ok(Pos *p, u16 m) {
         i16 fwd = (piece == WP) ? 16 : -16;
         if (to == from + fwd) return 1;
         if (to == from + 2 * fwd)
-            return (piece == WP) ? ((from >> 4) == 1) : ((from >> 4) == 6);
+            return p->board[from + fwd] == EMPTY &&
+                   ((piece == WP) ? ((from >> 4) == 1) : ((from >> 4) == 6));
         return 0;
     }
     if (pt == 2) {
@@ -947,6 +956,9 @@ int repetition_selftest(void);
 int see_selftest(void);
 int see_microbench(void);
 #endif
+#ifdef SEARCH_TEST
+#include "search_state_test.inc"
+#endif
 int main(int argc, char **argv) {
     i16 maxd = 5, test = 0, i, splitsel = 0;
     i16 j, nn_log = 1;
@@ -990,6 +1002,9 @@ int main(int argc, char **argv) {
 
 #ifdef REP_TEST
     if (argc > 1 && strcmp(argv[1], "reptest") == 0) return repetition_selftest();
+#endif
+#ifdef SEARCH_TEST
+    if (argc > 1 && strcmp(argv[1], "searchtest") == 0) return search_state_selftest();
 #endif
 #ifdef TIME_TEST
     if (argc > 1 && strcmp(argv[1], "timetest") == 0) return time_selftest();

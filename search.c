@@ -570,10 +570,11 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                 i16 nd = depth - 1 - R;         /* the null move spends a ply */
                 Score sc;
                 i16 saved_floor = rep_floor, saved_game = rep_game;
+                i16 saved_ep;
                 rep_floor = rep_n; rep_game = 0;
-                nm_make(p);
+                saved_ep = nm_make(p);
                 sc = -alphabeta(p, nd, -beta, -beta + 1, ply + 1, half + 1, child_type);
-                nm_undo(p);
+                nm_undo(p, saved_ep);
                 rep_floor = saved_floor; rep_game = saved_game;
                 if (sc >= beta && !stop_now) {
                     rep_n--;

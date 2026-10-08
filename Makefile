@@ -8,6 +8,8 @@
 #   make CFLAGS='...'   -> override compile flags
 #   make EVALFILE=<net> -> embed <net> instead of short-net2-finetune2.net (OpenBench)
 #   make -B TUNE=0     -> compiled search constants, no SPSA option interface
+#   make -B EXE=chess_checks CFLAGS='-O2 -Wall -Wextra -Werror -DSEARCH_TEST'
+#   ./chess_checks searchtest -> null-state / killer move-set regression checks
 #   make clean          -> remove objects and the binary
 
 # The gcc build is a fast SCALAR oracle for the 16-bit target: OpenBench measures
@@ -39,7 +41,7 @@ ifeq ($(TUNE),1)
 override CFLAGS += -DTUNE
 endif
 SRCS    := chess.c search.c xboard.c nnue.c vclock.c tt.c
-HDRS    := engine.h tune.h repetition.inc repetition_test.inc see_test.inc time_test.inc
+HDRS    := engine.h tune.h repetition.inc repetition_test.inc see_test.inc time_test.inc search_state_test.inc
 OBJS    := $(SRCS:.c=.o)
 
 TARGET  := $(if $(EXE),$(EXE),chess_gcc)
