@@ -1,224 +1,34 @@
-/* vclock.c - virtual time clock for the 40/2h + 20/1h repeating control
+/* vclock.c - virtual time for the 40/2h + 20/1h repeating control
 
-   When VirtualTime=1 the engine ignores the GUI's time commands (`time`,
-   `otim`, `st`, `level`) and paces itself as if it were a real CPU_model @
-   CPU_KHz. Each move is granted a virtual time budget (180 s/move on average,
-   time banked within the current period, hard flag at move 40 and every 20
-   after that). Stop deepening after half the average allocation, with a
-   1.5x-average hard cap. The last move before a refill can use the bank.
-   Both limits use estimated work, never elapsed host time. See TESTING.md
-   sections 2, 5 and 7.
+   VirtualTime=1 budgets work for CPU_model at CPU_KHz, ignoring GUI time
+   commands. Each period replaces the remaining bank: 40 moves in 2 hours,
+   then 20 moves in 1 hour, repeating. Soft/hard limits are half/1.5 times
+   the average allocation, except that the last move may use the bank.
 
-   Cost model:
-     - 16-bit build (no VCLOCK): a scalar cycles/node per CPU model, NNUE vs
-       material, fitted to the measured bench totals.
-     - gcc build (VCLOCK, the OpenBench/testing build): a WEIGHTED model
-       that charges the search's sub-functions at their measured per-call
-       costs, so a move's cost tracks how the work is actually spent: qsearch
-       rate, move density (branching factor), NNUE activity, and threat probes
-       all move the estimate instead of one flat per-node number. Weights come
-       from the emulator sbench/nbench measurements; the per-node base R is
-       fitted so the model reproduces the measured bench totals exactly.
+   DOS uses scalar cycles/node for NNUE or material. Native VCLOCK builds
+   charge measured operation costs plus fitted per-node residuals; cached
+   TT eval writes and repetition work are included. See TESTING.md.
 
-   Calibration provenance (86Box interpreter measurements, NNUE_OPTIMIZATION.md).
-   COPY-MAKE re-fit (2026-08, branch copy-make-nnue): the accumulator stack made
-   make/undo ~2x cheaper (undo is one 256-byte copy, no delta reversal), so the
-   profile-1 totals dropped to 1.859e9 (8088 @16 MHz) / 0.617e9 (80286 @6 MHz)
-   at the SAME per-call costs (sbench re-verified on the AMI-clone machine, ~1%).
-   All per-call weights (search, ev, rf) are therefore UNCHANGED; only the
-   per-node base R re-fits to the new totals (the savings were absorbed there).
+   Recalibrated 2026-10-08 after the Watcom attack/SEE, quiet-history, NNUE
+   indexing optimizations. Original main search and TT are unchanged.
+   Unprofiled -0 -ml -ox measurements:
+   86Box interpreter 80286 @6 MHz, 8088 @16 MHz, 8086 @8 MHz; MAME Nimbus
+   80186 @8 MHz processor totalcycles. Native PROFILE supplies matching
+   counters and all eight position results with the default v5 net 56329CCE.
 
-   SEARCH-OPT re-fit (2026-08, branch `optimization`): the legality-check skip
-   (a non-king, non-EP move from a square off the mover king's lines is legal
-   when not in check) cut the profile-1 is_attacked calls 34,973 -> 28,017. Per
-   call costs are UNCHANGED (the same sbench numbers re-verified, ~1%); the
-   weighted model auto-tracks the count drop, and only the per-node base R and
-   the scalar cycles/node re-fit to the new profile totals: 1.814e9 (8088) /
-   0.607e9 (80286) for bench 1 (13230 nodes). The MVV-LVA score table (8x8,
-   next_move) and the MG_TT stage skip are inside the `gm` (drain) weight, which
-   re-measured within noise (49.7K vs 48.5K c286).
+   Unchanged board/NNUE/SEE primitives retain verified sbench/nbench costs.
+   Whole searches and original public TT paths are remeasured; compiled
+   kernel checks guard reuse. Only rn/rm fit whole NNUE/material depths
+   2 and 4, with equal relative-error least squares; depth 3 is held out.
+   Full setup/output windows and counters remain in the fit. Fixed benchmark
+   overhead and varying move-picker work mean one residual does not fit all
+   depths exactly. The DOS scalar rows anchor measured depth-4 cycles/node;
+   they remain coarse approximations of different search workloads.
 
-   MOVE-SWEEP re-fit (same branch): gen_caps/gen_quiets now sweep only the 64
-   on-board 0x88 squares (the other 64 entries of board[128] are always EMPTY),
-   which cut the per-call costs to gc 16.5K / gq 18.7K / drain 48.2K c286
-   (was 17.3K / 20.0K / 48.5K; 8088 scaled proportionally). Profile-1 total
-   -> 1.808e9 (8088) / 0.604e9 (80286). R and the scalar cycles/node re-fit
-   again.
-
-   BATCHED-APPLY re-fit (same branch): nnue_make now applies +w1[to]-w1[from]
-   (normal) or +w1[to]-w1[from]-w1[cap] (capture/EP) in ONE 64-element pass
-   with a single word-RMW per element (nn_make_move_/nn_make_cap_ asm, or the
-   matching scalar C). The per-call `rf` weight becomes the batched-apply cost
-   and `c_refresh` now counts BATCH calls (44,645 in profile-1, was 114,921
-   single-row applies). Castling deltas are precomputed. The nbench make+undo
-   pair dropped 24,810 -> 10,710 c286 (-57%), and the profile-1 total -> 0.544e9
-   (80286, measured 90.68 s @6 MHz) / ~1.44e9 (8088, estimated by the same
-   apply cut). rn and rf re-fit: rf 1980 -> 2400 (286), 5613 -> 6800 (8088);
-   rn 4018 -> 8561 (286), 16008 -> 13549 (8088); scalar cpn_tab -> 41126 (286)
-   / 108844 (8088 est).
-
-   ZOBRIST re-fit (branch `optimization`): pos_sig is now O(1) - an incremental
-   Zobrist signature maintained by make/undo (was a 128-square FNV-1a at 9,678
-   c286 per call). The cost moved INTO make/undo (a few u64 XORs each, absorbed
-   in `mk`), so `ps` drops to ~0 and `rn` re-fits to the new profile total.
-
-   TT re-fit (2026-08, branch `tt`): a 64 KB far transposition table (tt.c)
-   shrinks the tree (bench totals: 8088 NNUE profile-1 1.809e9 cyc, 286 0.592e9)
-   and adds probe/store calls (tp/ts). The full weight table was RE-MEASURED on
-   the emulators (sbench, uninstrumented build): mk was ~4x stale and ps ~2.5x
-   stale (the incremental-Zobrist cost in make/undo was never re-fit into them),
-   so rn/rm re-fit to the shipped bench-1 totals as well. nm/rf/ev still carry
-   the older nbench numbers; re-verify before trusting deep-search extrapolation.
-
-      per-call cycles       8088      80286
-        is_attacked          6512       2262
-        pos_sig               ~100        ~40     (field read, was 33488/9678 FNV)
-        gen_caps            51248      17298
-        gen_quiets          60416      20046
-        gen_moves           146448     48468     (full staged drain, sbench)
-        make or undo         1560        525     (pair 3120/1050)
-        NNUE apply elem      5613       1980     (nbench, 12 applies/capture pair)
-        nnue_eval fwd       19328       6588
-      bench 1 totals (13230 nodes): 2.354e9 / 0.815e9 (pre-copy-make),
-      1.859e9 / 0.617e9 (copy-make), then 1.814e9 / 0.607e9 (search-opt) and
-      1.808e9 / 0.604e9 (move-sweep). Material build (10152 nodes) unchanged
-      at 0.689e9 / 0.233e9.
-      R (per-node base) is what those terms leave over, fitted per NNUE state.
-      At that point the 8086 row was still a 16-bit-bus estimate from the
-      8088; the direct Deskpro calibration below supersedes it.
-
-   QUIET-HISTORY re-fit (2026-08, branch `quiet-history`): MG_QUIETS now orders
-   the generated quiets by a piece-to quiet-history table (qhist[2][6][64], see
-   search.c) with a selection-sort exactly like the MVV-LVA caps stage. The new
-   cost is inside next_move (no per-call weight; same treatment as MVV-LVA), so
-   it lands in the per-node base R and the scalar cpn_tab. Re-measured bench-1
-   totals on the emulators: 1.936e9 (8088) / 0.6215e9 (80286) for the SAME 13,230
-   nodes (depth-1 node count is ordering-independent - no beta cutoffs fire at
-   the root, so the counts verify the re-fit is purely the added selection cost).
-   Delta = +9,686 cyc/node (8088) / +1,326 (80286); the material build gets the
-   same per-node delta (the selection loop never touches NNUE). 8086 est = 0.75x
-   of the 8088 delta (matches the existing 8086/8088 weight ratio).
-
-   PVS + FAIL-SOFT re-fit (2026-08, branch `pvs`): alphabeta now searches the
-   first legal move at full window and the rest at a zero window (re-searching
-   only on a fail high), and qsearch returns the best score found (fail-soft)
-   instead of clamping to alpha. Bench-1 node count rose 13,230 -> 13,458 (root
-   zero-window re-searches) but the per-node cost DROPPED (zero-window cutoffs
-   prune more than the re-searches add): re-measured bench-1 totals 1.950e9
-   (8088) / 0.6255e9 (80286) at 13,458 nodes. Delta = -1,422 cyc/node (8088) /
-   -504 (80286), applied to R and the scalar cpn_tab; the material build gets
-   the same per-node delta (the search-structure change is NNUE-independent).
-   8086 est = 0.75x of the 8088 delta. Bench 4 = 653,046 (was 880,565).
-
-    RFP (2026-08, branch `rfp`): reverse futility pruning in alphabeta
-    (depth 1..7, non-PV, not in check: return eval when eval - 100*depth >=
-    beta) cuts bench 4 653,046 -> 382,982 but leaves bench 1 UNCHANGED at 13,458
-    (RFP needs depth >= 1, so a depth-1 search never fires it). No re-fit needed:
-    the weighted model auto-tracks the added alphabeta-node evals (they route
-    through nnue_eval -> c_nn_eval -> `ev`) and the node-count drop (c_anodes ->
-    `rn`); the scalar cpn_tab is still calibrated on the unchanged bench-1. The
-    one deliberate estimate: for deeper searches the material build's added
-    alphabeta evals are uncharged (folded into the fitted base R, as always).
-
-    RE-MEASURE re-fit (2026-08, branch `nmp`): fresh sbench/nbench + bench 1 +
-    bench 2 on the emulators (8088 vm\xt @16 MHz, 80286 vm\atami @6 MHz) with the
-    NMP build. The search weights (att/gc/gq/mk/ps/tp/ts) re-verified within 2-5%.
-    The NNUE weights were ~1.5-1.8x STALE (the forward and the delta path had
-    drifted from the old nbench numbers): fresh eval 35,360 / 10,296 cyc, make+undo
-    pair 43,408 / 13,674 (vs 19,328 / 6,588 and the old charge ~31,900 / ~10,700).
-    With the old weights the model UNDER-predicted the measured bench-2 total by
-    ~7%; the fresh weights agree within ~1.6% (bench 1: 1.976e9 c88 / 0.641e9 c286
-    @13,458 nodes; bench 2: 2.227e9 c286 @46,032 nodes). nm+rf set from the nbench
-    pair minus the sbench board pair - only their SUM is measured (c_nn_make ~=
-    c_refresh ~= 2x makes, so the nm/rf split does not move the total); ev from
-    nbench eval. gm set to the fresh full-drain cost (charged only at the 8 root
-    calls - negligible). rn re-fit so bench-1 reproduces the fresh totals: rn 2,516
-    (286) / 5,855 (8088). The scalar cpn_tab NNUE row re-derived from the same
-    totals (was ~12-20% low). The material row (rm, cpn material) is UNCHANGED -
-    not re-measured (NNUE is the default build; -DNO_NNUE is a dev-only flag).
-    Mirror flips (c_flip -> nn_compute_persp) are still UNCHARGED, as before
-    (rare: 157/depth-1, ~19K/depth-5; the ~1-2% cost is absorbed in rn).
-
-   CURRENT 86BOX RE-MEASURE (2026-08-29): repaired the image packer and rebuilt
-   clean 720K/1.2M disks from the current profile binary. The previous packer
-   silently left vm\xt on an old executable (it only built unused xt360), used a
-   stale FreeDOS directory layout, and failed to write the sectors/cluster BPB
-   byte for the AT image. Fresh profile 1 runs are 89.14 s / 79.37 s on 8088
-   @16 MHz / 80286 @6 MHz, both 10,037 nodes, or 142,100 / 47,446 cycles/node.
-   Search primitive measurements were refreshed with sbench; the profile-fitted
-   per-node bases below absorb the NNUE timer's host-bound forward-pass result.
-   The NNUE scalar rows are measured profile totals, not extrapolations from the
-   old successful emulator run.
-
-   PLY-INDEXED ACCUMULATOR note (2026-08): the copy-make snapshots were replaced
-     by writing the child accumulator into nn_acc[ply+1] (undo = nn_ply--, no
-     memcpy), which cut the 8088 NNUE make+undo pair ~5% (43,408 -> 41,216 c88;
-     the 286 is ~flat). The nm/rf weights below were fit to the OLD pair, so they
-     now over-charge the 8088 delta path by ~5% (~1.5% of the total - absorbed in
-     rn at bench-1, but re-fit nm/rf (and rn) if depth extrapolation matters.
-
-     TT CUTOFFS note (2026-08, branch `tt-cutoff`, main a212243): TT probes now
-     also return EXACT/bound cutoffs at non-PV (zero-window) nodes when the
-     stored depth >= the node depth (PV nodes keep move-ordering only). Bench 1
-     is UNCHANGED at 13,458 (no transpositions at depth 1); bench 4/5 drop
-     382,982 -> 356,316 and 1,688,724 -> 1,549,445. No re-fit: the model tracks
-     the probe (tp) and store (ts) calls and the node-count drops; the cutoffs
-     add no new primitive.
-
-     NMP retry note (2026-08, branch `nmp-again`): null-move pruning in alphabeta
-     between RFP and the move loop. NMP_DEPTH 2 (active at depth >= 2, so bench 4
-     exercises it - the first attempt's depth-4 gate left bench 4 unchanged),
-     NMP_RED 2 + depth/6, non-PV, not in check, side to move holds non-pawn
-     material, eval >= beta + 60 (the slack keeps the shallow qsearch probes from
-     the quiet-defense blunder that regressed bench pos 5 in the first attempt's
-     qsearch probe). Depth 4+ probes are real searches (nd >= 1); depth 2-3 probe
-     by qsearch (nd <= 0). Bench 1 unchanged at 13,458 (NMP needs depth >= 2);
-     bench 4 = 367,867 (+3.2% - shallow probes cost a little), bench 5 =
-     1,347,275 (-13.1% vs the 1,549,445 TT-cutoff baseline). Scores match the
-     reference on 7/8 bench positions (pos 4 only: 152 -> 270). No re-fit: the
-     probes are ordinary alphabeta/qsearch calls (rn/qn) and the shared RFP/NMP
-     eval routes through nnue_eval -> c_nn_eval -> `ev`.
-
-     LMR note (2026-08, branch `lmr`): late move reductions in the alphabeta
-     move loop. The reduction comes from a static precomputed table lmr_tab
-     (R = int(0.75 + ln(d)*ln(m)/2), 2 KB const in DGROUP) - a compile-time
-     constant, so gcc and the 16-bit build agree bit-for-bit with no runtime
-     log(). Gates: node depth >= 3, legal-move # >= 4, non-PV (zero window),
-     not in check, quiet only (mfl == 0 && cap empty), reduced depth clamped to
-     >= 1 (a qsearch probe on a quiet move only sees captures - the NMP lesson).
-     Bench 1 UNCHANGED at 13,458 (depth 1 never fires LMR); bench 4/5 drop
-     367,867 -> 358,845 and 1,347,275 -> 1,022,907 (the ~24% bench-5 drop is the
-     point). No re-fit: LMR only reuses existing primitives (rn/qn via ordinary
-     alphabeta calls, table reads are free) and the node-count drop is tracked
-     by c_anodes -> rn; bench-1 (the scalar cpn calibration) is untouched.
-
-     ReLU^2 eval note (2026-08): the NNUE blob is now the single ReLU^2
-     architecture (v2): w1 x256, act = clamp(acc,0,255), term = (act^2*w2)>>9
-     (pre-shifted in the forward table to fit i16; NNUE_ACT2_SHIFT 9 keeps w2
-     at x64 and the final scale at 1.0 = 256 cp - the total is log2(64*256^2/
-     256) = 14 bits; the old linear-clamp v1 is deprecated and removed). The
-     16-bit forward is the generated nn_fwd_eval_ (every term is one table
-     load - no shift-only +/-128 sat path), so the ev/qn weights need NO
-     re-fit. The scalar oracle and asm are bit-identical (bench-verified on
-     the v2 net: bench 5 = 672,833 with the duplicate-killer fix vs 1,022,907
-     for the old v1 net - the tree differs because the eval differs, not the
-     timing model).
-
-     Aspiration note (2026-08, branch `aspiration-windows`): the root iterative
-     deepening confines each depth >= 2 search to a window of +-ASP_DELTA cp
-     around the previous depth's score; a fail (bsc lands at/outside the window
-     - with fail-soft the true value is outside) doubles delta and re-searches.
-     A window containing any root move's exact value must contain the exact
-     root value, so an in-window result is exact and re-searches are wasted
-     nodes only. ASP_DELTA 150 is the knee of the bench-5 curve (40 -> 1,078,710
-     nodes - the NNUE eval swings >80cp between shallow depths so 40/80/160
-     re-searches fire constantly; 100 -> 601,965; 150 -> 583,167; 200 ->
-     583,013, no further gain). Mate scores never aspirate (full window keeps
-     the exact line). Bench 1 unchanged at 9,960 (no aspiration at depth 1);
-     bench 4 = 190,540 (-11% vs 214,093), bench 5 = 583,167 (-13% vs 672,833).
-     No re-fit: the re-searches are ordinary alphabeta calls (rn/qn) - only
-     the per-depth loop cost changes. */
-
+   Dated inputs, hashes, fit/holdout errors and reproduction:
+   artifacts/nonfunctional-main-2026-10-08/REPORT.md and model-audit/proposal.json.
+   Emulator calibration does not establish absolute physical-hardware time.
+*/
 
 #include "engine.h"
 
@@ -240,10 +50,10 @@ static i16 vperiod_started; /* first period not yet granted */
 /* scalar cycles/node, NNUE / material (16-bit build) */
 #ifndef VCLOCK
 static const i32 cpn_tab[4][2] = {
-    { 41400L, 24275L }, /* 286 NNUE: measured SEE bench 1; material remains estimated */
-    { 122600L, 76500L }, /* 8088: measured depth-2 NNUE / material */
-    { 106700L, 65600L }, /* 8086: measured depth-2 NNUE / material */
-    { 60800L, 43300L },  /* 80186: measured depth-3 NNUE / material */
+    { 41874L, 28465L }, /* 80286: measured depth-4 NNUE / material */
+    { 131689L, 87017L }, /* 8088: measured depth-4 NNUE / material */
+    { 114000L, 74696L }, /* 8086: measured depth-4 NNUE / material */
+    { 63915L, 43351L }, /* 80186: measured depth-4 NNUE / material */
 };
 #endif
 
@@ -252,83 +62,23 @@ static i64 vbudget_cyc, vsoft_cyc; /* weighted hard/soft limits */
 
 typedef struct { i32 att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm, tp, ts; } VW;
 static const VW vw_tab[4] = {
-    /*   att    ps     gc     gq      gm     mk    nm   rf    ev     rn      rm      tp    ts */
-    {  1894,     0, 13868, 15792, 162305, 1009, 1059, 3164,  5109,   6984,   9962,   700,  600 }, /* 80286 */
-    {  5237,     0, 41727, 47613, 551447, 3268, 3433,10370, 15600,  28317,  35057,  2330, 2530 }, /* 8088 */
-    {  4504,     0, 35890, 41003, 491587, 2842, 3068, 9535, 13072,  23997,  29563,  1952, 1998 }, /* 8086 */
-    {  2714,   140, 21359, 24059, 250050, 1595, 1641, 5059,  7535,  11674,  15909,  1236, 1224 }, /* 80186 */
+    /* att ps gc gq gm mk nm rf ev rn rm tp ts: cycles per counted operation */
+    {   1538,      0,  14282,  15518, 145552,   1019,    915,   3147,   5109,  11300,  10800,    700,    700 }, /* 80286 */
+    {   4505,      0,  41360,  47233, 486653,   3268,   2944,  10348,  15596,  36000,  30700,   2350,   2500 }, /* 8088 */
+    {   3863,      0,  35340,  40823, 431533,   2856,   2527,   9535,  13072,  29900,  25800,   2000,   2100 }, /* 8086 */
+    {   2320,    139,  21355,  23754, 227932,   1596,   1463,   5059,   7540,  15000,  14700,   1250,   1300 }, /* 80186 */
 };
-/* TT STATIC EVAL (2026-10-01): uninstrumented -0 -ml -ox, 86Box 286 @6 MHz,
-   100000 calls including loop overhead: hit probe 672.24 cycles, score store
-   586.62, eval-only stores <=448.20 (same key, protected collision, replacement).
-   Round probe/store up to 700/600, charging every eager attempt the full 600.
-   This covers the expanded probe/result fields and eager-write work. Secondary
-   CPUs use estimates scaling their prior tp/ts by these increases, rounded up.
-   An independent eight-position bench-4 run keeps the identical tree and drops
-   157471 -> 156043 guest ms. No per-node fit or scalar-clock change is made. */
-/* LEGACY CPU RE-FIT (2026-09-29): current -0 -ml -ox DOS source on the 86Box
-   8088 @16 MHz and 8086 @8 MHz interpreter VMs and MAME Nimbus 80186 @8 MHz.
-   SEE microbenchmarks give maximum uninstrumented scan residuals of 7486,
-   6646 and 3706 cycles. The scan charges below round those up with at least
-   20% headroom. Keep the previously measured primitive weights and fit only
-   rn/rm to whole, unprofiled eight-position searches. Depths 1/2 are measured
-   on all three CPUs, plus depth 3 on Nimbus. Weighted NNUE errors are within
-   0.5% on 8088/8086 and 1.3% on 80186 across these suites; material errors
-   stay within 3.8%. Scalar rows use measured cycles/node from the deepest
-   suite on each CPU. The 286 row is unchanged. */
-/* PREVIOUS PRIMITIVE CALIBRATION (2026-09-26): measured after Zobrist/king-attack changes,
-   generated forward/batch improvements, and lazy NNUE accumulator updates.
-   Board primitives use the unchanged full sbench driver. Forward is measured
-   with valid accumulators; nbench separately measures plan-only and fully
-   materialized quiet/capture pairs. nm is the average plan-only pair minus
-   the board pair, divided by two; rf is the average additional materialization
-   cost per perspective. The quiet/capture and mirror-refresh cost differences
-   remain approximations covered by fitted rn/rm, not separately exact terms.
-   Native profile-1 counters and uninstrumented full NNUE/material timings fit
-   the remaining per-node overhead. Before the re-fit above, all four rows
-   reproduced their 10037/9949-node calibration totals within integer rounding. 86Box pos_sig
-   samples are below useful timer resolution, so ps remains absorbed in rn/rm;
-   Nimbus uses its exact marker measurement. See SPEEDUP_VALIDATION.md and
-   artifacts/speedup-validation/calibration.json for inputs and reproduction.
-   The calibration notes below are historical and their numbers are superseded. */
-/* CURRENT 86BOX RE-MEASURE (2026-08-29): sbench values are converted by the
-   configured MHz; make10k is a make+undo pair, hence /2 for mk. The NNUE
-   nbench timer is not a usable cross-CPU cycle source under the host-bound
-   interpreter (its eval/delta outputs do not preserve their expected ratio),
-   so nm+rf is refreshed from the delta minus board pair using the historical
-   1:2.4 split. rn is fitted separately to the fresh profile totals: 1.42624e9
-   cycles (8088) / 0.47622e9 cycles (80286), at 10,037 nodes. rm is unchanged. */
-
-/* V2 FORWARD CORRECTION (2026-09-18): the old ev values 10296/35360 were
-   measured before ReLU^2 v2 existed, on the v1 linear-clamp forward pass, then
-   carried into v2 without a re-fit. Calibrated 86Box nbench measurements of the
-   unchanged generated v2 forward are 5436 cycles on the 6 MHz 80286 and 17136
-   on the 16 MHz 8088. */
-
-/* 8086 DESKPRO CALIBRATION (2026-09-19): 86Box interpreter, Compaq Deskpro
-   8086 @ 8 MHz, dynarec off. This replaces the old 0.75x/0.779x 8088 estimate.
-   `build.ps1 -TimingDetail` reports the unrounded PIT-backed clock totals; a
-   32-bit BIOS tick check agrees, and three NNUE runs were identical at 149123
-   ms (2715 BIOS ticks). Material bench 1 was 84036 ms (1530 BIOS ticks).
-
-   NNUE: 149123 ms * 8000 cyc/ms / 10037 = 118858.62 cycles/node.
-   Material: 84036 ms * 8000 cyc/ms / 9949 = 67573.42 cycles/node.
-   Unprofiled sbench/nbench directly measured every weighted term except the
-   negligible pos_sig field read (kept at zero and absorbed in rn). As with the
-   other rows, nm/rf split the measured NNUE-only make-pair cost 1:2.4. Rounded
-   weights plus rn/rm reproduce the totals within 0.0004%. */
-
-/* 80186 NIMBUS CALIBRATION (2026-09-18): MAME 0.289 Nimbus, RM DOS, v1.32f
-   BIOS. Port-E9 watchpoints bracket the whole benchmark and each sbench/nbench
-   loop, reading the main CPU's exact `totalcycles`. The MAME i80186 device
-   divides its 16 MHz input clock by two, so this row is used with CPU_KHz=8000.
-   Startup/net loading is removed with a matching `1 0` control run.
-
-   NNUE: (906605642 - 250028037) / 10037 = 65415.72 cycles/node.
-   Material: (594628157 - 179628030) / 9949 = 41712.65 cycles/node.
-   The rounded per-call weights plus rn/rm reproduce those totals within 0.001%.
-   nm/rf split the NNUE-only make-pair residual in the established 1:2.4 ratio;
-   their sum is measured, while the individual split remains an estimate. */
+/* nm: average quiet/capture plan pair minus its matched board pair, /2.
+   rf: mean quiet/capture (materialized pair - matched plan pair), /2 perspectives.
+   Each pair materializes two perspective batches; undo does not materialize.
+   Quiet/capture and mirror-flip differences remain approximations in rn/rm.
+   tp rounds the slowest measured probe up to 50 cycles. ts similarly covers
+   the maximum original public result/eval path, including reused eval and
+   mates. Result-store samples include the public key-fold overhead.
+   86Box ps remains zero and absorbed in rn/rm: these searches have no pos_sig
+   calls, and isolated loops include overhead. Nimbus uses its exact marker
+   interval. Repetition terms below are retained
+   from their earlier measured/scaled calibration because that code is unchanged. */
 
 /* Upcoming twofold: fixed overhead measured on the identical 10037-node
    bench-1 tree. Revised 286 scans measured over 20000 isolated calls:
@@ -346,22 +96,18 @@ static const RepCost rep_cost[4] = {
     { 1129, 215, 184, 1718 }, /* 80186 */
 };
 
-/* SEE: uninstrumented 286 @ 6 MHz, 4000 calls per fixture. Cheap entries
-   cost at most 413 cycles; round to 450. After removing that entry cost and
-   the already-charged is_attacked calls, the largest attacker-scan residual
-   is 4658 cycles (legal king recapture). A whole-search cross-check needs
-   another ~1400 cycles/scan to cover the averaged primitive costs' residual;
-   use 6200, predicting slightly MORE than the measured 178950000 cycles.
-   Charge the full scan rate even when a pawn/knight exits early. The 8088,
-   8086 and 80186 rows were remeasured directly on the current build, with
-   20% headroom over the slowest isolated scan and a whole-search rn/rm fit.
-   Reproduce with -DSEE_TEST, `chess seebench`; native PROFILE supplies counts. */
+/* SEE: verified unchanged uninstrumented 4000-call fixtures on all CPUs, with
+   native PROFILE call/scan/attack counts. Entry rounds up to 50 cycles.
+   Remove entry and measured attack costs from each fixture; round the slowest
+   scan residual up to 1000 cycles with at least 20% headroom. The full rate
+   is charged even when a pawn/knight scan exits early. Reproduce with
+   -DSEE_TEST and `chess seebench`; rn/rm also undergo the whole-search fit. */
 typedef struct { i32 entry, step; } SeeCost;
 static const SeeCost see_cost[4] = {
-    { 450, 6200 },    /* 80286: measured with whole-search headroom */
-    { 1300, 9000 },   /* 8088: measured, with headroom */
-    { 1100, 8000 },   /* 8086: measured, with headroom */
-    { 650, 5000 },    /* 80186: measured, with headroom */
+    { 450, 3000 }, /* 80286: measured entry / conservative scan */
+    { 1350, 9000 }, /* 8088: measured entry / conservative scan */
+    { 1100, 8000 }, /* 8086: measured entry / conservative scan */
+    { 600, 5000 }, /* 80186: measured entry / conservative scan */
 };
 
 static i64 vclock_cyc(void) {
@@ -379,7 +125,7 @@ static i64 vclock_cyc(void) {
     r += (i64)w->tp  * c_tt_probe;
     r += (i64)w->ts  * c_tt_store;
     /* Eager eval-only writes reuse the probed slot; conservatively charge the
-       full score-store cost even for a protected collision that exits early. */
+       shared result/eval path cost even for a protected collision that exits early. */
     r += (i64)w->ts  * c_tt_eval;
     r += (i64)rep_cost[vcpu_model].fixed * (c_anodes + c_qnodes);
     r += (i64)rep_cost[vcpu_model].scan * c_rep_scan;

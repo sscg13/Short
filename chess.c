@@ -268,10 +268,21 @@ i16 is_attacked(Pos *p, i16 sq, i16 by) {
         to = sq + 17; if ((to & 0x88) == 0 && p->board[to] == BP) return 1;
     }
 
-    for (i = 0; i < 8; i++) {
-        to = sq + kn[i];
-        if ((to & 0x88) == 0 && p->board[to] == (by ? BN : WN)) return 1;
-    }
+    /* Same probe order, with immediate offsets and one color choice. */
+    pc = by ? BN : WN;
+#define ATTACK_KNIGHT(offset) do { \
+        to = sq + (offset); \
+        if ((to & 0x88) == 0 && p->board[to] == pc) return 1; \
+    } while (0)
+    ATTACK_KNIGHT(-33);
+    ATTACK_KNIGHT(-31);
+    ATTACK_KNIGHT(-18);
+    ATTACK_KNIGHT(-14);
+    ATTACK_KNIGHT(14);
+    ATTACK_KNIGHT(18);
+    ATTACK_KNIGHT(31);
+    ATTACK_KNIGHT(33);
+#undef ATTACK_KNIGHT
     /* Both king squares are maintained by make/undo. Bit 1 of king_line
        marks adjacency, so a single difference lookup replaces eight probes.
        The board check also handles a missing/captured king in diagnostic FENs. */
@@ -331,11 +342,21 @@ static i16 see_lva(Pos *p, i16 to, i16 side) {
     from = to + back + 1;
     if (!(from & 0x88) && p->board[from] == pawn && see_legal(p, from, to, side))
         return from;
-    for (i = 0; i < 8; ++i) {
-        from = to + kn[i];
-        if (!(from & 0x88) && p->board[from] == (col | 2) &&
-            see_legal(p, from, to, side)) return from;
-    }
+    /* Constant origins remove the eight-probe loop's indexing overhead.
+       Keep precisely the kn[] order so equal-value attacker ties agree. */
+#define SEE_KN(delta) \
+    from = to + (delta); \
+    if (!(from & 0x88) && p->board[from] == (col | 2) && \
+        see_legal(p, from, to, side)) return from;
+    SEE_KN(-33)
+    SEE_KN(-31)
+    SEE_KN(-18)
+    SEE_KN(-14)
+    SEE_KN(14)
+    SEE_KN(18)
+    SEE_KN(31)
+    SEE_KN(33)
+#undef SEE_KN
     for (i = 0; i < 8; ++i) {
         from = to + qd[i];
         while (!(from & 0x88) && !p->board[from]) from += qd[i];
@@ -721,6 +742,11 @@ void mgen_init_q(Pos *p, MGen *g, i16 ply) {
 u16 next_move(Pos *p, MGen *g) {
     u16 m;
     i16 i, best, bscore;
+#if defined(__WATCOMC__) && defined(__I86__)
+    i16 (__near *history)[6][64];
+#else
+    i16 (*history)[6][64];
+#endif
 
     PCOUNT(c_nextmove);
 
@@ -762,13 +788,20 @@ again:
 
     case MG_QUIETS:
         if (g->idx == 0) g->n = gen_quiets(p, g->list);
+        /* Select the 768-byte side matrix once per call. Keep fresh scores
+           after recursive children, and keep the DOS pointer in DGROUP. */
+#if defined(__WATCOMC__) && defined(__I86__)
+        history = (i16 (__near *)[6][64]) &qhist[p->side];
+#else
+        history = &qhist[p->side];
+#endif
         while (g->idx < g->n) {
             best = -1; bscore = -32000;
             for (i = g->idx; i < g->n; i++) {
                 u16 q = g->list[i];
                 i16 s;
                 if (q == g->ttm || q == g->k0 || q == g->k1) continue;  /* already tried */
-                s = qhist[p->side][TY(p->board[mfrom(q)]) - 1][(q >> 6) & 0x3F];
+                s = (*history)[TY(p->board[mfrom(q)]) - 1][(q >> 6) & 0x3F];
                 if (s > bscore) { bscore = s; best = i; }
             }
             if (best < 0) break;                        /* only already-tried left */

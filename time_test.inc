@@ -55,11 +55,12 @@ int time_selftest(void) {
     tm_check(vclock_selftest() == 0, "virtual boundaries/refills");
 
     vtime_mode = 0;
-    tm_prepare(&p, bench_fens[0]);
+    /* Depth 2 crosses the 64-node real-clock poll in both eval modes. */
+    tm_prepare(&p, bench_fens[1]);
     first = think(&p, 1);
     first_nodes = vtotal_nodes;
     tm_check(first != 0 && time_test_depth == 1, "baseline completed depth");
-    tm_prepare(&p, bench_fens[0]);
+    tm_prepare(&p, bench_fens[1]);
     original = p;
     soft_deadline = 1;
     deadline = (clock_t)1000000L;
@@ -68,7 +69,7 @@ int time_selftest(void) {
              "real soft stop after completed depth");
     tm_check(memcmp(&p, &original, sizeof p) == 0 && rep_n == 0 && !nnue_active,
              "soft stop restores position/history/NNUE");
-    tm_prepare(&p, bench_fens[0]);
+    tm_prepare(&p, bench_fens[1]);
     original = p;
     deadline = (clock_t)(first_nodes + 1);
     m = think(&p, 4);

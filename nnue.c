@@ -144,8 +144,8 @@ Score nn_fwd_eval(i16 side);          /* generated asm forward pass (ReLU^2) */
    when that POV's king (after its 180 transform for persp 1) sits on e-h,
    so the own king always normalizes to files a-d. */
 static void nn_mirrors(Pos *p, i16 m[2]) {
-    m[0] = ((sq2c(p->ks[0]) & 7) >= 4) ? 1 : 0;        /* white king file >= e */
-    m[1] = ((7 - (sq2c(p->ks[1]) & 7)) >= 4) ? 1 : 0;  /* R180 of black king file >= e */
+    m[0] = (p->ks[0] & 4) ? 1 : 0;                   /* white king file >= e */
+    m[1] = (p->ks[1] & 4) ? 0 : 1;                   /* R180 of black king file >= e */
 }
 
 /* feature row for a color-normalized piece on a mirror-normalized compact
@@ -184,12 +184,13 @@ static void nn_rowtab_build(void) {
 
 /* feature row for a piece at sq88 in this POV, given the mirror flag */
 static i16 nn_row(i16 persp, i16 pc, i16 sq88, i16 mirror) {
-    i16 c = sq2c(sq88);
+    i16 c = (sq88 >> 1) & 56;
+    c |= sq88 & 7;
     if (persp == 1) {                 /* black POV: 180 flip + color swap */
-        pc = CO(pc) ? pc - 8 : pc + 8;
-        c = 63 - c;
+        pc ^= 8;
+        c ^= 63;
     }
-    if (mirror) c = (c & 0xF8) | (7 - (c & 7));
+    if (mirror) c ^= 7;
     return nn_rowtab[pc][c];
 }
 
@@ -377,8 +378,8 @@ void nnue_make(Pos *p, u16 m, Undo *u) {
        Only king mirror flips recompute immediately, while p is this child.
        Clearing its valid bits prevents reuse of an older sibling's contents. */
     nn_mirrors(p, mpost);
-    mpre[0] = (mover == WK) ? ((sq2c(from) & 7) >= 4) : mpost[0];
-    mpre[1] = (mover == BK) ? ((7 - (sq2c(from) & 7)) >= 4) : mpost[1];
+    mpre[0] = (mover == WK) ? ((from & 4) != 0) : mpost[0];
+    mpre[1] = (mover == BK) ? ((from & 4) == 0) : mpost[1];
     for (persp = 0; persp < 2; persp++)
         flip[persp] = (mpre[persp] != mpost[persp]) ? 1 : 0;
 
