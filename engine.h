@@ -234,7 +234,7 @@ int xboard_main(void);
    255^2*127>>9 = 16129) and fits i16. score = out >> 5 (1.0 = 256 cp). */
 #define NNUE_FEATURES    704
 #define NNUE_N           64
-#define NNUE_NET_VERSION 5    /* dense rank*4+file own-king rows, single-output ReLU^2 */
+#define NNUE_NET_VERSION 7    /* experimental signed integer activation LUT; accepts v5/v2 */
 #define NNUE_LEGACY_VERSION 2 /* sparse own-king rows; remapped once at load */
 #define NNUE_SCALE_SHIFT 5    /* out >> 5 = centipawns (trainer: 1.0 net output = 256 cp) */
 #define NNUE_ACT2_SHIFT  9    /* forward table pre-shift: (act^2*w2)>>9, w2 x64, 1.0 = 256 cp */
