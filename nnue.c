@@ -3,7 +3,7 @@
  * Architecture (see NNUE.md):
  *   704 one-hot inputs -> two N-wide i16 accumulators (white POV, black POV)
  *   sharing ONE weight matrix, plus a shared N-wide layer-1 bias ->
- *   ReLU^2 clamp(acc,0,255)^2 at accumulator quantization 256 -> 2N i8
+ *   v5 ReLU^2 or experimental v7 LUT[clamp(acc,0,255)] -> 2N i8
  *   output weights (x64), with each product shifted by NNUE_ACT2_SHIFT ->
  *   i16 output bias (x8192) -> raw score (>> NNUE_SCALE_SHIFT = cp).
  *
@@ -61,6 +61,19 @@ i8 nn_w1[NNUE_W1_SIZE];
 #endif
 i8 nn_b1[NNUE_N];   /* layer-1 bias (per hidden neuron, shared by both POVs) */
 i8 nn_w2[NNUE_W2_SIZE];
+/* v7 appends one shared curve; v8 appends 64 neuron-major curves, each
+   containing 256 little-endian signed i32 entries, to the v5 layout.
+   Values are bounded by +/-65025 so (curve[a]*w2)>>9 always fits an i16 table
+   entry. The zero response must be zero because the DOS forward skips acc<=0.
+   All other entries are independent; negative/nonmonotone maps are accepted. */
+static i32 nn_curve[256]; /* one-curve streaming buffer, including on DOS */
+#if defined(__WATCOMC__) && !defined(__386__)
+#define NNUE_STREAM_CURVES 1
+#else
+/* Native arithmetic oracle retains raw curves; DOS keeps only products. */
+static i32 nn_neuron_curve[NNUE_N][256];
+#endif
+
 i16 nn_bias;        /* output bias, i16, quantized at 128*64 (WORD for the asm fwd) */
 
 #if !defined(__WATCOMC__)
@@ -120,14 +133,14 @@ void nn_make_cap(i16 persp, i16 to_row, i16 from_row, i16 cap_row);
 #define NNUE_ASM_BATCH 1
 
 /* per-slot forward product tables (nnue_opt.asm, NNUE_OPTIMIZATION.md §5):
-   fwd[p][j][a] = (a^2 * w2[p*64+j]) >> NNUE_ACT2_SHIFT  for a in [0,255]
-   (the ReLU^2 activation, pre-shifted so every entry fits i16). Built at net
+   fwd[p][j][a] = (curve[a] * w2[p*64+j]) >> NNUE_ACT2_SHIFT for a in [0,255]
+   (bounded activation products, pre-shifted so every entry fits i16). Built at net
    load so the forward multiply becomes one word load. ONE 64 KB far array
    holding both perspectives so the linker CANNOT reorder them: the asm fwd
    reads fwd[0] at offset 0 and fwd[1] at +32768 of the same segment (a single
    2D declaration makes that layout guaranteed). */
 i16 _far nn_fwd[2][NNUE_N][256];
-Score nn_fwd_eval(i16 side);          /* generated asm forward pass (ReLU^2) */
+Score nn_fwd_eval(i16 side);          /* generated asm forward via product tables */
 /* Watcom otherwise assumes non-argument registers survive an external call.
    The generated routine also uses CX/DX/ES; make that contract explicit. */
 #pragma aux nn_fwd_eval modify [ax cx dx es]
@@ -135,6 +148,16 @@ Score nn_fwd_eval(i16 side);          /* generated asm forward pass (ReLU^2) */
 #define NNUE_ASM_FWD 1
 #endif
 #endif
+
+/* The DOS scalar checks use the streamed products. Native checks independently
+   multiply the stored raw per-neuron responses; cross-build tests cover both. */
+static i32 nn_curve_term(i16 slot, i16 a) {
+#ifdef NNUE_STREAM_CURVES
+    return (i32)nn_fwd[slot >> 6][slot & 63][a];
+#else
+    return (nn_neuron_curve[slot & 63][a] * nn_w2[slot]) >> NNUE_ACT2_SHIFT;
+#endif
+}
 
 /* ------------------------------------------------------------------ */
 /* feature indexing                                                   */
@@ -444,8 +467,8 @@ Score nnue_eval(Pos *p) {
     {
         i32 out = nn_bias;
         i16 j;
-        /* ReLU^2: act = clamp(acc, 0, 255); term = (act^2 * w2) >> 9. The
-           squared pre-activation (max 255^2*127 ~ 8.26M) is pre-shifted so the
+        /* act = clamp(acc, 0, 255); term = (curve[act] * w2) >> 9. The
+           bounded lookup response (max magnitude 65025) is pre-shifted so the
            forward table still fits i16; out stays i32 and the final >>5
            (1.0 = 256 cp) is unchanged. stm/nstm: acc[0] is the white POV,
            acc[1] the black POV. The net is side-to-move-aware (the trainer
@@ -455,14 +478,12 @@ Score nnue_eval(Pos *p) {
            move's perspective. */
         for (j = 0; j < NNUE_N; j++) {
             i16 a0 = nn_acc[nn_ply][0][j], a1 = nn_acc[nn_ply][1][j];
-            i16 ws = nn_w2[j];                  /* stm weight */
-            i16 wn = nn_w2[NNUE_N + j];         /* nstm weight */
             i16 as = (p->side == 0) ? a0 : a1;  /* stm activation */
             i16 an = (p->side == 0) ? a1 : a0;  /* nstm activation */
             i32 xs = (as < 0) ? 0 : (as > 255 ? 255 : as);
             i32 xn = (an < 0) ? 0 : (an > 255 ? 255 : an);
-            out += (xs * xs * ws) >> NNUE_ACT2_SHIFT;
-            out += (xn * xn * wn) >> NNUE_ACT2_SHIFT;
+            out += nn_curve_term(j, (i16)xs);
+            out += nn_curve_term(NNUE_N + j, (i16)xn);
         }
         return (Score)(out >> NNUE_SCALE_SHIFT);
     }
@@ -473,25 +494,21 @@ Score nnue_eval(Pos *p) {
 /* weight loading                                                      */
 /* ------------------------------------------------------------------ */
 
-#ifdef NNUE_ASM_FWD
-/* fill fwd[p][j][a] = (a^2 * w2[p*64+j]) >> NNUE_ACT2_SHIFT for a = 0..255 from
-   the current nn_w2 (index = act in [0,255]). The squared product is
-   pre-shifted so every entry fits i16 (max 255^2*127>>9 = 16129). Entries are
-   32k far word stores, one-time. */
-static void nn_fwd_build(void) {
-    i16 j, a;
-    for (j = 0; j < NNUE_N; j++) {
-        i16 w0 = nn_w2[j];
-        i16 w1 = nn_w2[NNUE_N + j];
-        for (a = 0; a < 256; a++) {
-            i32 p0 = (i32)a * a * w0;
-            i32 p1 = (i32)a * a * w1;
-            nn_fwd[0][j][a] = (i16)(p0 >> NNUE_ACT2_SHIFT);
-            nn_fwd[1][j][a] = (i16)(p1 >> NNUE_ACT2_SHIFT);
-        }
+/* Install one logical neuron's curve for both output roles. The DOS hot loop
+   and its 64 KiB far product array are unchanged. Never retain a 64 KiB raw
+   curve array in DGROUP: the loader reuses the same 1 KiB buffer 64 times. */
+static void nn_curve_install(i16 j) {
+#ifdef NNUE_STREAM_CURVES
+    i16 a;
+    i16 w0 = nn_w2[j], w1 = nn_w2[NNUE_N + j];
+    for (a = 0; a < 256; a++) {
+        nn_fwd[0][j][a] = (i16)((nn_curve[a] * w0) >> NNUE_ACT2_SHIFT);
+        nn_fwd[1][j][a] = (i16)((nn_curve[a] * w1) >> NNUE_ACT2_SHIFT);
     }
-}
+#else
+    memcpy(nn_neuron_curve[j], nn_curve, sizeof nn_curve);
 #endif
+}
 
 /* Legacy v2 shared some own-king and pawn rows. Copy king vectors into the
    dense block without changing any feature contribution. Ascending copies
@@ -507,7 +524,22 @@ static void nn_remap_legacy(void) {
         }
 }
 
-/* parse a net blob (engine format, see NNUE.md) from memory */
+static void nn_curve_default(void) {
+    i16 a, j;
+    for (a = 0; a < 256; a++) nn_curve[a] = (i32)a * a;
+    for (j = 0; j < NNUE_N; j++) nn_curve_install(j);
+}
+
+static int nn_curve_valid(void) {
+    i16 a;
+    if (nn_curve[0] != 0) return 0;
+    for (a = 1; a < 256; a++)
+        if (nn_curve[a] < -65025L || nn_curve[a] > 65025L) return 0;
+    return 1;
+}
+
+#ifndef __WATCOMC__
+/* Native embedded blob parser. DOS streams curves directly from the file. */
 static int nnue_parse_blob(const u8 *p, i32 len) {
     u16 ver, feats, hN;
     i32 w1sz = (i32)NNUE_FEATURES * NNUE_N;
@@ -517,7 +549,9 @@ static int nnue_parse_blob(const u8 *p, i32 len) {
     ver   = (u16)p[4] | ((u16)p[5] << 8);
     feats = (u16)p[6] | ((u16)p[7] << 8);
     hN    = (u16)p[8] | ((u16)p[9] << 8);
-    if (ver != NNUE_NET_VERSION && ver != NNUE_LEGACY_VERSION) return 0;
+    if (ver != NNUE_NET_VERSION && ver != 7 && ver != 5 && ver != NNUE_LEGACY_VERSION) return 0;
+    if (ver == 7 && len != need + 1024) return 0;
+    if (ver == 8 && len != need + (i32)NNUE_N * 1024L) return 0;
     if (p[10] != 0 || p[11] != 0) return 0;
     if (feats != NNUE_FEATURES || hN != NNUE_N) return 0;
     memcpy(nn_w1, p + 12, (size_t)w1sz);
@@ -525,24 +559,34 @@ static int nnue_parse_blob(const u8 *p, i32 len) {
     memcpy(nn_w2, p + 12 + w1sz + NNUE_N, (size_t)NNUE_W2_SIZE);
     nn_bias = (i16)((u16)(u8)p[12 + w1sz + NNUE_N + NNUE_W2_SIZE]
             | ((u16)(u8)p[13 + w1sz + NNUE_N + NNUE_W2_SIZE] << 8));
+    if (ver == 7 || ver == 8) {
+        i16 a, j;
+        for (j = 0; j < NNUE_N; j++) {
+            i32 offset = ver == 8 ? (i32)j * 1024L : 0;
+            for (a = 0; a < 256; a++) {
+                const u8 *q = p + need + offset + (i32)a * 4;
+                nn_curve[a] = (i32)((u32)q[0] | ((u32)q[1] << 8) |
+                                   ((u32)q[2] << 16) | ((u32)q[3] << 24));
+            }
+            if (!nn_curve_valid()) return 0;
+            nn_curve_install(j);
+        }
+    } else nn_curve_default();
     if (ver == NNUE_LEGACY_VERSION) nn_remap_legacy();
     nnue_enabled = 1;
     nnue_tables_init();
     return 1;
 }
+#endif
 
 /* ------------------------------------------------------------------ */
 /* one-time table builds (dedicated init: all precomputation/setup     */
 /* ------------------------------------------------------------------ */
 
-/* build every net-dependent table: the feature-row lookup, the forward
-   product tables, and the castling deltas. Must run after the weights are in
-   memory (nn_w1/nn_w2). Call once at net load; idempotent via the ready flag. */
+/* Curves/products are installed while loading, after nn_w2 is available.
+   Finish the feature-row lookup and castling deltas here. */
 void nnue_tables_init(void) {
     nn_rowtab_build();
-#ifdef NNUE_ASM_FWD
-    nn_fwd_build();
-#endif
     nn_castle_build();
 }
 
@@ -562,7 +606,7 @@ int nnue_load(const char *path) {
     ver   = (u16)hdr[4] | ((u16)hdr[5] << 8);
     feats = (u16)hdr[6] | ((u16)hdr[7] << 8);
     hN    = (u16)hdr[8] | ((u16)hdr[9] << 8);
-    if (ver != NNUE_NET_VERSION && ver != NNUE_LEGACY_VERSION) { fclose(f); return 0; }
+    if (ver != NNUE_NET_VERSION && ver != 7 && ver != 5 && ver != NNUE_LEGACY_VERSION) { fclose(f); return 0; }
     if (hdr[10] != 0 || hdr[11] != 0) { fclose(f); return 0; }
     if (feats != NNUE_FEATURES || hN != NNUE_N) { fclose(f); return 0; }
     if (fread(nn_w1, 1, (size_t)w1sz, f) != (size_t)w1sz) { fclose(f); return 0; }
@@ -570,6 +614,18 @@ int nnue_load(const char *path) {
     if (fread(nn_w2, 1, (size_t)NNUE_W2_SIZE, f) != NNUE_W2_SIZE) { fclose(f); return 0; }
     if (fread(hdr, 1, 2, f) != 2) { fclose(f); return 0; }
     nn_bias = (i16)((u16)(u8)hdr[0] | ((u16)(u8)hdr[1] << 8));
+    if (ver == 7 || ver == 8) {
+        i16 j;
+        for (j = 0; j < NNUE_N; j++) {
+            if ((ver == 8 || j == 0) &&
+                (fread(nn_curve, 4, 256, f) != 256 || !nn_curve_valid())) {
+                fclose(f);
+                return 0;
+            }
+            nn_curve_install(j);
+        }
+        if (fgetc(f) != EOF) { fclose(f); return 0; }
+    } else nn_curve_default();
     fclose(f);
     if (ver == NNUE_LEGACY_VERSION) nn_remap_legacy();
     nnue_enabled = 1;
@@ -828,7 +884,7 @@ static i16 nn_chain_check(Pos *p, i16 fresh[2][NNUE_N]) {
                             i32 a = fresh[p->side ^ (j >> 6)][j & 63];
                             if (a < 0) a = 0;
                             if (a > 255) a = 255;
-                            out += (a * a * nn_w2[j]) >> NNUE_ACT2_SHIFT;
+                            out += nn_curve_term(j, (i16)a);
                         }
                         if (got != (Score)(out >> NNUE_SCALE_SHIFT)) fails++;
                         if (!turn) saved_ep = nm_make(p); else nm_undo(p, saved_ep);
@@ -860,6 +916,7 @@ int nnue_selftest(const char *fen) {
         for (z = 0; z < (i32)NNUE_W2_SIZE; z++)
             nn_w2[z] = (i8)((((i32)z * 11 + 5) & 255) - 128);
         nn_bias = 1000;
+        nn_curve_default();
         nnue_enabled = 1;
         nnue_tables_init();
     }
@@ -953,7 +1010,7 @@ int nnue_selftest(const char *fen) {
                     i32 act = nn_acc[nn_ply][side ^ (j / NNUE_N)][j % NNUE_N];
                     if (act < 0) act = 0;
                     if (act > 255) act = 255;
-                    out += (act * act * nn_w2[j]) >> NNUE_ACT2_SHIFT;
+                    out += nn_curve_term(j, (i16)act);
                 }
 #ifdef NNUE_ASM_FWD
                 got = nn_fwd_eval(side);

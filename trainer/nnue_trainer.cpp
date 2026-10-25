@@ -1,8 +1,5 @@
-// nnue_trainer.cpp - record loader, v2 forward pass, and scalar gradients.
-//
-// This is deliberately dependency-free.  The future pybind/torch wrapper can
-// hand its parameter and gradient buffers to process_batch() without copying
-// the record data or duplicating the feature/derivative logic.
+// Shared CPU trainer: engine-exact forward, QAT backpropagation and factored FD.
+// PyTorch supplies flat buffers and AdamW; this core has no Torch dependency.
 
 #include <immintrin.h>
 #include <algorithm>
@@ -10,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <fstream>
 #include <condition_variable>
 #include <mutex>
@@ -67,6 +65,20 @@ struct QuantizedNet {
     std::vector<uint16_t> b1;  // [HIDDEN]
     std::vector<int8_t> w2;
     int16_t bias = 0;
+
+    // Empty for ordinary ReLU² QAT. FD installs one or 64 response tables and
+    // caches their quantized output products once per batch.
+    int curve_count = 0;
+    std::vector<int32_t> curves;
+    std::vector<int32_t> terms;
+
+    int curve_offset(int neuron) const {
+        return curve_count == HIDDEN ? (neuron % HIDDEN) * 256 : 0;
+    }
+
+    int response(int neuron, int index) const {
+        return curves.empty() ? index * index : curves[curve_offset(neuron) + index];
+    }
 
     QuantizedNet() : w1(FEATURES * HIDDEN), b1(HIDDEN), w2(2 * HIDDEN) {}
 };
@@ -167,6 +179,7 @@ struct Gradients {
     std::vector<float> b1;
     std::vector<float> w2;
     float bias = 0.0f;
+    std::vector<float> curves;
 
     Gradients() : w1(FEATURES * HIDDEN), b1(HIDDEN), w2(2 * HIDDEN) {}
 
@@ -175,6 +188,7 @@ struct Gradients {
         std::fill(b1.begin(), b1.end(), 0.0f);
         std::fill(w2.begin(), w2.end(), 0.0f);
         bias = 0.0f;
+        std::fill(curves.begin(), curves.end(), 0.0f);
     }
 };
 
@@ -355,11 +369,22 @@ static Forward forward(const Record& r, const Net& net, const ActiveFeatures& f,
         int stm = r.stm ? 1 : 0;
         int nstm = stm ^ 1;
         int raw = qnet->bias;
-        for (int j = 0; j < HIDDEN; ++j) {
-            int as = int(out.act[stm][j]);
-            int an = int(out.act[nstm][j]);
-            raw += arithmetic_shift(as * as * qnet->w2[j], 9);
-            raw += arithmetic_shift(an * an * qnet->w2[HIDDEN + j], 9);
+        if (qnet->curves.empty()) {
+            for (int j = 0; j < HIDDEN; ++j) {
+                int as = int(out.act[stm][j]);
+                int an = int(out.act[nstm][j]);
+                raw += arithmetic_shift(as * as * qnet->w2[j], 9);
+                raw += arithmetic_shift(an * an * qnet->w2[HIDDEN + j], 9);
+            }
+        } else {
+            const int stride = qnet->curve_count == HIDDEN ? 256 : 0;
+            const int32_t* curve = qnet->curves.data();
+            for (int j = 0; j < HIDDEN; ++j) {
+                int as = int(out.act[stm][j]);
+                int an = int(out.act[nstm][j]);
+                raw += arithmetic_shift(curve[j * stride + as] * qnet->w2[j], 9);
+                raw += arithmetic_shift(curve[j * stride + an] * qnet->w2[HIDDEN + j], 9);
+            }
         }
         out.raw = float(raw);
         out.score = float(arithmetic_shift(raw, 5));
@@ -436,15 +461,49 @@ static const ScoreLossEntry& integer_score_loss_entry(int score) {
     return SCORE_LOSS_TABLE.entries[score + 32768];
 }
 
+enum class TrainingMethod { Qat, FactoredFD };
+
 struct LossParams {
     float lambda = 1.0f;  // 1 = score target, 0 = game-result target
     float pow_exp = 2.5f;
+    TrainingMethod method = TrainingMethod::Qat;
+    bool training = true;
+    int curve_count = 0;  // 0 = fixed ReLU², 1 = shared, 64 = per neuron
+    const float* curve_parameters = nullptr;
+    bool freeze_curve = false;
+    int accumulator_step = 4;
+    int response_step = 256;
 };
+
+static void prepare_activation(QuantizedNet& net, const LossParams& params) {
+    if (params.curve_count != 0 && params.curve_count != 1 && params.curve_count != HIDDEN)
+        throw std::runtime_error("activation curve count must be 0, 1 or 64");
+    if (params.method == TrainingMethod::Qat && params.curve_count)
+        throw std::runtime_error("custom activations require factored-fd");
+    if (params.accumulator_step < 1 || params.accumulator_step > 255 ||
+        params.response_step < 1 || params.response_step > 65025)
+        throw std::runtime_error("invalid finite-difference step");
+    if (params.method != TrainingMethod::FactoredFD) return;
+    net.curve_count = params.curve_count ? params.curve_count : 1;
+    net.curves.resize(net.curve_count * 256);
+    for (size_t a = 0; a < net.curves.size(); ++a) {
+        float value = params.curve_count ? params.curve_parameters[a] : float(a * a);
+        if (!std::isfinite(value) || value < -65025 || value > 65025 ||
+            ((a % 256) == 0 && value != 0))
+            throw std::runtime_error("invalid activation response or nonzero origin");
+        net.curves[a] = int32_t(std::round(value));
+    }
+    if (!params.training) return;
+    net.terms.resize(2 * HIDDEN * 256);
+    for (int j = 0; j < 2 * HIDDEN; ++j)
+        for (int a = 0; a < 256; ++a)
+            net.terms[j * 256 + a] = arithmetic_shift(net.response(j, a) * int(net.w2[j]), 9);
+}
 
 // Accumulates the exact derivative of mean(abs(pt-qf)^pow_exp) into grads.
 // Parameters are in engine units: w1/b1 are accumulator units, w2 is the
 // i8-like x64 row unit, and bias is raw output units.
-static float process_record(const Record& record, const Net& net,
+static float qat_process_record(const Record& record, const Net& net,
                             const LossParams& params, Gradients& grads, bool qat,
                             const QuantizedNet* qnet) {
     ActiveFeatures f = features(record);
@@ -474,6 +533,7 @@ static float process_record(const Record& record, const Net& net,
         dloss_dq = params.pow_exp * std::pow(abs_error, params.pow_exp - 1.0f);
     }
     if (error < 0.0f) dloss_dq = -dloss_dq;
+    if (!params.training) return loss;
     float draw = dloss_dq * predicted.derivative / OUTPUT_SHIFT;
     grads.bias += draw;
 
@@ -524,9 +584,111 @@ static float process_record(const Record& record, const Net& net,
     return loss;
 }
 
+// A measured local secant through the actual integer activation/product map.
+// Multiply each local discrete secant by the clean loss derivative. The
+// linear head uses an STE for output rounding; no activation derivative or
+// random perturbation is used.
+static void factored_update(const Record& record, const ActiveFeatures& f,
+                            const Forward& y, const QuantizedNet& net,
+                            float draw, Gradients& grads, const LossParams& params) {
+    alignas(32) float dacc[PERSPECTIVES][HIDDEN];
+    const __m256i zero = _mm256_setzero_si256();
+    const __m256i maximum = _mm256_set1_epi32(255);
+    const __m256i step = _mm256_set1_epi32(params.accumulator_step);
+    const __m256i offsets = _mm256_set_epi32(1792, 1536, 1280, 1024, 768, 512, 256, 0);
+    const __m256 scale = _mm256_set1_ps(draw / float(2 * params.accumulator_step));
+    const bool learn_curve = params.curve_count && !params.freeze_curve;
+    const int curve_stride = net.curve_count == HIDDEN ? 256 : 0;
+    const __m256i response_step = _mm256_set1_epi32(params.response_step);
+    const __m256i low = _mm256_set1_epi32(-65025);
+    const __m256i high = _mm256_set1_epi32(65025);
+    const __m256 curve_scale = _mm256_set1_ps(draw / float(2 * params.response_step));
+    for (int p = 0; p < PERSPECTIVES; ++p) {
+        int base = p == int(record.stm) ? 0 : HIDDEN;
+        for (int j = 0; j < HIDDEN; j += 8) {
+            __m256i a = _mm256_cvttps_epi32(_mm256_loadu_ps(y.acc[p] + j));
+            __m256i up = _mm256_min_epi32(maximum, _mm256_max_epi32(zero, _mm256_add_epi32(a, step)));
+            __m256i down = _mm256_min_epi32(maximum, _mm256_max_epi32(zero, _mm256_sub_epi32(a, step)));
+            const int32_t* terms = net.terms.data() + (base + j) * 256;
+            __m256i diff = _mm256_sub_epi32(
+                _mm256_i32gather_epi32(terms, _mm256_add_epi32(offsets, up), 4),
+                _mm256_i32gather_epi32(terms, _mm256_add_epi32(offsets, down), 4));
+            _mm256_store_ps(dacc[p] + j, _mm256_mul_ps(_mm256_cvtepi32_ps(diff), scale));
+            if (learn_curve) {
+                __m256i index = _mm256_min_epi32(maximum, _mm256_max_epi32(zero, a));
+                __m256i curve_index = curve_stride ? _mm256_add_epi32(index, offsets) : index;
+                __m256i value = _mm256_i32gather_epi32(net.curves.data() + j * curve_stride, curve_index, 4);
+                __m256i cp = _mm256_min_epi32(high, _mm256_max_epi32(low, _mm256_add_epi32(value, response_step)));
+                __m256i cm = _mm256_min_epi32(high, _mm256_max_epi32(low, _mm256_sub_epi32(value, response_step)));
+                __m256i w = _mm256_cvtepi8_epi32(_mm_loadl_epi64(
+                    reinterpret_cast<const __m128i*>(net.w2.data() + base + j)));
+                __m256i cdiff = _mm256_sub_epi32(_mm256_srai_epi32(_mm256_mullo_epi32(cp, w), 9),
+                                               _mm256_srai_epi32(_mm256_mullo_epi32(cm, w), 9));
+                alignas(32) int32_t indices[8];
+                alignas(32) float credit[8];
+                _mm256_store_si256(reinterpret_cast<__m256i*>(indices), index);
+                _mm256_store_ps(credit, _mm256_mul_ps(_mm256_cvtepi32_ps(cdiff), curve_scale));
+                for (int lane = 0; lane < 8; ++lane)
+                    if (indices[lane]) grads.curves[(j + lane) * curve_stride + indices[lane]] += credit[lane];
+            }
+        }
+        for (int j = 0; j < HIDDEN; ++j) grads.b1[j] += dacc[p][j];
+        for (int k = 0; k < f.count[p]; ++k) {
+            float* row = grads.w1.data() + size_t(f.rows[p][k]) * HIDDEN;
+            for (int j = 0; j < HIDDEN; ++j) row[j] += dacc[p][j];
+        }
+    }
+}
+
+static float process_record(const Record& record, const Net& net,
+                            const LossParams& params, Gradients& grads, bool qat,
+                            const QuantizedNet* qnet) {
+    if (params.method == TrainingMethod::Qat)
+        return qat_process_record(record, net, params, grads, qat, qnet);
+    ActiveFeatures f = features(record);
+    Forward y = forward(record, net, f, true, qnet);
+    ScoreLossEntry predicted = (y.score >= -32768.0f && y.score <= 32767.0f)
+        ? integer_score_loss_entry(int(y.score))
+        : score_loss_entry(y.score);
+    float teacher = integer_score_loss_entry(int(record.score)).probability;
+    float target = params.lambda * teacher +
+                   (1.0f - params.lambda) * (0.5f * float(record.result));
+    float error = predicted.probability - target;
+    float ae = std::fabs(error);
+    if (ae == 0.0f) return 0.0f;
+    float loss, derivative;
+    if (params.pow_exp == 2.0f) {
+        loss = ae * ae;
+        derivative = 2.0f * ae;
+    } else if (params.pow_exp == 2.5f) {
+        float ae15 = ae * std::sqrt(ae);
+        loss = ae * ae15;
+        derivative = 2.5f * ae15;
+    } else {
+        loss = std::pow(ae, params.pow_exp);
+        derivative = params.pow_exp * std::pow(ae, params.pow_exp - 1.0f);
+    }
+    if (!params.training) return loss;
+    if (error < 0.0f) derivative = -derivative;
+    float draw = derivative * predicted.derivative / OUTPUT_SHIFT;
+    grads.bias += draw;
+    int stm = record.stm ? 1 : 0;
+    const int stride = qnet->curve_count == HIDDEN ? 256 : 0;
+    const int32_t* curve = qnet->curves.data();
+    for (int p = 0; p < 2; ++p) {
+        int base = (p == stm) ? 0 : 64;
+        for (int j = 0; j < 64; ++j)
+            grads.w2[base + j] += draw * float(curve[j * stride + int(y.act[p][j])]) * (1.0f / 512.0f);
+    }
+
+    factored_update(record, f, y, *qnet, draw, grads, params);
+    return loss;
+}
+
 class WorkerPool {
 public:
     ~WorkerPool() { stop(); }
+    void shutdown() { stop(); }
 
     void set_threads(int count) {
         if (count < 1) throw std::runtime_error("thread count must be positive");
@@ -562,11 +724,13 @@ public:
             params_ = params;
             qat_ = qat;
             finished_ = 0;
+            error_ = nullptr;
             ++generation_;
         }
         wake_.notify_all();
         std::unique_lock<std::mutex> lock(mutex_);
         complete_.wait(lock, [&] { return finished_ == int(workers_.size()); });
+        if (error_) std::rethrow_exception(error_);
     }
 
     const std::vector<Gradients>& gradients() const { return local_grads_; }
@@ -609,15 +773,22 @@ private:
                 qat = qat_;
             }
             Gradients& grads = local_grads_[id];
+            grads.curves.resize(params->curve_count * 256);
             grads.zero();
             float loss = 0.0f;
             size_t begin = count * size_t(id) / workers_.size();
             size_t end = count * size_t(id + 1) / workers_.size();
-            for (size_t i = begin; i < end; ++i)
-                loss += process_record(records[i], *net, *params, grads, qat, qnet);
+            std::exception_ptr error;
+            try {
+                for (size_t i = begin; i < end; ++i)
+                    loss += process_record(records[i], *net, *params, grads, qat, qnet);
+            } catch (...) {
+                error = std::current_exception();
+            }
             local_loss_[id] = loss;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
+                if (error && !error_) error_ = error;
                 if (++finished_ == int(workers_.size())) complete_.notify_one();
             }
         }
@@ -632,6 +803,7 @@ private:
     bool stopping_ = false;
     uint64_t generation_ = 0;
     int finished_ = 0;
+    std::exception_ptr error_;
     const Record* records_ = nullptr;
     size_t count_ = 0;
     const Net* net_ = nullptr;
@@ -641,19 +813,30 @@ private:
 };
 
 static WorkerPool worker_pool;
+// The persistent pool belongs to this module. Serialize complete calls, including
+// configuration, while the Torch boundary releases the GIL.
+static std::mutex batch_mutex;
 
 void set_threads(int count) {
+    std::lock_guard<std::mutex> lock(batch_mutex);
     worker_pool.set_threads(count);
+}
+
+void shutdown() {
+    std::lock_guard<std::mutex> lock(batch_mutex);
+    worker_pool.shutdown();
 }
 
 static float process_batch_impl(const Record* records, size_t count, const Net& net,
                                 const LossParams& params, Gradients& grads, bool qat) {
+    grads.curves.resize(params.curve_count * 256);
     grads.zero();
     if (!count) return 0.0f;
     QuantizedNet qnet;
     const QuantizedNet* qnet_ptr = nullptr;
     if (qat) {
         qnet = quantize_net(net);
+        prepare_activation(qnet, params);
         qnet_ptr = &qnet;
     }
     if (worker_pool.thread_count() == 0) worker_pool.set_threads(1);
@@ -667,6 +850,7 @@ static float process_batch_impl(const Record* records, size_t count, const Net& 
         for (float& x : grads.b1) x *= inv_count;
         for (float& x : grads.w2) x *= inv_count;
         grads.bias *= inv_count;
+        for (float& x : grads.curves) x *= inv_count;
         return loss * inv_count;
     }
     worker_pool.run(records, count, &net, qnet_ptr, &params, qat);
@@ -695,6 +879,10 @@ static float process_batch_impl(const Record* records, size_t count, const Net& 
     }
     for (int t = 0; t < thread_count; ++t) grads.bias += local_grads[t].bias;
     grads.bias *= inv_count;
+    for (size_t a = 0; a < grads.curves.size(); ++a) {
+        for (int t = 0; t < thread_count; ++t) grads.curves[a] += local_grads[t].curves[a];
+        grads.curves[a] *= inv_count;
+    }
     return loss * inv_count;
 }
 
@@ -716,6 +904,20 @@ float process_batch_flat(const uint8_t* records, size_t record_count,
                          const int64_t* indices, size_t batch_count,
                          const float* parameters, float* gradient,
                          const LossParams& params) {
+    std::lock_guard<std::mutex> lock(batch_mutex);
+    if (!indices && batch_count > record_count)
+        throw std::runtime_error("batch count exceeds record tensor");
+    if (params.curve_count != 0 && params.curve_count != 1 && params.curve_count != HIDDEN)
+        throw std::runtime_error("activation curve count must be 0, 1 or 64");
+    if (!std::isfinite(params.lambda) || params.lambda < 0 || params.lambda > 1 ||
+        !std::isfinite(params.pow_exp) || params.pow_exp < 1)
+        throw std::runtime_error("invalid loss parameters");
+    const size_t parameter_count = PARAM_COUNT + params.curve_count * 256;
+    for (size_t a = 0; a < parameter_count; ++a)
+        if (!std::isfinite(parameters[a]))
+            throw std::runtime_error("parameters must be finite");
+    LossParams options = params;
+    options.curve_parameters = parameters + PARAM_COUNT;
     Net net;
     std::memcpy(net.w1.data(), parameters, sizeof(float) * FEATURES * HIDDEN);
     std::memcpy(net.b1.data(), parameters + FEATURES * HIDDEN, sizeof(float) * HIDDEN);
@@ -734,12 +936,14 @@ float process_batch_flat(const uint8_t* records, size_t record_count,
         }
     }
     Gradients grads;
-    float loss = process_batch(selected.data(), selected.size(), net, params, grads);
+    float loss = process_batch(selected.data(), selected.size(), net, options, grads);
     std::memcpy(gradient, grads.w1.data(), sizeof(float) * FEATURES * HIDDEN);
     std::memcpy(gradient + FEATURES * HIDDEN, grads.b1.data(), sizeof(float) * HIDDEN);
     std::memcpy(gradient + FEATURES * HIDDEN + HIDDEN, grads.w2.data(),
                 sizeof(float) * 2 * HIDDEN);
     gradient[PARAM_COUNT - 1] = grads.bias;
+    if (!grads.curves.empty())
+        std::memcpy(gradient + PARAM_COUNT, grads.curves.data(), grads.curves.size() * sizeof(float));
     return loss;
 }
 

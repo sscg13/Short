@@ -14,6 +14,9 @@ __pycache__/
 trainer/*
 !trainer/*.py
 !trainer/*.cpp
+!trainer/README.md
+# Historical standalone experiment stays local; maintained FD uses trainer.py.
+/artifacts/per-neuron-activation-2026-10-24/
 # Local speedup experiments: frozen builds, VM images, and timing outputs.
 /artifacts/engine-speedups/
 /artifacts/nnue-speedups/

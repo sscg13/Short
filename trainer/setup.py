@@ -88,7 +88,7 @@ class BuildExtensionClang(BuildExtension):
             obj = os.path.join(self.build_temp,
                                os.path.splitext(os.path.basename(src))[0] + ".obj")
             os.makedirs(os.path.dirname(obj) or ".", exist_ok=True)
-            cmd = [clang, "/c", "/nologo", "/O2", "/arch:AVX2", "/clang:-nobuiltininc", "/std:c++17",
+            cmd = [clang, "/c", "/nologo", "/O2", "/clang:-O3", "/arch:AVX2", "/clang:-nobuiltininc", "/std:c++17",
                    "/EHsc", "/MD", "/FIimmintrin.h", f"/Fo{obj}"] + defines
             cmd += [f"-I{d}" for d in include_dirs] + [src]
             print("nnue_extension:", " ".join(cmd))
