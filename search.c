@@ -553,7 +553,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
         if (depth <= RFP_DEPTH) {
             if (eval - depth * RFP_MARGIN >= beta) {
                 rep_n--;
-                return eval;
+                return (Score)(((i32)eval + (i32)beta) / 2);
             }
         }
 
