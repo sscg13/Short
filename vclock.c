@@ -155,7 +155,7 @@ void vclock_set_model(const char *name) {
 }
 
 void vclock_set_khz(i32 khz) {
-    if (khz < 100) khz = 100;         /* keep the /100 scalings in range */
+    if (khz < 1000) khz = 1000;       /* keep the /100 scalings in range */
     if (khz > 50000) khz = 50000;
     vcpu_khz = khz;
 }
