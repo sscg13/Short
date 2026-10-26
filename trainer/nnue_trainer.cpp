@@ -30,9 +30,12 @@ constexpr int HEADER_SIZE = 16;
 constexpr int PARAM_COUNT = FEATURES * HIDDEN + HIDDEN + 2 * HIDDEN + 1;
 
 // The engine's score contract: raw output >> 5 is centipawns, so one
-// network output unit is 256 cp.  Both calibration constants are powers of 2.
-constexpr float SCORE_OFFSET = 256.0f;
-constexpr float SCORE_SCALE = 256.0f;
+// network output unit is 256 cp. Keep both loss sigmoid mappings at the
+// original 256/256 calibration for the batch-size experiment.
+constexpr float PREDICTED_SCORE_OFFSET = 256.0f;
+constexpr float PREDICTED_SCORE_SCALE = 256.0f;
+constexpr float TEACHER_SCORE_OFFSET = 256.0f;
+constexpr float TEACHER_SCORE_SCALE = 256.0f;
 constexpr float OUTPUT_SHIFT = 32.0f;  // raw network output -> centipawns
 
 struct Record {
@@ -430,35 +433,39 @@ struct ScoreLossEntry {
     float derivative;
 };
 
-static ScoreLossEntry score_loss_entry(float score) {
-    float q = (score - SCORE_OFFSET) / SCORE_SCALE;
-    float qm = (-score - SCORE_OFFSET) / SCORE_SCALE;
+static ScoreLossEntry score_loss_entry(float score, float offset, float scale) {
+    float q = (score - offset) / scale;
+    float qm = (-score - offset) / scale;
     float sq = sigmoid(q);
     float sqm = sigmoid(qm);
     ScoreLossEntry entry;
     entry.probability = 0.5f * (1.0f + sq - sqm);
     entry.derivative =
-        0.5f / SCORE_SCALE * (sq * (1.0f - sq) + sqm * (1.0f - sqm));
+        0.5f / scale * (sq * (1.0f - sq) + sqm * (1.0f - sqm));
     return entry;
 }
 
 // Both record scores and the engine-exact QAT output are integer centipawns.
-// Precompute their probability and derivative for every i16 value once, so
+// Precompute separate prediction and teacher mappings for every i16 value, so
 // the batch hot path performs no exp calls. The smooth, non-QAT gradient check
 // retains the continuous formula, as its perturbed scores are fractional.
 struct ScoreLossTable {
     ScoreLossEntry entries[65536];
 
-    ScoreLossTable() {
+    ScoreLossTable(float offset, float scale) {
         for (int score = -32768; score <= 32767; ++score)
-            entries[score + 32768] = score_loss_entry(float(score));
+            entries[score + 32768] = score_loss_entry(float(score), offset, scale);
     }
 };
 
-static const ScoreLossTable SCORE_LOSS_TABLE;
+static const ScoreLossTable PREDICTED_SCORE_LOSS_TABLE(
+    PREDICTED_SCORE_OFFSET, PREDICTED_SCORE_SCALE);
+static const ScoreLossTable TEACHER_SCORE_LOSS_TABLE(
+    TEACHER_SCORE_OFFSET, TEACHER_SCORE_SCALE);
 
-static const ScoreLossEntry& integer_score_loss_entry(int score) {
-    return SCORE_LOSS_TABLE.entries[score + 32768];
+static const ScoreLossEntry& integer_score_loss_entry(int score,
+                                                       const ScoreLossTable& table) {
+    return table.entries[score + 32768];
 }
 
 enum class TrainingMethod { Qat, FactoredFD };
@@ -510,10 +517,11 @@ static float qat_process_record(const Record& record, const Net& net,
     Forward y = forward(record, net, f, qat, qnet);
     ScoreLossEntry predicted;
     if (qat && y.score >= -32768.0f && y.score <= 32767.0f)
-        predicted = integer_score_loss_entry(int(y.score));
+        predicted = integer_score_loss_entry(int(y.score), PREDICTED_SCORE_LOSS_TABLE);
     else
-        predicted = score_loss_entry(y.score);
-    const ScoreLossEntry& teacher = integer_score_loss_entry(int(record.score));
+        predicted = score_loss_entry(y.score, PREDICTED_SCORE_OFFSET, PREDICTED_SCORE_SCALE);
+    const ScoreLossEntry& teacher = integer_score_loss_entry(
+        int(record.score), TEACHER_SCORE_LOSS_TABLE);
     float qf = predicted.probability;
     float pf = teacher.probability;
     float result = 0.5f * float(record.result);
@@ -524,7 +532,10 @@ static float qat_process_record(const Record& record, const Net& net,
     if (abs_error == 0.0f) return 0.0f;
 
     float dloss_dq;
-    if (params.pow_exp == 2.5f) {
+    if (params.pow_exp == 2.0f) {
+        loss = abs_error * abs_error;
+        dloss_dq = 2.0f * abs_error;
+    } else if (params.pow_exp == 2.5f) {
         float ae_15 = abs_error * std::sqrt(abs_error);
         loss = abs_error * ae_15;
         dloss_dq = params.pow_exp * ae_15;
@@ -648,9 +659,9 @@ static float process_record(const Record& record, const Net& net,
     ActiveFeatures f = features(record);
     Forward y = forward(record, net, f, true, qnet);
     ScoreLossEntry predicted = (y.score >= -32768.0f && y.score <= 32767.0f)
-        ? integer_score_loss_entry(int(y.score))
-        : score_loss_entry(y.score);
-    float teacher = integer_score_loss_entry(int(record.score)).probability;
+        ? integer_score_loss_entry(int(y.score), PREDICTED_SCORE_LOSS_TABLE)
+        : score_loss_entry(y.score, PREDICTED_SCORE_OFFSET, PREDICTED_SCORE_SCALE);
+    float teacher = integer_score_loss_entry(int(record.score), TEACHER_SCORE_LOSS_TABLE).probability;
     float target = params.lambda * teacher +
                    (1.0f - params.lambda) * (0.5f * float(record.result));
     float error = predicted.probability - target;

@@ -12,10 +12,11 @@
 #   ./chess_checks searchtest -> null-state / killer move-set regression checks
 #   make clean          -> remove objects and the binary
 
-# The gcc build is a fast SCALAR oracle for the 16-bit target: OpenBench measures
-# its nps to scale time controls, and NOTES.md requires node-count fidelity. GCC
-# auto-vectorizes at -O2 (GCC >= 14 enables tree-loop/slp-vectorize), which would
-# inflate nps ~4x and break the speed-fidelity story, so keep it strictly scalar.
+# The gcc build is an oracle for the 16-bit target: OpenBench measures its nps to
+# scale time controls, and NOTES.md requires node-count fidelity. The hot path is
+# integer-only (no FP in search/eval), so auto-vectorization is deterministic per
+# build and does not change node counts; -march=native lets each host use its own
+# SIMD, and workers compile their own binary.
 CC      ?= gcc
 # Default net: dense 704 v5 ReLU^2, short-net2-finetune2 (hash 56329CCE).
 # OpenBench overrides via EVALFILE=<net>; `make` embeds this one by default.
@@ -31,8 +32,14 @@ EVALFILE ?= short-net2-finetune2.net
 # which would otherwise silently disable VCLOCK and make `bench` print the raw
 # HOST nps (timing-dependent, different on every worker) instead of the
 # deterministic weighted-model NPS. Same for the embedded net.
-CFLAGS  ?= -O2 -Wall -Wextra -Werror
-override CFLAGS += -DVCLOCK -DNN_EMBED_FILE=$(EVALFILE)
+CFLAGS  ?= -O3 -march=native -mtune=native -Wall -Wextra -Werror
+# VCLOCK (weighted counters) is on by default so `bench` prints the deterministic
+# weighted-model NPS. Set VCLOCK=0 for a faster test binary (correctness only).
+VCLOCK  ?= 1
+ifeq ($(VCLOCK),1)
+override CFLAGS += -DVCLOCK
+endif
+override CFLAGS += -DNN_EMBED_FILE=$(EVALFILE)
 # OpenBench uses the ordinary native Makefile build. DOS release stays fixed;
 # build.ps1 only adds TUNE on an explicit -Tune diagnostic build.
 # Shared objects do not track flags: changing TUNE requires -B or make clean.
@@ -51,6 +58,9 @@ ifeq ($(OS),Windows_NT)
   ifeq (,$(findstring .exe,$(TARGET)))
     TARGET := $(TARGET).exe
   endif
+  CHECKS := chess_checks.exe
+else
+  CHECKS := chess_checks
 endif
 
 all: $(TARGET)
@@ -82,7 +92,20 @@ $(TARGET): $(OBJS)
 %.o: %.c $(HDRS)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-clean:
-	rm -f $(OBJS) $(PROF_OBJS) $(TARGET) chess_gcc.exe chess_gcc chess_prof.exe
+# Convenience target: build the diagnostic checks binary and run all selftests.
+# Uses its own flags, so it does not pollute the release objects.
+$(CHECKS): $(SRCS) $(HDRS)
+	$(CC) $(CFLAGS) -DSEE_TEST -DREP_TEST -DTIME_TEST -DSEARCH_TEST -o $@ $(SRCS)
 
-.PHONY: all clean profile
+test: all $(CHECKS)
+	./$(CHECKS) seetest
+	./$(CHECKS) reptest
+	./$(CHECKS) timetest
+	./$(CHECKS) searchtest
+	./$(TARGET) nn
+	./$(TARGET) bench 4
+
+clean:
+	rm -f $(OBJS) $(PROF_OBJS) $(TARGET) $(CHECKS) chess_gcc.exe chess_gcc chess_prof.exe chess_checks chess_checks.exe
+
+.PHONY: all clean profile test
