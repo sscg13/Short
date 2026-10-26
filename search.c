@@ -652,7 +652,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                        reduced search that beats alpha is re-searched at full depth. */
                     i16 new_depth = depth - 1;
                     if (move_count >= LMR_MOVES &&
-                        node_type != NODE_PV && !in_check &&
+                        node_type != NODE_PV &&
                         mfl(m) == 0 && u.cap == EMPTY) {
                         i16 R = lmr_tab[depth < LMR_TD ? depth : LMR_TD - 1]
                                        [move_count < LMR_TM ? move_count : LMR_TM - 1];
