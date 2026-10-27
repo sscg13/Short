@@ -659,7 +659,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                     }
                     if (new_depth < depth - 1) {
                         score = -alphabeta(p, new_depth, -alpha - 1, -alpha, ply + 1, child_half, NODE_CUT);
-                        if (score > alpha && !stop_now)
+                        if (score > alpha)
                             score = -alphabeta(p, depth - 1, -alpha - 1, -alpha, ply + 1, child_half, child_type);
                     } else
                         score = -alphabeta(p, depth - 1, -alpha - 1, -alpha, ply + 1, child_half, child_type);
