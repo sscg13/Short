@@ -274,7 +274,7 @@ static void nn_compute_persp(Pos *p, i16 persp, i16 *out) {
     i16 m[2], sq, k;
     nn_mirrors(p, m);
     for (k = 0; k < NNUE_N; k++) out[k] = nn_b1[k];
-    for (sq = 0; sq < 128; sq++) {
+    for (sq = 0; sq < 128; sq += ((sq & 7) == 7) ? 9 : 1) {
         i16 pc = p->board[sq];
         i16 row;
         u16 base;
