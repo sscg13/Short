@@ -550,11 +550,9 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
            true bound). Horizon nodes have already entered qsearch above.
            On a hit, pop this node's rep-path entry (pushed above) before
            returning. */
-        if (depth <= RFP_DEPTH) {
-            if (eval - depth * RFP_MARGIN >= beta) {
-                rep_n--;
-                return (Score)(((i32)eval + (i32)beta) / 2);
-            }
+        if (eval - depth * RFP_MARGIN >= beta) {
+            rep_n--;
+            return (Score)(((i32)eval + (i32)beta) / 2);
         }
 
         /* null-move pruning: when the static eval already beats beta, the
