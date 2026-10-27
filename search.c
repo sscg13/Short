@@ -684,7 +684,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                     /* killer + history: a true quiet (no promo/ep/castle flag, empty
                        target) that caused the cutoff gets a depth^2 bonus; the deeper
                        the cutoff, the more reliable the move, so it dominates. */
-                    if (ply && mfl(m) == 0 && u.cap == EMPTY) {
+                    if (ply && !stop_now && mfl(m) == 0 && u.cap == EMPTY) {
                         i16 dd = depth * depth;
                         if (m != killers[ply][0]) {  /* a move already in killer slot 0 must
                                                         not be duplicated into slot 1 - the
@@ -698,7 +698,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                 } else if (ply && score <= alpha0) {
                     /* fail low: a quiet that failed to beat its window is penalized
                        (symmetric depth^2), so it sorts behind unsearched quiets. */
-                    if (mfl(m) == 0 && u.cap == EMPTY)
+                    if (!stop_now && mfl(m) == 0 && u.cap == EMPTY)
                         qhist_update(p, m, -(i16)(depth * depth));
                 }
             } else {
