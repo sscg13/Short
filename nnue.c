@@ -128,8 +128,8 @@ void nn_apply_sub(i16 persp, i16 row);
    is read via the _nn_ply global; dst is always src + 256 bytes. */
 void nn_make_move(i16 persp, i16 to_row, i16 from_row);
 void nn_make_cap(i16 persp, i16 to_row, i16 from_row, i16 cap_row);
-#pragma aux nn_make_move modify [ax cx dx es]
-#pragma aux nn_make_cap modify [ax cx dx es]
+#pragma aux nn_make_move parm [ax] [dx] [bx] modify [ax bx cx dx si di bp ds es]
+#pragma aux nn_make_cap parm [ax] [dx] [bx] [cx] modify [ax bx cx dx si di bp ds es]
 #define NNUE_ASM_BATCH 1
 
 /* per-slot forward product tables (nnue_opt.asm, NNUE_OPTIMIZATION.md §5):
