@@ -463,7 +463,10 @@ static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd)
 typedef enum { NODE_PV, NODE_CUT, NODE_ALL } NodeType;
 
 /* At ply zero, callers supply root_m/root_score and use NODE_PV. Root moves
-   retain the previous pass's order; descendants use the staged move picker. */
+   retain the previous pass's order; descendants use the staged move picker.
+   The root is always a PV node (all 4 call sites pass NODE_PV), so node_type
+   is NODE_PV whenever ply == 0; conditions guarded by node_type != NODE_PV
+   therefore also exclude the root without an explicit ply check. */
 static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 half,
                       NodeType node_type) {
     MGen mg;
@@ -537,7 +540,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
     /* RFP and NMP both need the static eval, and only at a non-PV, non-check
        node is it trustworthy enough to prune on, so it is computed once here
        and shared by the two stages below. */
-    if (ply && !in_check && node_type != NODE_PV) {
+    if (!in_check && node_type != NODE_PV) {
         Score eval;
         if (!tt.eval_valid) {
             tt.eval = evaluate(p);
@@ -597,7 +600,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
             pc = p->board[mfrom(m)];                 /* moving piece, before the make */
             if (!pc || CO(pc) != (p->side ? 8 : 0)) continue;  /* not our piece: skip
                                                                   (guards a bogus TT move) */
-            if (ply && !first && depth <= PVS_SEE_DEPTH &&
+            if (!first && depth <= PVS_SEE_DEPTH &&
                 !in_check && node_type != NODE_PV && best > -MATE + MAXPLY &&
                 alpha > -MATE + MAXPLY && beta < MATE - MAXPLY &&
                 mfl(m) == 0 && TY(pc) != 6) {
