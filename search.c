@@ -517,7 +517,8 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
             if (tt_probe(p, ply, &tt)) {
                 if (tt.move && CO(p->board[mfrom(tt.move)]) == (p->side ? 8 : 0))
                     ttm = tt.move;
-                if (node_type != NODE_PV && tt.depth >= depth && tt.score >= best) {
+                if (node_type != NODE_PV && tt.depth >= depth && tt.score >= best &&
+                    rep_prev_path[rep_n - 1] == -1) {
                     if (tt.flag == TT_EXACT) { rep_n--; return tt.score; }
                     if (tt.flag == TT_LOWER && tt.score >= beta) { rep_n--; return tt.score; }
                     if (tt.flag == TT_UPPER && tt.score <= alpha) { rep_n--; return tt.score; }
