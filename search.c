@@ -905,7 +905,12 @@ static const char *bench_fens[] = {
     "r1bq1rk1/pppp1ppp/2n2n2/2b1p3/2B1P3/2N2N2/PPPP1PPP/R1BQ1RK1 w - - 0 1",
     "4rrk1/ppp1bppp/2np1n2/8/2BP4/2N2N2/PP2BPPP/R4RK1 w - - 0 1",
     "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10",
-    "8/2p5/3p1k2/4p3/4P3/3P4/5PKP/8 b - - 0 1"
+    "8/2p5/3p1k2/4p3/4P3/3P4/5PKP/8 b - - 0 1",
+    /* Stockfish bench positions (standard chess) */
+    "4rrk1/pp1n3p/3q2pQ/2p1pb2/2PP4/2P3N1/P2B2PP/4RRK1 b - - 7 19",
+    "2rqkb1r/ppp2p2/2npb1p1/1N1Nn2p/2P1PP2/8/PP2B1PP/R1BQK2R b KQ - 0 11",
+    "8/2p5/8/2kPKp1p/2p4P/2P5/3P4/8 w - - 0 1",
+    "4k2r/1pb2ppp/1p2p3/1R1p4/3P4/2r1PN2/P4PPP/1R4K1 b - - 3 22",
 };
 
 #define BENCH_N ((int)(sizeof(bench_fens) / sizeof(bench_fens[0])))
