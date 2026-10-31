@@ -394,15 +394,14 @@ static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd)
     if (qd <= 0) return evaluate(p);             /* ply budget spent: static eval */
     if (ply >= MAXPLY - 4) return evaluate(p);   /* stay clear of movebuf aux rows */
     if (half >= MAX_HALF) return 0;
-    if (rep_enter(p, half, ply)) return 0;
     if (alpha < 0 && rep_upcoming(p, half, ply)) {
         best = 0; alpha = 0;
-        if (alpha >= beta) { rep_n--; return 0; }
+        if (alpha >= beta) return 0;
     }
     in_check = is_attacked(p, p->ks[p->side], p->side ^ 1);    if (!in_check) {
         stand = evaluate(p);
         if (stand > best) best = stand;                            /* fail-soft baseline = stand-pat */
-        if (stand >= beta) { rep_n--; return stand; }         /* stand-pat cutoff */
+        if (stand >= beta) { return stand; }         /* stand-pat cutoff */
         if (stand > alpha) alpha = stand;
     }
 
@@ -444,7 +443,6 @@ static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd)
         }
     }
 
-    rep_n--;
     if (!legal && in_check)
         return -(MATE - ply);                    /* mated in the qsearch */
     return best;                                 /* fail-soft */
@@ -476,10 +474,6 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
     NodeType child_type;     /* non-PV child expectation: PV scouts also expect cut */
     TTData tt;
 
-    /* Quiescence owns horizon nodes, including their counters, limits and
-       repetition entry. The main search below always has depth >= 1. */
-    if (depth <= 0) return qsearch(p, alpha, beta, ply, half, MAX_QDEPTH);
-
     /* The root already belongs to game history. Keep its move ordering and
        accounting outside the recursive-node setup, but share the PVS loop. */
     if (!ply) {
@@ -499,6 +493,11 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
         if (stop_now) return best;
         if (ply >= MAXPLY) return evaluate(p);   /* hard depth cap: never index past pv/killers/movebuf */
         pv_len[ply] = 0;                                 /* no best line yet at this ply */
+    }
+
+    /* Repetition check before quiescence so horizon positions are covered
+       here instead of in qsearch. */
+    if (ply) {
 
         if (rep_enter(p, half, ply)) return 0;
         if (alpha < 0 && rep_upcoming(p, half, ply)) {
@@ -508,24 +507,25 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
 
         /* 50-move rule: 100 half-moves without a pawn move or capture is a draw */
         if (half >= MAX_HALF) { rep_n--; return 0; }
+    }
 
-        /* transposition table. The probe is shared between the move-ordering use
-           (the stored move, if its from-square still holds a piece of the side to
-           move, is tried first in the MG_TT stage) and the cutoff use. A stored
-           result with depth >= this node's depth is trusted ONLY at a non-PV node
-           (expected cut or all): EXACT returns the score outright, and a
-           matching LOWER/UPPER bound cuts off against beta/alpha. PV nodes are
-           exempt so a bound never truncates the principal variation's exact score. */
-        {
-            if (tt_probe(p, ply, &tt)) {
-                if (tt.move && CO(p->board[mfrom(tt.move)]) == (p->side ? 8 : 0))
-                    ttm = tt.move;
-                if (node_type != NODE_PV && tt.depth >= depth && tt.score >= best &&
-                    rep_prev_path[rep_n - 1] == -1) {
-                    if (tt.flag == TT_EXACT) { rep_n--; return tt.score; }
-                    if (tt.flag == TT_LOWER && tt.score >= beta) { rep_n--; return tt.score; }
-                    if (tt.flag == TT_UPPER && tt.score <= alpha) { rep_n--; return tt.score; }
-                }
+    /* Quiescence owns horizon nodes. */
+    if (depth <= 0) {
+        Score _r = qsearch(p, alpha, beta, ply, half, MAX_QDEPTH);
+        if (ply) rep_n--;   /* pop entry pushed by rep_enter above */
+        return _r;
+    }
+
+    /* Transposition table (non-root only). */
+    if (ply) {
+        if (tt_probe(p, ply, &tt)) {
+            if (tt.move && CO(p->board[mfrom(tt.move)]) == (p->side ? 8 : 0))
+                ttm = tt.move;
+            if (node_type != NODE_PV && tt.depth >= depth && tt.score >= best &&
+                rep_prev_path[rep_n - 1] == -1) {
+                if (tt.flag == TT_EXACT) { rep_n--; return tt.score; }
+                if (tt.flag == TT_LOWER && tt.score >= beta) { rep_n--; return tt.score; }
+                if (tt.flag == TT_UPPER && tt.score <= alpha) { rep_n--; return tt.score; }
             }
         }
     }
