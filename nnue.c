@@ -114,14 +114,6 @@ i16 nn_ply = 0;          /* current ply: index of the active accumulator slot,
                             kept in sync with the board's make/undo depth */
 
 #if defined(__WATCOMC__) && !defined(__386__)
-/* hand-unrolled 64-element apply loops (nnue_opt.asm) for the 16-bit build:
-   acc[persp][j] += (short)w1[row*64+j]  /  -=  for j in 0..63 */
-void nn_apply_add(i16 persp, i16 row);
-void nn_apply_sub(i16 persp, i16 row);
-#pragma aux nn_apply_add modify [ax cx dx es]
-#pragma aux nn_apply_sub modify [ax cx dx es]
-#define NNUE_ASM_APPLY 1
-
 /* batched ply-indexed make loops (nnue_opt.asm): one 64-element copy+apply pass
    writing slot nn_ply+1. nn_make_move: dst = src + w1[to] - w1[from].
    nn_make_cap:  dst = src + w1[to] - w1[from] - w1[cap]. The src (slot nn_ply)

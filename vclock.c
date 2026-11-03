@@ -47,13 +47,20 @@ static i32 vperiod_ms;      /* virtual ms left in the current period */
 static i16 vperiod_left;    /* moves left in the current period */
 static i16 vperiod_started; /* first period not yet granted */
 
-/* scalar cycles/node, NNUE / material (16-bit build) */
+/* scalar cycles/node, NNUE / material (16-bit build).
+   NNUE rows shifted 2026-10-31 for the lodsb/stosw materialization bodies:
+   one materialized batch is exactly one nn_make_move_ / nn_make_cap_ call,
+   and the depth-4 bench tree materializes 63961 batches over 47627 nodes
+   (1.343 batches/node). Each row moved by 1.343 * the mean of the measured
+   quiet and capture per-call saving: faster on 8088/8086/80286, slightly
+   slower on 80186, where lodsb costs more than a disp8 load while stosw
+   still wins. */
 #ifndef VCLOCK
 static const i32 cpn_tab[4][2] = {
-    { 41874L, 28465L }, /* 80286: measured depth-4 NNUE / material */
-    { 131689L, 87017L }, /* 8088: measured depth-4 NNUE / material */
-    { 114000L, 74696L }, /* 8086: measured depth-4 NNUE / material */
-    { 63915L, 43351L }, /* 80186: measured depth-4 NNUE / material */
+    { 41572L, 28465L }, /* 80286: measured depth-4 NNUE / material */
+    { 130611L, 87017L }, /* 8088: measured depth-4 NNUE / material */
+    { 112987L, 74696L }, /* 8086: measured depth-4 NNUE / material */
+    { 64003L, 43351L }, /* 80186: measured depth-4 NNUE / material */
 };
 #endif
 
@@ -63,10 +70,10 @@ static i64 vbudget_cyc, vsoft_cyc; /* weighted hard/soft limits */
 typedef struct { i32 att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm, tp, ts; } VW;
 static const VW vw_tab[4] = {
     /* att ps gc gq gm mk nm rf ev rn rm tp ts: cycles per counted operation */
-    {   1538,      0,  14282,  15518, 145552,   1019,    915,   3147,   5109,  11300,  10800,    700,    700 }, /* 80286 */
-    {   4505,      0,  41360,  47233, 486653,   3268,   2944,  10348,  15596,  36000,  30700,   2350,   2500 }, /* 8088 */
-    {   3863,      0,  35340,  40823, 431533,   2856,   2527,   9535,  13072,  29900,  25800,   2000,   2100 }, /* 8086 */
-    {   2320,    139,  21355,  23754, 227932,   1596,   1463,   5059,   7540,  15000,  14700,   1250,   1300 }, /* 80186 */
+    {   1538,      0,  14282,  15518, 145552,   1019,    915,   2922,   5109,  11300,  10800,    700,    700 }, /* 80286 */
+    {   4505,      0,  41360,  47233, 486653,   3268,   2944,   9545,  15596,  36000,  30700,   2350,   2500 }, /* 8088 */
+    {   3863,      0,  35340,  40823, 431533,   2856,   2527,   8780,  13072,  29900,  25800,   2000,   2100 }, /* 8086 */
+    {   2320,    139,  21355,  23754, 227932,   1596,   1463,   5125,   7540,  15000,  14700,   1250,   1300 }, /* 80186 */
 };
 /* nm: average quiet/capture plan pair minus its matched board pair, /2.
    rf: mean quiet/capture (materialized pair - matched plan pair), /2 perspectives.
@@ -78,7 +85,15 @@ static const VW vw_tab[4] = {
    86Box ps remains zero and absorbed in rn/rm: these searches have no pos_sig
    calls, and isolated loops include overhead. Nimbus uses its exact marker
    interval. Repetition terms below are retained
-   from their earlier measured/scaled calibration because that code is unchanged. */
+   from their earlier measured/scaled calibration because that code is unchanged.
+
+   rf was shifted 2026-10-31 by the measured lodsb/stosw per-batch change
+   (same 1.343 batches/node conversion as cpn_tab): -803 (8088), -755 (8086),
+   -225 (80286) and +66 (80186, capture bodies lose to a disp8 load while the
+   quiet body's stosw still wins). nm and ev are untouched because planning
+   and the forward pass did not change, and rn/rm stay as fitted: they are the
+   per-node residual, so moving rf by the measured per-batch change moves the
+   whole-search prediction by the same amount as the real machine. */
 
 /* Upcoming twofold: fixed overhead measured on the identical 10037-node
    bench-1 tree. Revised 286 scans measured over 20000 isolated calls:
