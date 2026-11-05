@@ -9,6 +9,27 @@
    charge measured operation costs plus fitted per-node residuals; cached
    TT eval writes and repetition work are included. See TESTING.md.
 
+   Recalibrated 2026-11-03 for the build.ps1 -os (favor code size) switch, which
+   re-blocks the hot C paths to fall through instead of jumping. Measured
+   whole-search cycle ratios (new/old) on the same depth-4 bench tree:
+   0.9461 (80286 @6 MHz), 0.9648 (8088 @16 MHz) and 0.9666 (8086 @8 MHz) from
+   the per-position search timers, and 0.9570 for the Nimbus 80186 @8 MHz from
+   its marker interval minus the same build's `chess 1` interval, which removes
+   the 242M-cycle DOS EXE load and leaves the search itself. The hand-written
+   NNUE assembly
+   is unaffected by a C compiler flag, so rf (materialized batch) and ev
+   (forward pass) keep their measured costs; every other row is C code and was
+   scaled by c = (k - s)/(1 - s), where s is that CPU's asm share of cycles per
+   node (20.8 / 20.7 / 21.4 / 22.6%). cpn_tab is whole-node cycles, so its NNUE
+   column scales by k directly and its material column (no NNUE asm calls) by c.
+   Every rescaled model total reproduces its measured k exactly.
+
+   Recalibrated 2026-11-04 for the adopted hand-written is_attacked and gen_caps:
+   the vw_tab att/gc rows and both cpn_tab columns scale by the measured asm/C
+   ratio and the measured whole-search k, and rn/rm are unchanged because the
+   model's own k still lands within 1.4% of measured on every CPU where both
+   exist. Dated deltas: artifacts/asm-default-2026-11-04/REPORT.md.
+
    Recalibrated 2026-10-08 after the Watcom attack/SEE, quiet-history, NNUE
    indexing optimizations. Original main search and TT are unchanged.
    Unprofiled -0 -ml -ox measurements:
@@ -48,6 +69,29 @@ static i16 vperiod_left;    /* moves left in the current period */
 static i16 vperiod_started; /* first period not yet granted */
 
 /* scalar cycles/node, NNUE / material (16-bit build).
+   Both columns were rescaled 2026-11-04 (third time) for the gen_caps
+   sweep/dispatch rewrite (unrolled rank sweep, resume and dispatch tables):
+   both columns by each CPU's measured whole-search ratio k, same reasoning as
+   the earlier rescales - gen_caps is compiled into NNUE and material modes
+   alike. Measured k: 0.996008 (80286), 0.996067 (8088), 0.996903 (8086),
+   0.992866 (80186); see artifacts/gencaps-sweep-2026-11-04/REPORT.md.
+   Both columns were rescaled 2026-11-04 (second time) for the is_attacked probe
+   reorder (pawn probes folded into the two diagonal rays, which now run first):
+   both columns by each CPU's measured whole-search ratio k, same reasoning as
+   the first rescale - the reordered routine is compiled into NNUE and material
+   modes alike, so there is no C-only factor. Measured k: 0.996711 (80286),
+   0.998764 (8088), 0.997931 (8086), 0.997715 (80186); see
+   artifacts/atkfold-2026-11-04/REPORT.md.
+   Both columns were rescaled 2026-11-04 for the adopted hand-written hot paths
+   (is_attacked, gen_caps): both columns by the measured whole-search ratio k,
+   because those two routines are compiled in NNUE and material modes alike, so
+   unlike the -os rescale there is no C-only factor. Measured k: 0.89101 (80286),
+   0.89131 (8088), 0.88436 (8086), 0.89193 (80186); see
+   artifacts/asm-default-2026-11-04/REPORT.md.
+   Both columns were rescaled 2026-11-03 for -os (see the header): the NNUE
+   column by the measured whole-search ratio k, the material column by the
+   C-only factor c, because -DNO_NNUE has no NNUE assembly calls to leave
+   unscaled.
    NNUE rows shifted 2026-10-31 for the lodsb/stosw materialization bodies:
    one materialized batch is exactly one nn_make_move_ / nn_make_cap_ call,
    and the depth-4 bench tree materializes 63961 batches over 47627 nodes
@@ -57,10 +101,10 @@ static i16 vperiod_started; /* first period not yet granted */
    still wins. */
 #ifndef VCLOCK
 static const i32 cpn_tab[4][2] = {
-    { 41572L, 28465L }, /* 80286: measured depth-4 NNUE / material */
-    { 130611L, 87017L }, /* 8088: measured depth-4 NNUE / material */
-    { 112987L, 74696L }, /* 8086: measured depth-4 NNUE / material */
-    { 64003L, 43351L }, /* 80186: measured depth-4 NNUE / material */
+    {  34789L,  23465L }, /* 80286: measured depth-4 NNUE / material */
+    { 111741L,  73736L }, /* 8088: measured depth-4 NNUE / material */
+    {  96083L,  62921L }, /* 8086: measured depth-4 NNUE / material */
+    {  54116L,  36174L }, /* 80186: measured depth-4 NNUE / material */
 };
 #endif
 
@@ -68,13 +112,35 @@ static const i32 cpn_tab[4][2] = {
 static i64 vbudget_cyc, vsoft_cyc; /* weighted hard/soft limits */
 
 typedef struct { i32 att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm, tp, ts; } VW;
+/* Rescaled 2026-11-03 for -os: C-compiled rows x the C-only factor c, while
+   the two NNUE-assembly rows rf/ev keep their measured costs (see header). */
 static const VW vw_tab[4] = {
     /* att ps gc gq gm mk nm rf ev rn rm tp ts: cycles per counted operation */
-    {   1538,      0,  14282,  15518, 145552,   1019,    915,   2922,   5109,  11300,  10800,    700,    700 }, /* 80286 */
-    {   4505,      0,  41360,  47233, 486653,   3268,   2944,   9545,  15596,  36000,  30700,   2350,   2500 }, /* 8088 */
-    {   3863,      0,  35340,  40823, 431533,   2856,   2527,   8780,  13072,  29900,  25800,   2000,   2100 }, /* 8086 */
-    {   2320,    139,  21355,  23754, 227932,   1596,   1463,   5125,   7540,  15000,  14700,   1250,   1300 }, /* 80186 */
+    {    656,      0,   4964,  14462, 135646,    950,    853,   2922,   5109,  10531,  10065,    652,    652 }, /* 80286 */
+    {   1970,      0,  14743,  45138, 465065,   3123,   2813,   9545,  15596,  34403,  29338,   2246,   2389 }, /* 8088 */
+    {   1693,      0,  12621,  39086, 413168,   2734,   2419,   8780,  13072,  28628,  24702,   1915,   2011 }, /* 8086 */
+    {   1003,    131,   7522,  22434, 215267,   1507,   1382,   5125,   7540,  14167,  13883,   1181,   1228 }, /* 80186 */
 };
+/* att and gc were refitted 2026-11-04 when the hand-written is_attacked and
+   gen_caps became the default. Both rows are scaled by the measured asm/C ratio
+   from the Nimbus sbench markers: att 1,081 / 2,274 = 0.4754, gc 7,188 / 16,531
+   = 0.4348. Scaling rather than assigning the absolute per-call cost keeps the
+   whole-search level this table was fitted at (that level is what rn/rm absorb,
+   and gc's row has always sat above the isolated sbench figure). Per-operation
+   costs are only measurable on the 80186 - 86Box guest clock() cannot time
+   sub-second sbench loops, it reports a negative att - so the same ratio is
+   applied to every CPU. Check: the model's own k then lands within 0.6% of the
+   measured whole-search k on both CPUs where both exist (80186 0.8875 vs
+   0.8919; 8088 0.8967 vs 0.8913), so rn/rm stay as fitted.
+   att was refitted again 2026-11-04 for the probe reorder (pawn probes folded
+   into the two diagonal rays, which now run first): 1,081 -> 1,041 on the
+   Nimbus markers, ratio 0.96300, applied to every CPU's row by the same rule.
+   No new reordering is expected to be worth a third pass; that report also
+   records the measured per-CPU whole-search k for the rescale above.
+   gc was refitted again 2026-11-04 for the sweep/dispatch rewrite (unrolled
+   rank sweep with resume table, dispatch table, STOSW emits): 7,189 -> 6,167
+   on the Nimbus markers, ratio 0.85784, applied to every CPU's row by the same
+   rule. See artifacts/gencaps-sweep-2026-11-04/REPORT.md. */
 /* nm: average quiet/capture plan pair minus its matched board pair, /2.
    rf: mean quiet/capture (materialized pair - matched plan pair), /2 perspectives.
    Each pair materializes two perspective batches; undo does not materialize.
@@ -105,10 +171,10 @@ static const VW vw_tab[4] = {
    alpha-beta repetition check already performed. See REPETITION_EXPERIMENT.md. */
 typedef struct { i32 fixed, scan, upscan, lookup; } RepCost;
 static const RepCost rep_cost[4] = {
-    { 657, 125, 107, 1000 }, /* 286 */
-    { 4114, 783, 670, 6262 }, /* 8088 */
-    { 3284, 625, 535, 4998 }, /* 8086 */
-    { 1129, 215, 184, 1718 }, /* 80186 */
+    {  612,  116,  100,   932 }, /* 286 */
+    { 3931,  748,  640,  5984 }, /* 8088 */
+    { 3144,  598,  512,  4785 }, /* 8086 */
+    { 1066,  203,  174,  1623 }, /* 80186 */
 };
 
 /* SEE: verified unchanged uninstrumented 4000-call fixtures on all CPUs, with
@@ -119,10 +185,10 @@ static const RepCost rep_cost[4] = {
    -DSEE_TEST and `chess seebench`; rn/rm also undergo the whole-search fit. */
 typedef struct { i32 entry, step; } SeeCost;
 static const SeeCost see_cost[4] = {
-    { 450, 3000 }, /* 80286: measured entry / conservative scan */
-    { 1350, 9000 }, /* 8088: measured entry / conservative scan */
-    { 1100, 8000 }, /* 8086: measured entry / conservative scan */
-    { 600, 5000 }, /* 80186: measured entry / conservative scan */
+    {  419,  2796 }, /* 80286: measured entry / conservative scan */
+    { 1290,  8601 }, /* 8088: measured entry / conservative scan */
+    { 1053,  7660 }, /* 8086: measured entry / conservative scan */
+    {  567,  4722 }, /* 80186: measured entry / conservative scan */
 };
 
 static i64 vclock_cyc(void) {

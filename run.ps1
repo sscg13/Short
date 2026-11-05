@@ -3,7 +3,9 @@ param(
     [string]$CmdArgs = "",
     [string]$Cycles = "max",
     [string]$Fen = "",
-    [switch]$Profile   # -Profile: build with -DPROFILE so `chess profile` works
+    [switch]$Profile,  # -Profile: build with -DPROFILE so `chess profile` works
+    [switch]$NoAsmAttack,  # -NoAsmAttack: C is_attacked (pre-adoption baseline)
+    [switch]$NoAsmGenCaps  # -NoAsmGenCaps: C gen_caps (pre-adoption baseline)
 )
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -12,11 +14,11 @@ $dosbox = "C:\Users\ckbao\AppData\Local\Programs\DOSBox Staging\dosbox.exe"
 
 # 1. Build
 pushd $root
-if ($Profile) {
-    & powershell -NoProfile -ExecutionPolicy Bypass -File "$root\build.ps1" -Model $Model -Profile
-} else {
-    & powershell -NoProfile -ExecutionPolicy Bypass -File "$root\build.ps1" -Model $Model
-}
+$buildArgs = @("-Model", $Model)
+if ($Profile)       { $buildArgs += "-Profile" }
+if ($NoAsmAttack)   { $buildArgs += "-NoAsmAttack" }
+if ($NoAsmGenCaps)  { $buildArgs += "-NoAsmGenCaps" }
+& powershell -NoProfile -ExecutionPolicy Bypass -File "$root\build.ps1" @buildArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 popd
 

@@ -182,6 +182,16 @@ void undo_move(Pos *p, u16 m, Undo *u);
 i16 nm_make(Pos *p);            /* expire EP, flip side/key; return saved EP */
 void nm_undo(Pos *p, i16 ep);    /* restore the EP returned by matching make */
 i16 is_attacked(Pos *p, i16 sq, i16 by);
+#ifdef ASM_ISATTACKED
+/* -AsmAttack builds: hand-written hot path (attack_opt.asm). */
+i16 is_attacked_asm(Pos *p, i16 sq, i16 by);
+#endif
+#ifdef ATK_DIFF
+/* -AtkDiff builds: C reference for the differential test (attack_ref.c). */
+i16 is_attacked_c(Pos *p, i16 sq, i16 by);
+i16 is_attacked_lines_c(Pos *p, i16 sq, i16 by);
+int attack_selftest(void);
+#endif
 i16 see_ge(Pos *p, u16 m, i16 threshold);
 /* A move can expose its own king only when its from-square shares a rank,
    file, or diagonal with that king.  The relation depends solely on the
@@ -192,6 +202,18 @@ extern u8 king_line[256];
 #define sq_on_king_line(p, sq, s) \
     (king_line[(u8)((sq) - (p)->ks[(s)])] != 0)
 i16 gen_moves(Pos *p, u16 *list);
+#ifdef ASM_GENCAPS
+/* -AsmGenCaps builds: hand-written capture generator (gen_opt.asm).  The move
+   encoding tables are byte-indexed by the doubled 0x88 square. */
+i16 gen_caps_asm(Pos *p, u16 *list);
+extern u16 mf[128];
+extern u16 mt[128];
+#endif
+#ifdef GENCAPS_DIFF
+/* -GenCapsDiff builds: C reference for the differential test (gen_ref.c). */
+i16 gen_caps_c(Pos *p, u16 *list);
+int gencaps_selftest(void);
+#endif
 i32 perft(Pos *p, i16 depth);
 Sig pos_sig(Pos *p);
 u16 repetition_move(Pos *p, Sig target);

@@ -141,6 +141,30 @@ i32 c_see = 0, c_see_step = 0;  /* SEE entries and attacker scans */
 /* make / unmake                                                      */
 /* ------------------------------------------------------------------ */
 
+/* Castling-rights mask per 0x88 square: 0xFF except the six squares whose
+   vacating or occupation changes a right.  The old code tested eight squares
+   on EVERY move (`from`/`to` versus the four rook corners, plus a piece-type
+   test for the king start squares) and did four guarded read-modify-writes;
+   two indexed ANDs replace all of it.
+
+   The table is a superset of the old piece-conditional king test: it drops a
+   right when any piece leaves or reaches e1/e8, not only a king.  That is
+   unreachable with the right still live - e1 can only be vacant, or hold the
+   other side's piece, after the king has already moved away and lost it - and
+   the operation is idempotent, so the position stream is unchanged. */
+u8 cast_mask[128];
+
+static void cast_mask_build(void) {
+    i16 sq;
+    for (sq = 0; sq < 128; sq++) cast_mask[sq] = 0xFF;
+    cast_mask[0x04] = (u8)~3;    /* e1 king moves: white castles */
+    cast_mask[0x74] = (u8)~12;   /* e8 king moves: black castles */
+    cast_mask[0x00] = (u8)~2;    /* a1: white queenside */
+    cast_mask[0x07] = (u8)~1;    /* h1: white kingside  */
+    cast_mask[0x70] = (u8)~8;    /* a8: black queenside */
+    cast_mask[0x77] = (u8)~4;    /* h8: black kingside  */
+}
+
 void do_make(Pos *p, u16 m, Undo *u) {
     i16 from = mfrom(m), to = mto(m);
     i16 fl = mfl(m);
@@ -167,14 +191,7 @@ void do_make(Pos *p, u16 m, Undo *u) {
         else              p->board[to + 16] = EMPTY;
     }
 
-    if (TY(piece) == 6) {
-        if (from == 0x04) p->castle &= ~3;
-        else if (from == 0x74) p->castle &= ~12;
-    }
-    if (from == 0x00 || to == 0x00) p->castle &= ~2;
-    if (from == 0x07 || to == 0x07) p->castle &= ~1;
-    if (from == 0x70 || to == 0x70) p->castle &= ~8;
-    if (from == 0x77 || to == 0x77) p->castle &= ~4;
+    p->castle &= cast_mask[from] & cast_mask[to];
 
     p->ep = -1;
     if (piece == WP && to == from + 32) p->ep = from + 16;
@@ -254,6 +271,15 @@ void nm_undo(Pos *p, i16 ep) {
 /* attacks                                                            */
 /* ------------------------------------------------------------------ */
 
+#ifdef ASM_ISATTACKED
+/* -AsmAttack build: the reference body lives in attack_ref.c (is_attacked_c)
+   and the hot path is attack_opt.asm.  Both are linked so the `atkdiff`
+   selftest can compare them; this translation unit keeps no copy. */
+i16 is_attacked(Pos *p, i16 sq, i16 by) {
+    PCOUNT(c_isattacked);
+    return is_attacked_asm(p, sq, by);
+}
+#else
 i16 is_attacked(Pos *p, i16 sq, i16 by) {
     i16 i, to, d;
     i16 pc;
@@ -313,6 +339,7 @@ i16 is_attacked(Pos *p, i16 sq, i16 by) {
     }
     return 0;
 }
+#endif /* ASM_ISATTACKED */
 
 /* Test a recapture using board-only changes: no Zobrist or NNUE work. This
    rejects pinned attackers and unsafe king captures, including pins revealed
@@ -419,6 +446,32 @@ i16 see_ge(Pos *p, u16 m, i16 threshold) {
 /* move generation (pseudo-legal)                                     */
 /* ------------------------------------------------------------------ */
 
+#ifdef ASM_GENCAPS
+/* -AsmGenCaps build: the capture generator lives in gen_opt.asm and the
+   reference body in gen_ref.c (test only), exactly like is_attacked.
+
+   _mf[sq] = sq2c(sq) and _mt[sq] = sq2c(sq) << 6 let the asm encode a move
+   with two indexed loads and an OR instead of the shift/mask/or sequence.
+   Both are indexed by the 0x88 square (0..127); off-board squares are never
+   pieces, so their entries only have to be well defined, not meaningful. */
+u16 mf[128];
+u16 mt[128];
+
+static void move_tables_build(void) {
+    i16 sq;
+    for (sq = 0; sq < 128; sq++) {
+        u16 c = (u16)sq2c(sq);
+        mf[sq] = c;
+        mt[sq] = (u16)(c << 6);
+    }
+}
+
+i16 gen_caps(Pos *p, u16 *list) {
+    PCOUNT(c_gen_caps);
+    return gen_caps_asm(p, list);
+}
+#else
+
 /* captures (incl. en passant) + all promotion moves; searched first. Sweeps
    only the 64 on-board 0x88 squares (file 0..7, rank 0..7): the other 64
    entries of board[128] are always EMPTY (off-board), so skipping them halves
@@ -508,6 +561,7 @@ i16 gen_caps(Pos *p, u16 *list) {
     }
     return n;
 }
+#endif /* ASM_GENCAPS */
 
 /* quiet non-capture moves + castling; generated only after caps/killers fail.
    Sweeps only the 64 on-board 0x88 squares (see gen_caps): the off-board
@@ -992,6 +1046,163 @@ int see_microbench(void);
 #ifdef SEARCH_TEST
 #include "search_state_test.inc"
 #endif
+#ifdef GENCAPS_DIFF
+/* Differential test for the hand-written capture generator.  At every node of
+   a depth-2 walk over the perft suite, compare gen_caps_asm against the C
+   reference element by element.  Order is part of the contract: the generated
+   order feeds move ordering and therefore the bench tree, so an unordered
+   multiset compare would be too weak. */
+static i32 gc_bad, gc_checks;
+
+static void gc_check(Pos *p) {
+    u16 a[256], b[256];
+    i16 na = gen_caps_asm(p, a);
+    i16 nb = gen_caps_c(p, b);
+    i16 i;
+
+    gc_checks++;
+    if (na != nb) {
+        if (gc_bad < 8)
+            printf("COUNT MISMATCH asm=%d c=%d\n", (int)na, (int)nb);
+        gc_bad++;
+        return;
+    }
+    for (i = 0; i < na; i++) {
+        if (a[i] != b[i]) {
+            if (gc_bad < 8)
+                printf("MISMATCH i=%d asm=%04X c=%04X\n",
+                       (int)i, (unsigned)a[i], (unsigned)b[i]);
+            gc_bad++;
+        }
+    }
+}
+
+static void gc_walk(Pos *p, i16 depth) {
+    i16 i, n;
+    u16 *list;
+
+    gc_check(p);
+    if (depth <= 0) return;
+    list = movebuf[depth];
+    n = gen_moves(p, list);
+    for (i = 0; i < n; i++) {
+        Undo u;
+        i16 us;
+        do_make(p, list[i], &u);
+        us = p->side ^ 1;
+        if (!is_attacked(p, p->ks[us], p->side))
+            gc_walk(p, depth - 1);
+        undo_move(p, list[i], &u);
+    }
+}
+
+int gencaps_selftest(void) {
+    i16 i;
+    gc_bad = 0;
+    gc_checks = 0;
+    for (i = 0; i < (i16)(sizeof fens / sizeof fens[0]); i++) {
+        Pos p;
+        parse_fen(&p, fens[i]);
+        gc_walk(&p, 2);
+    }
+    /* Diagnostic FENs: no pieces, no king, en passant for both colours, and
+       the promotion paths (push, capture, and a pawn on the far rank). */
+    {
+        static const char *odd[] = {
+            "8/8/8/8/8/8/8/8 w - - 0 1",
+            "4k3/8/8/8/8/8/8/4K3 w - - 0 1",
+            "8/8/8/3k4/8/8/8/4K3 b - - 0 1",
+            "8/8/8/8/3Q4/8/8/4K3 w - - 0 1",
+            "P3k3/8/8/8/8/8/8/4K2p w - e6 0 1",
+            "4k3/8/8/8/8/8/8/P6p w - h3 0 1",
+            "8/8/8/3pP3/8/8/8/4K2k w - d6 0 1",
+            "8/8/8/8/8/8/n1n5/1N4Kk w - - 0 1",
+            "4k3/1P6/8/8/8/8/8/4K3 w - - 0 1",
+            "r3k3/1P6/8/8/8/8/8/4K3 w - - 0 1",
+            "2r1k3/1P6/8/8/8/8/8/4K3 w - - 0 1",
+            "4k3/8/8/8/8/8/1p6/4K3 b - - 0 1",
+            "4k3/8/8/8/8/8/1p6/r3K3 b - - 0 1",
+            "4k3/8/8/8/3pP3/8/8/4K3 b - e3 0 1",
+            "4k3/8/8/1Pp5/8/8/8/4K3 w - c6 0 1"
+        };
+        for (i = 0; i < (i16)(sizeof odd / sizeof odd[0]); i++) {
+            Pos p;
+            parse_fen(&p, odd[i]);
+            gc_walk(&p, 1);
+        }
+    }
+    printf("gencaps checks=%ld mismatches=%ld %s\n",
+           (long)gc_checks, (long)gc_bad, gc_bad ? "*** FAIL ***" : "ok");
+    return gc_bad != 0;
+}
+#endif
+
+#ifdef ATK_DIFF
+/* Differential test for the hand-written attack scan.  Walks the perft suite
+   and, at every node, compares is_attacked_asm against the C reference on all
+   128 squares for both sides.  is_attacked is a pure predicate, so this is an
+   exhaustive equivalence check over the squares that occur in real play. */
+static i32 atk_bad, atk_checks;
+static void atk_walk(Pos *p, i16 depth) {
+    i16 sq, by, i, n;
+    u16 *list;
+
+    for (sq = 0; sq < 128; sq++) {
+        if (sq & 0x88) continue;
+        for (by = 0; by < 2; by++) {
+            i16 a = is_attacked_asm(p, sq, by);
+            i16 b = is_attacked_c(p, sq, by);
+            atk_checks++;
+            if (a != b) {
+                if (atk_bad < 8)
+                    printf("MISMATCH sq=%02X by=%d asm=%d c=%d\n", sq, by, a, b);
+                atk_bad++;
+            }
+        }
+    }
+    if (depth <= 0) return;
+    list = movebuf[depth];
+    n = gen_moves(p, list);
+    for (i = 0; i < n; i++) {
+        Undo u;
+        i16 us;
+        do_make(p, list[i], &u);
+        us = p->side ^ 1;
+        if (!is_attacked(p, p->ks[us], p->side))      /* legality, asm path */
+            atk_walk(p, depth - 1);
+        undo_move(p, list[i], &u);
+    }
+}
+
+int attack_selftest(void) {
+    i16 i;
+    atk_bad = 0;
+    atk_checks = 0;
+    for (i = 0; i < (i16)(sizeof fens / sizeof fens[0]); i++) {
+        Pos p;
+        parse_fen(&p, fens[i]);
+        atk_walk(&p, 2);
+    }
+    /* Diagnostic FENs can leave ks[] = -1; the reference skips the king probe
+       then, and the asm must not read board[-1]. */
+    {
+        static const char *odd[] = {
+            "8/8/8/8/8/8/8/8 w - - 0 1",
+            "4k3/8/8/8/8/8/8/4K3 w - - 0 1",
+            "8/8/8/3k4/8/8/8/4K3 b - - 0 1",
+            "8/8/8/8/3Q4/8/8/4K3 w - - 0 1"
+        };
+        for (i = 0; i < (i16)(sizeof odd / sizeof odd[0]); i++) {
+            Pos p;
+            parse_fen(&p, odd[i]);
+            atk_walk(&p, 0);
+        }
+    }
+    printf("atkdiff checks=%ld mismatches=%ld %s\n",
+           (long)atk_checks, (long)atk_bad, atk_bad ? "*** FAIL ***" : "ok");
+    return atk_bad != 0;
+}
+#endif
 int main(int argc, char **argv) {
     i16 maxd = 5, test = 0, i, splitsel = 0;
     i16 j, nn_log = 1;
@@ -1013,8 +1224,12 @@ int main(int argc, char **argv) {
 
     mvv_build();   /* one-time MVV-LVA table (dedicated init) */
     king_line_build(); /* one-time legality lookup (dedicated init) */
+    cast_mask_build(); /* one-time castling-rights table (dedicated init) */
     zob_init();    /* one-time Zobrist key tables (dedicated init) */
     lmr_build();   /* one-time LMR log table (dedicated init) */
+#ifdef ASM_GENCAPS
+    move_tables_build(); /* one-time move-encoding tables for gen_opt.asm */
+#endif
 
     /* NNUE net: `chess --nnue file ...` overrides the default net. The default is
        the EMBEDDED net on the gcc build (OpenBench embeds the trained net via
@@ -1049,6 +1264,14 @@ int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "nn") == 0)
         return nnue_selftest((argc > 2) ? argv[2] : NULL);
 
+#ifdef GENCAPS_DIFF
+    if (argc > 1 && strcmp(argv[1], "gencaps") == 0)
+        return gencaps_selftest();
+#endif
+#ifdef ATK_DIFF
+    if (argc > 1 && strcmp(argv[1], "atkdiff") == 0)
+        return attack_selftest();
+#endif
     if (argc > 1 && strcmp(argv[1], "nbench") == 0)
         return nnue_bench();
 
