@@ -1044,7 +1044,7 @@ int see_selftest(void);
 int see_microbench(void);
 #endif
 #ifdef SEARCH_TEST
-#include "search_state_test.inc"
+#include "tests/search_state_test.inc"
 #endif
 #ifdef GENCAPS_DIFF
 /* Differential test for the hand-written capture generator.  At every node of

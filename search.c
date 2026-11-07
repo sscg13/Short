@@ -1269,13 +1269,13 @@ static u32 timing_bios_ticks(void) {
 
 
 #ifdef REP_TEST
-#include "repetition_test.inc"
+#include "tests/repetition_test.inc"
 #endif
 
 #ifdef SEE_TEST
-#include "see_test.inc"
+#include "tests/see_test.inc"
 #endif
 
 #ifdef TIME_TEST
-#include "time_test.inc"
+#include "tests/time_test.inc"
 #endif

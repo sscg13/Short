@@ -48,7 +48,7 @@ ifeq ($(TUNE),1)
 override CFLAGS += -DTUNE
 endif
 SRCS    := chess.c search.c xboard.c nnue.c vclock.c tt.c
-HDRS    := engine.h tune.h repetition.inc repetition_test.inc see_test.inc time_test.inc search_state_test.inc
+HDRS    := engine.h tune.h repetition.inc tests/repetition_test.inc tests/see_test.inc tests/time_test.inc tests/search_state_test.inc
 OBJS    := $(SRCS:.c=.o)
 
 TARGET  := $(if $(EXE),$(EXE),chess_gcc)
@@ -86,8 +86,13 @@ vclock_prof.o: vclock.c $(HDRS)
 tt_prof.o: tt.c $(HDRS)
 	$(CC) $(CFLAGS) -DPROFILE -c -o $@ $<
 
+# When EXE names the checks binary, the $(CHECKS) rule below already supplies a
+# recipe for it; defining $(TARGET) here too would make make warn about a
+# duplicate recipe (and silently pick one of them).
+ifneq ($(TARGET),$(CHECKS))
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $(OBJS)
+endif
 
 %.o: %.c $(HDRS)
 	$(CC) $(CFLAGS) -c -o $@ $<
