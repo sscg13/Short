@@ -132,6 +132,10 @@ i32 c_gen_moves = 0;            /* gen_moves entries */
 i32 c_gen_caps = 0;             /* gen_caps entries */
 i32 c_gen_quiets = 0;           /* gen_quiets entries */
 i32 c_nextmove = 0;             /* next_move entries */
+i32 c_nm_tt = 0;                /* next_move: TT-stage returns */
+i32 c_nm_capscan = 0;           /* next_move: capture-stage candidate comparisons */
+i32 c_nm_qscan = 0;             /* next_move: quiet-stage history lookups */
+i32 c_nm_killer = 0;            /* next_move: killer validations */
 i32 c_isattacked = 0;           /* is_attacked entries */
 i32 c_possig = 0;               /* pos_sig entries */
 i32 c_see = 0, c_see_step = 0;  /* SEE entries and attacker scans */
@@ -710,14 +714,16 @@ static void king_line_build(void) {
     }
 }
 
-static i16 mvv_lva(Pos *p, u16 m) {
-    i16 victim = 0, s;
-    if (mfl(m) == MF_EP) victim = 1;                       /* captured pawn */
-    else if (p->board[mto(m)]) victim = TY(p->board[mto(m)]);
-    s = mvv_tab[victim][TY(p->board[mfrom(m)])];
-    if (ispromo(m)) s += PROMO_BONUS;
-    return s;
-}
+/* MVV-LVA capture score, inlined at its call sites. next_move makes 93,314
+   comparisons per bench-4 run; as a function that was a real far call each
+   time (512 cycles/step on the 80186 vs 274 for the inlined quiet step, see
+   artifacts/orderbench-2026-11-07). Score and order are unchanged: same
+   table, same victim/promotion rules. mv is a register-resident move word at
+   both call sites, so the repeated subexpressions cost nothing. */
+#define MVV_LVA(p, mv) \
+    (mvv_tab[(mfl(mv) == MF_EP) ? 1 : \
+             ((p)->board[mto(mv)] ? TY((p)->board[mto(mv)]) : 0)] \
+            [TY((p)->board[mfrom(mv)])] + (ispromo(mv) ? PROMO_BONUS : 0))
 
 /* killer sanity: the move must be a genuine quiet pseudo-legal move of the
    side to move. A bare "from occupied, to empty" check is not enough: a
@@ -808,7 +814,7 @@ again:
     switch (g->stage) {
     case MG_TT:
         g->stage = MG_CAPS;
-        if (g->ttm) return g->ttm;
+        if (g->ttm) { PCOUNT(c_nm_tt); return g->ttm; }
         goto again;
 
     case MG_CAPS:
@@ -816,9 +822,11 @@ again:
         while (g->idx < g->n) {
             best = -1; bscore = -32000;
             for (i = g->idx; i < g->n; i++) {
+                u16 mv = g->list[i];
                 i16 s;
-                if (g->list[i] == g->ttm) continue;       /* already tried */
-                s = mvv_lva(p, g->list[i]);
+                if (mv == g->ttm) continue;               /* already tried */
+                PCOUNT(c_nm_capscan);
+                s = MVV_LVA(p, mv);
                 if (s > bscore) { bscore = s; best = i; }
             }
             if (best < 0) break;
@@ -834,7 +842,10 @@ again:
         if (g->idx < 2) {
             u16 k = (g->idx == 0) ? g->k0 : g->k1;
             g->idx++;
-            if (k && k != g->ttm && quiet_killer_ok(p, k)) return k;
+            if (k && k != g->ttm) {
+                PCOUNT(c_nm_killer);
+                if (quiet_killer_ok(p, k)) return k;
+            }
             goto again;
         }
         g->stage = MG_QUIETS; g->idx = 0;
@@ -855,6 +866,7 @@ again:
                 u16 q = g->list[i];
                 i16 s;
                 if (q == g->ttm || q == g->k0 || q == g->k1) continue;  /* already tried */
+                PCOUNT(c_nm_qscan);
                 s = (*history)[TY(p->board[mfrom(q)]) - 1][(q >> 6) & 0x3F];
                 if (s > bscore) { bscore = s; best = i; }
             }
@@ -896,6 +908,96 @@ static int moveset_check(Pos *p) {
     printf(bad ? "MOVE SET DIFF\n" : "move set OK\n");
     return bad;
 }
+
+/* Price next_move's scan steps in isolation (`chess orderbench`). next_move is
+   a selection sort over the generated list, so its cost is per candidate:
+   capture candidates pay the ttm skip test + mvv_lva + the best-so-far test,
+   quiet candidates the three skip tests + the history-matrix lookup + the
+   best-so-far test. The loops below use next_move's exact expressions on a
+   real move list, so the compiled step cost matches the search's. Cycle costs
+   come from the Nimbus port-E9 markers: 0x30/0x31 capture steps, 0x32/0x33
+   quiet steps, 0x34/0x35 killer validation. The ms figures are a cross-check
+   only (DOS clock() resolves at 55 ms, so they are usually zero). */
+#ifdef MAME_MARKERS
+static u16 ob_ttm, ob_k0, ob_k1;   /* mutable: keep the skip tests from folding */
+
+int order_bench(void) {
+    static Pos pos;
+    static u16 caps[256], quiets[256];
+    u16 list[256];
+    i16 n, nc = 0, nq = 0, i, k;
+    i32 iters = 2000, acc = 0;
+    i32 cap_ms, quiet_ms, kill_ms;
+    clock_t t0, t1;
+#if defined(__WATCOMC__) && defined(__I86__)
+    i16 (__near *history)[6][64];
+#else
+    i16 (*history)[6][64];
+#endif
+
+    /* Kiwipete: 48 moves, 8 captures -- both scan stages exercised. */
+    parse_fen(&pos, "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
+    n = gen_moves(&pos, list);
+    for (i = 0; i < n; i++) {
+        u16 m = list[i];
+        if (pos.board[mto(m)] != EMPTY || mfl(m) == MF_EP) caps[nc++] = m;
+        else quiets[nq++] = m;
+    }
+#if defined(__WATCOMC__) && defined(__I86__)
+    history = (i16 (__near *)[6][64]) &qhist[pos.side];
+#else
+    history = &qhist[pos.side];
+#endif
+
+    t0 = clock();
+    MAME_MARK(0x30);
+    for (k = 0; k < iters; k++) {
+        i16 best = -1, bscore = -32000;
+        for (i = 0; i < nc; i++) {
+            u16 mv = caps[i];
+            i16 s;
+            if (mv == ob_ttm) continue;
+            s = MVV_LVA(&pos, mv);
+            if (s > bscore) { bscore = s; best = i; }
+        }
+        acc += best + bscore;
+    }
+    MAME_MARK(0x31);
+    t1 = clock();
+    cap_ms = (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
+
+    t0 = clock();
+    MAME_MARK(0x32);
+    for (k = 0; k < iters; k++) {
+        i16 best = -1, bscore = -32000;
+        for (i = 0; i < nq; i++) {
+            u16 q = quiets[i];
+            i16 s;
+            if (q == ob_ttm || q == ob_k0 || q == ob_k1) continue;
+            s = (*history)[TY(pos.board[mfrom(q)]) - 1][(q >> 6) & 0x3F];
+            if (s > bscore) { bscore = s; best = i; }
+        }
+        acc += best + bscore;
+    }
+    MAME_MARK(0x33);
+    t1 = clock();
+    quiet_ms = (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
+
+    t0 = clock();
+    MAME_MARK(0x34);
+    for (k = 0; k < iters; k++)
+        for (i = 0; i < nq; i++) acc += quiet_killer_ok(&pos, quiets[i]);
+    MAME_MARK(0x35);
+    t1 = clock();
+    kill_ms = (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
+
+    printf("orderbench caps=%d quiets=%d iters=%ld acc=%ld\n",
+           nc, nq, (long)iters, (long)acc);
+    printf("orderbench raw_ms cap=%ld quiet=%ld killer=%ld\n",
+           (long)cap_ms, (long)quiet_ms, (long)kill_ms);
+    return 0;
+}
+#endif /* MAME_MARKERS */
 
 /* ------------------------------------------------------------------ */
 /* perft                                                              */
@@ -1263,6 +1365,11 @@ int main(int argc, char **argv) {
 #endif
     if (argc > 1 && strcmp(argv[1], "nn") == 0)
         return nnue_selftest((argc > 2) ? argv[2] : NULL);
+
+#ifdef MAME_MARKERS
+    if (argc > 1 && strcmp(argv[1], "orderbench") == 0)
+        return order_bench();
+#endif
 
 #ifdef GENCAPS_DIFF
     if (argc > 1 && strcmp(argv[1], "gencaps") == 0)
