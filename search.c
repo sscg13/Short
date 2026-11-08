@@ -1059,7 +1059,7 @@ int profile(int depth) {
     vclock_reset();   /* clear a stale virtual-time budget like bench() does */
 
     c_anodes = c_qnodes = c_nextmove = 0;
-    c_nm_tt = c_nm_capscan = c_nm_qscan = c_nm_killer = 0;
+    c_nm_tt = c_nm_capscan = c_nm_qscan = c_nm_killer = c_nm_qsort = 0;
     c_make = c_undo = c_gen_moves = c_gen_caps = c_gen_quiets = 0;
     c_nn_make = c_nn_undo = c_nn_eval = c_refresh = c_flip = 0;
     c_isattacked = 0;
@@ -1139,11 +1139,14 @@ int profile(int depth) {
     printf("profile nn_make=%ld nn_undo=%ld nn_eval=%ld refresh_rows=%ld flips=%ld\n",
            (long)c_nn_make, (long)c_nn_undo, (long)c_nn_eval, (long)c_refresh, (long)c_flip);
     printf("profile is_attacked=%ld pos_sig=%ld\n", (long)c_isattacked, (long)c_possig);
-    printf("profile nm_tt=%ld nm_capscan=%ld nm_qscan=%ld nm_killer=%ld\n",
-           (long)c_nm_tt, (long)c_nm_capscan, (long)c_nm_qscan, (long)c_nm_killer);
+    printf("profile nm_tt=%ld nm_capscan=%ld nm_qscan=%ld nm_killer=%ld nm_qsort=%ld\n",
+           (long)c_nm_tt, (long)c_nm_capscan, (long)c_nm_qscan, (long)c_nm_killer,
+           (long)c_nm_qsort);
     printf("profile tt_probe=%ld tt_store=%ld tt_eval=%ld\n",
            (long)c_tt_probe, (long)c_tt_store, (long)c_tt_eval);
     printf("profile see=%ld see_step=%ld\n", (long)c_see, (long)c_see_step);
+    printf("profile rep scans=%ld upscans=%ld lookups=%ld\n",
+           (long)c_rep_scan, (long)c_rep_upscan, (long)c_rep_lookup);
     return 0;
 }
 #endif /* PROFILE */

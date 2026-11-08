@@ -98,13 +98,21 @@ static i16 vperiod_started; /* first period not yet granted */
    (1.343 batches/node). Each row moved by 1.343 * the mean of the measured
    quiet and capture per-call saving: faster on 8088/8086/80286, slightly
    slower on 80186, where lodsb costs more than a disp8 load while stosw
-   still wins. */
+   still wins.
+   Both columns were rescaled 2026-11-07 for frozen quiet-ordering scores
+   (branch score-once-quiet): next_move scores each quiet list once and sorts
+   it, instead of re-reading the matrix on every scan. Measured whole-search
+   per-node ratios k (new/old) on the depth-4 bench tree: 0.912684 (80286),
+   0.899887 (8088), 0.894036 (8086), 0.925082 (80186), from each fixture's
+   guest-clock sums divided by that build's node count. The change is C code
+   in both modes, so both columns use k. See
+   artifacts/score-once-quiet-2026-11-07/REPORT.md. */
 #ifndef VCLOCK
 static const i32 cpn_tab[4][2] = {
-    {  34789L,  23465L }, /* 80286: measured depth-4 NNUE / material */
-    { 111741L,  73736L }, /* 8088: measured depth-4 NNUE / material */
-    {  96083L,  62921L }, /* 8086: measured depth-4 NNUE / material */
-    {  54116L,  36174L }, /* 80186: measured depth-4 NNUE / material */
+    {  31751L,  21416L }, /* 80286: measured depth-4 NNUE / material */
+    { 100554L,  66354L }, /* 8088: measured depth-4 NNUE / material */
+    {  85902L,  56254L }, /* 8086: measured depth-4 NNUE / material */
+    {  50062L,  33464L }, /* 80186: measured depth-4 NNUE / material */
 };
 #endif
 
@@ -113,13 +121,22 @@ static i64 vbudget_cyc, vsoft_cyc; /* weighted hard/soft limits */
 
 typedef struct { i32 att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm, tp, ts; } VW;
 /* Rescaled 2026-11-03 for -os: C-compiled rows x the C-only factor c, while
-   the two NNUE-assembly rows rf/ev keep their measured costs (see header). */
+   the two NNUE-assembly rows rf/ev keep their measured costs (see header).
+   rn/rm were refitted 2026-11-07 for frozen quiet-ordering scores (branch
+   score-once-quiet): each row is lowered so the model's own depth-4 per-node
+   total scales by that CPU's measured whole-search k, with rm moved by the
+   same absolute amount as rn because ordering cost is eval-independent. rn
+   falls 10531->8016 (80286), 34403->24969 (8088), 28628->20083 (8086) and
+   14167->10896 (80186); the other uncharged work (control flow, flip
+   recompute, PV/history updates, fit slack) is untouched. The same update
+   rescales both cpn_tab columns by k. See
+   artifacts/score-once-quiet-2026-11-07/REPORT.md. */
 static const VW vw_tab[4] = {
     /* att ps gc gq gm mk nm rf ev rn rm tp ts: cycles per counted operation */
-    {    656,      0,   4964,  14462, 135646,    950,    853,   2922,   5109,  10531,  10065,    652,    652 }, /* 80286 */
-    {   1970,      0,  14743,  45138, 465065,   3123,   2813,   9545,  15596,  34403,  29338,   2246,   2389 }, /* 8088 */
-    {   1693,      0,  12621,  39086, 413168,   2734,   2419,   8780,  13072,  28628,  24702,   1915,   2011 }, /* 8086 */
-    {   1003,    131,   7522,  22434, 215267,   1507,   1382,   5125,   7540,  14167,  13883,   1181,   1228 }, /* 80186 */
+    {    656,      0,   4964,  14462, 135646,    950,    853,   2922,   5109,   8016,   7550,    652,    652 }, /* 80286 */
+    {   1970,      0,  14743,  45138, 465065,   3123,   2813,   9545,  15596,  24969,  19904,   2246,   2389 }, /* 8088 */
+    {   1693,      0,  12621,  39086, 413168,   2734,   2419,   8780,  13072,  20083,  16157,   1915,   2011 }, /* 8086 */
+    {   1003,    131,   7522,  22434, 215267,   1507,   1382,   5125,   7540,  10896,  10612,   1181,   1228 }, /* 80186 */
 };
 /* att and gc were refitted 2026-11-04 when the hand-written is_attacked and
    gen_caps became the default. Both rows are scaled by the measured asm/C ratio
