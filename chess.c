@@ -18,6 +18,14 @@ static const i16 mval[8] = { 0, 100, 320, 330, 500, 900, 0 };
 
 u16 movebuf[32][256];
 
+/* Quiet-ordering scratch: the history score of every candidate in the list
+   being sorted. next_move scores a quiet list once and sorts it in full
+   before returning its first move, so these scores are dead before any
+   descendant can start a list of its own: one 512-byte row covers the whole
+   search. (The old code re-read the history matrix on every scan, which is
+   what this replaces.) */
+static i16 qscore[256];
+
 /* ---- incremental Zobrist (position signature) ----
    Piece-square keys are indexed by [piece][compact square]; compact squares
    (0..63, sq2c) halve the table vs 0x88 (64 on-board squares only). On the
@@ -134,7 +142,8 @@ i32 c_gen_quiets = 0;           /* gen_quiets entries */
 i32 c_nextmove = 0;             /* next_move entries */
 i32 c_nm_tt = 0;                /* next_move: TT-stage returns */
 i32 c_nm_capscan = 0;           /* next_move: capture-stage candidate comparisons */
-i32 c_nm_qscan = 0;             /* next_move: quiet-stage history lookups */
+i32 c_nm_qscan = 0;             /* next_move: quiet-stage score computations */
+i32 c_nm_qsort = 0;             /* next_move: quiet-stage sort comparisons */
 i32 c_nm_killer = 0;            /* next_move: killer validations */
 i32 c_isattacked = 0;           /* is_attacked entries */
 i32 c_possig = 0;               /* pos_sig entries */
@@ -799,6 +808,27 @@ void mgen_init_q(Pos *p, MGen *g, i16 ply) {
     g->caps_only = 1;
 }
 
+/* Sort a quiet list by frozen history score, descending, moving the score row
+   with the moves. Insertion sort is stable and, because most quiet scores tie
+   at the same value, usually stops after one comparison per move; that is much
+   cheaper than a full selection scan. */
+static void sort_quiets(u16 *list, i16 *score, i16 n) {
+    i16 i, j, s;
+    u16 m;
+    for (i = 1; i < n; i++) {
+        m = list[i]; s = score[i];
+        j = i;
+        while (j > 0) {
+            PCOUNT(c_nm_qsort);
+            if (score[j - 1] >= s) break;
+            score[j] = score[j - 1];
+            list[j] = list[j - 1];
+            j--;
+        }
+        list[j] = m; score[j] = s;
+    }
+}
+
 u16 next_move(Pos *p, MGen *g) {
     u16 m;
     i16 i, best, bscore;
@@ -852,28 +882,28 @@ again:
         goto again;
 
     case MG_QUIETS:
-        if (g->idx == 0) g->n = gen_quiets(p, g->list);
-        /* Select the 768-byte side matrix once per call. Keep fresh scores
-           after recursive children, and keep the DOS pointer in DGROUP. */
+        if (g->idx == 0) {
+            g->n = gen_quiets(p, g->list);
+            /* Score every candidate once, then sort the list. Descendants
+               still update qhist on a cutoff, but this list keeps the scores
+               it started with; the old code re-read the 768-byte matrix on
+               every scan, which was 13.8 history lookups per node. */
 #if defined(__WATCOMC__) && defined(__I86__)
-        history = (i16 (__near *)[6][64]) &qhist[p->side];
+            history = (i16 (__near *)[6][64]) &qhist[p->side];
 #else
-        history = &qhist[p->side];
+            history = &qhist[p->side];
 #endif
-        while (g->idx < g->n) {
-            best = -1; bscore = -32000;
-            for (i = g->idx; i < g->n; i++) {
+            for (i = 0; i < g->n; i++) {
                 u16 q = g->list[i];
-                i16 s;
-                if (q == g->ttm || q == g->k0 || q == g->k1) continue;  /* already tried */
                 PCOUNT(c_nm_qscan);
-                s = (*history)[TY(p->board[mfrom(q)]) - 1][(q >> 6) & 0x3F];
-                if (s > bscore) { bscore = s; best = i; }
+                qscore[i] = (*history)[TY(p->board[mfrom(q)]) - 1][(q >> 6) & 0x3F];
             }
-            if (best < 0) break;                        /* only already-tried left */
-            m = g->list[best]; g->list[best] = g->list[g->idx]; g->list[g->idx] = m;
-            g->idx++;
-            return m;
+            sort_quiets(g->list, qscore, g->n);
+        }
+        while (g->idx < g->n) {
+            u16 q = g->list[g->idx++];
+            if (q == g->ttm || q == g->k0 || q == g->k1) continue;  /* already tried */
+            return q;
         }
         g->stage = MG_DONE;
         return 0;
@@ -920,12 +950,13 @@ static int moveset_check(Pos *p) {
    only (DOS clock() resolves at 55 ms, so they are usually zero). */
 #ifdef MAME_MARKERS
 static u16 ob_ttm, ob_k0, ob_k1;   /* mutable: keep the skip tests from folding */
+static i16 ob_score[256];          /* frozen quiet scores (near, like qscore) */
 
 int order_bench(void) {
     static Pos pos;
     static u16 caps[256], quiets[256];
     u16 list[256];
-    i16 n, nc = 0, nq = 0, i, k;
+    i16 n, nc = 0, nq = 0, i, j, k;
     i32 iters = 2000, acc = 0;
     i32 cap_ms, quiet_ms, kill_ms;
     clock_t t0, t1;
@@ -990,6 +1021,52 @@ int order_bench(void) {
     MAME_MARK(0x35);
     t1 = clock();
     kill_ms = (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
+
+    /* Frozen-score variants: the one-time scoring pass over the list, the
+       cached selection step, and the triangular sort comparison. */
+    for (i = 0; i < nq; i++) {
+        u16 q = quiets[i];
+        ob_score[i] = (*history)[TY(pos.board[mfrom(q)]) - 1][(q >> 6) & 0x3F];
+    }
+
+    t0 = clock();
+    MAME_MARK(0x36);
+    for (k = 0; k < iters; k++) {
+        i16 best = -1, bscore = -32000;
+        for (i = 0; i < nq; i++) {
+            u16 q = quiets[i];
+            i16 s;
+            if (q == ob_ttm || q == ob_k0 || q == ob_k1) continue;
+            s = ob_score[i];
+            if (s > bscore) { bscore = s; best = i; }
+        }
+        acc += best + bscore;
+    }
+    MAME_MARK(0x37);
+    t1 = clock();
+
+    t0 = clock();
+    MAME_MARK(0x38);
+    for (k = 0; k < iters; k++)
+        for (i = 0; i < nq; i++) {
+            u16 q = quiets[i];
+            acc += (*history)[TY(pos.board[mfrom(q)]) - 1][(q >> 6) & 0x3F];
+        }
+    MAME_MARK(0x39);
+    t1 = clock();
+
+    t0 = clock();
+    MAME_MARK(0x3A);
+    for (k = 0; k < iters; k++) {
+        i16 best = 0;
+        for (i = 0; i < nq; i++)
+            for (j = i + 1; j < nq; j++) {
+                acc++;
+                if (ob_score[j] > ob_score[best]) best = j;
+            }
+    }
+    MAME_MARK(0x3B);
+    t1 = clock();
 
     printf("orderbench caps=%d quiets=%d iters=%ld acc=%ld\n",
            nc, nq, (long)iters, (long)acc);

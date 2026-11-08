@@ -144,7 +144,8 @@ extern i32 c_qnodes;        /* qsearch entry */
 extern i32 c_nextmove;      /* next_move entry */
 extern i32 c_nm_tt;         /* next_move: TT-stage returns */
 extern i32 c_nm_capscan;    /* next_move: capture-stage candidate comparisons */
-extern i32 c_nm_qscan;      /* next_move: quiet-stage history lookups */
+extern i32 c_nm_qscan;      /* next_move: quiet-stage score computations */
+extern i32 c_nm_qsort;      /* next_move: quiet-stage sort comparisons */
 extern i32 c_nm_killer;     /* next_move: killer validations (quiet_killer_ok) */
 extern i32 c_make;          /* do_make entry */
 extern i32 c_undo;          /* undo_move entry */
