@@ -205,7 +205,9 @@ int see_selftest(void) {
 #if defined(PROFILE) || defined(VCLOCK)
     /* Horizon nodes must behave exactly like direct quiescence, even with
        a deep exact TT entry. Cover captures, evasions and mate for every
-       node type and for negative null-move depths; count each node once. */
+       node type and for negative null-move depths. The root is counted like
+       any other node now, so a horizon root adds one alphabeta entry on top
+       of the quiescence tree. */
     {
         static const char *horizon_fens[] = {
             "r6k/8/8/8/3Q4/8/8/1K6 w - - 0 1",
@@ -227,8 +229,9 @@ int see_selftest(void) {
                 c_anodes = c_qnodes = c_tt_probe = c_tt_store = 0;
                 pv_len[0] = 3;
                 got = alphabeta(&p,hd,-INF,INF,0,0,(NodeType)nt);
-                if (got != expected || nodes_search != expected_nodes ||
-                    c_anodes || c_qnodes != expected_nodes || c_tt_probe || c_tt_store ||
+                if (got != expected || nodes_search != expected_nodes + 1 ||
+                    c_anodes != 1 || c_qnodes != expected_nodes ||
+                    c_tt_probe || c_tt_store ||
                     pv_len[0] || rep_n || memcmp(&p,&before,sizeof p)) {
                     printf("Horizon integration failed fixture=%d depth=%d type=%d\n",
                            fixture,hd,nt); ++fails;

@@ -513,41 +513,39 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
     NodeType child_type;     /* non-PV child expectation: PV scouts also expect cut */
     TTData tt;
 
-    /* The root already belongs to game history. Keep its move ordering and
-       accounting outside the recursive-node setup, but share the PVS loop. */
-    if (!ply) {
-        sort_root();
-        pv_len[0] = 0;
-    } else {
-        PCOUNT(c_anodes);
-        nodes_search++;
+    /* The root already belongs to game history: only its move ordering is set
+       up outside the recursive-node path. Node accounting and the limit checks
+       are shared - one counted root node and one deadline read per root call
+       cost less than the special case, and keep the deadline honest at ply 0. */
+    if (!ply) sort_root();
+    pv_len[ply] = 0;                             /* no best line yet at this ply */
+    PCOUNT(c_anodes);
+    nodes_search++;
 #if defined(VCLOCK) || defined(TIME_TEST)
-        vtotal_nodes++;              /* virtual-time budget; TIME_TEST fake clock */
+    vtotal_nodes++;                  /* virtual-time budget; TIME_TEST fake clock */
 #endif
-        /* 16-bit build: the real clock is the only clock. Compare cheap
-           1.193 MHz counts, so the deadline is checked on every node; the ms
-           fallback (huge limits) keeps the old 64-node poll. */
+    /* 16-bit build: the real clock is the only clock. Compare cheap
+       1.193 MHz counts, so the deadline is checked on every node; the ms
+       fallback (huge limits) keeps the old 64-node poll. */
 #if defined(__WATCOMC__) && !defined(TIME_TEST)
-        if (hard_deadline_counts) {
-            if ((i32)(timing_search_counts() - hard_deadline_counts) >= 0)
-                stop_now = 1;
-        } else if (deadline > 0 && (nodes_search & 63) == 0 &&
-                   search_clock() >= deadline) {
+    if (hard_deadline_counts) {
+        if ((i32)(timing_search_counts() - hard_deadline_counts) >= 0)
             stop_now = 1;
-        }
-#else
-        /* Virtual mode must never consult the host clock for either limit.
-           The real poll uses the native stride (REAL_POLL_MASK + 1 nodes). */
-        if (!vtime_mode && (nodes_search & REAL_POLL_MASK) == 0 &&
-            deadline > 0 && search_clock() >= deadline)
-            stop_now = 1;
-        if (vtime_mode && vclock_budget_hit())
-            stop_now = 1;
-#endif
-        if (stop_now) return best;
-        if (ply >= MAXPLY) return evaluate(p);   /* hard depth cap: never index past pv/killers/movebuf */
-        pv_len[ply] = 0;                                 /* no best line yet at this ply */
+    } else if (deadline > 0 && (nodes_search & 63) == 0 &&
+               search_clock() >= deadline) {
+        stop_now = 1;
     }
+#else
+    /* Virtual mode must never consult the host clock for either limit.
+       The real poll uses the native stride (REAL_POLL_MASK + 1 nodes). */
+    if (!vtime_mode && (nodes_search & REAL_POLL_MASK) == 0 &&
+        deadline > 0 && search_clock() >= deadline)
+        stop_now = 1;
+    if (vtime_mode && vclock_budget_hit())
+        stop_now = 1;
+#endif
+    if (stop_now) return best;
+    if (ply >= MAXPLY) return evaluate(p);       /* hard depth cap: never index past pv/killers/movebuf */
 
     /* Repetition check before quiescence so horizon positions are covered
        here instead of in qsearch. */
@@ -589,8 +587,9 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
     /* in-check status of the side to move: a non-king, non-EP move from a
        square NOT on the king's rank/file/diagonal is then always legal (it can
        neither leave a check unresolved nor open a new line), so its legality
-       is_attacked test can be skipped. */
-    if (ply) in_check = is_attacked(p, p->ks[p->side], p->side ^ 1);
+       is_attacked test can be skipped. Computed at every node, including the
+       root, whose pseudo-legal moves take the same legality path. */
+    in_check = is_attacked(p, p->ks[p->side], p->side ^ 1);
     child_type = node_type == NODE_CUT ? NODE_ALL : NODE_CUT;
 
     /* RFP and NMP both need the static eval, and only at a non-PV, non-check
@@ -672,7 +671,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                the mover king's lines cannot leave the king attacked, so skip the
                is_attacked test. Otherwise (in check, king move, EP, or an aligned
                from-square) the real test decides. */
-            if (ply && !in_check && TY(pc) != 6 && mfl(m) != MF_EP &&
+            if (!in_check && TY(pc) != 6 && mfl(m) != MF_EP &&
                 !sq_on_king_line(p, mfrom(m), us))
                 legal_move = 1;
             else if (!is_attacked(p, p->ks[us], p->side))
@@ -770,11 +769,8 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
     if (ply && rep_n > 0) rep_n--;           /* root has no search-path entry */
     if (!legal) {
         /* mate scores: -(MATE - ply) so the root prefers the SHORTEST mate.
-           Interior nodes already know their check status. Root moves always
-           get a full legality check, so query the parent only on this exit. */
-        Score r;
-        if (!ply) in_check = is_attacked(p, p->ks[p->side], p->side ^ 1);
-        r = in_check ? (Score)-(MATE - ply) : 0;
+           in_check was computed on entry at every ply, including the root. */
+        Score r = in_check ? (Score)-(MATE - ply) : 0;
         if (ply && !stop_now) tt_store(p, 0, depth, r, TT_EXACT, ply, tt.eval, tt.eval_valid);
         return r;
     }
