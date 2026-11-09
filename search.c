@@ -433,10 +433,9 @@ static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd)
     if (qd <= 0) return evaluate(p);             /* ply budget spent: static eval */
     if (ply >= MAXPLY - 4) return evaluate(p);   /* stay clear of movebuf aux rows */
     if (half >= MAX_HALF) return 0;
-    if (alpha < 0 && rep_upcoming(p, half, ply)) {
-        best = 0; alpha = 0;
-        if (alpha >= beta) return 0;
-    }
+    /* No repetition check here: captures (every non-evasion move) reset the
+       halfmove clock, and the horizon position itself is checked in alphabeta
+       before this call, which also carries the draw floor into the return. */
     in_check = is_attacked(p, p->ks[p->side], p->side ^ 1);    if (!in_check) {
         stand = evaluate(p);
         if (stand > best) best = stand;                            /* fail-soft baseline = stand-pat */
@@ -548,7 +547,8 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
     if (ply >= MAXPLY) return evaluate(p);       /* hard depth cap: never index past pv/killers/movebuf */
 
     /* Repetition check before quiescence so horizon positions are covered
-       here instead of in qsearch. */
+       here instead of in qsearch; the draw floor is carried through the
+       quiescence return below. */
     if (ply) {
 
         if (rep_enter(p, half, ply)) return 0;
@@ -561,11 +561,13 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
         if (half >= MAX_HALF) { rep_n--; return 0; }
     }
 
-    /* Quiescence owns horizon nodes. */
+    /* Quiescence owns horizon nodes. An upcoming repetition recorded above as
+       best = 0 is not visible to qsearch (it searches captures only and cannot
+       move into the repeat), so the floor is applied to its return here. */
     if (depth <= 0) {
         Score _r = qsearch(p, alpha, beta, ply, half, MAX_QDEPTH);
         if (ply) rep_n--;   /* pop entry pushed by rep_enter above */
-        return _r;
+        return _r > best ? _r : best;
     }
 
     /* Transposition table (non-root only). */
