@@ -165,6 +165,46 @@ static void rt_root_halfmove(const char *fen, i16 promotion) {
     g_half = save_half; g_full = save_full;
     g_sigs_n = 0; rep_reset();
 }
+/* En passant belongs to the position only while the side to move has a pawn
+   that could capture there (FIDE 9.2.2). A double push nobody can answer must
+   hash exactly like the same position reached without the target, and a target
+   a pawn can use must survive with its capture generated. */
+static void rt_ep_canon(void) {
+    Pos p;
+    Undo u;
+    Sig push;
+    i16 i, n, caps = 0;
+    u16 moves[256];
+
+    /* 1.e4: no black pawn on d4/f4, so the target is not part of the position. */
+    parse_fen(&p, "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+    do_make(&p, MK(0x34, 0x14, 0, 0), &u);            /* e2e4 */
+    push = p.sig; ++rt_cases;
+    if (p.ep != -1) { ++rt_fails; printf("FAIL ep stale field %d\n", p.ep); }
+    parse_fen(&p, "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1");
+    if (push != p.sig) { ++rt_fails; printf("FAIL ep canonical push sig\n"); }
+
+    /* The same double push with a black pawn on e4 keeps the target... */
+    parse_fen(&p, "7k/8/8/8/4p3/8/3P4/7K w - - 0 1");
+    do_make(&p, MK(0x33, 0x13, 0, 0), &u);            /* d2d4 */
+    ++rt_cases;
+    if (p.ep != 0x23) { ++rt_fails; printf("FAIL ep target lost %d\n", p.ep); }
+    n = gen_moves(&p, moves);
+    for (i = 0; i < n; ++i) if (mfl(moves[i]) == MF_EP) ++caps;
+    if (caps != 1) { ++rt_fails; printf("FAIL ep capture count %d\n", caps); }
+
+    /* ...and a parsed FEN target no pawn can use is dropped, while a usable one
+       survives with its capture. */
+    parse_fen(&p, "7k/8/8/8/4P3/8/8/7K b - e3 0 1");
+    ++rt_cases;
+    if (p.ep != -1) { ++rt_fails; printf("FAIL ep parsed stale %d\n", p.ep); }
+    parse_fen(&p, "7k/8/8/3Pp3/8/8/8/7K w - e6 0 1");
+    ++rt_cases;
+    if (p.ep != 0x54) { ++rt_fails; printf("FAIL ep parsed target %d\n", p.ep); }
+    caps = 0; n = gen_moves(&p, moves);
+    for (i = 0; i < n; ++i) if (mfl(moves[i]) == MF_EP) ++caps;
+    if (caps != 1) { ++rt_fails; printf("FAIL ep parsed capture %d\n", caps); }
+}
 int repetition_selftest(void) {
     Pos p;
     u32 seed = 17;
@@ -186,6 +226,7 @@ int repetition_selftest(void) {
     rt_target("4k1n1/8/8/8/8/8/8/K7 b - - 7 1",
               "4k3/8/5n2/8/8/8/8/K7 w - - 8 1", 1, "black knight");
     rt_search_cycle();
+    rt_ep_canon();
     parse_fen(&p, start);
     for (i = 0; i < 4; ++i) g_sigs[i] = (Sig)(100+i);
     g_sigs[0] = p.sig; g_sigs_n = 4;

@@ -206,9 +206,21 @@ void do_make(Pos *p, u16 m, Undo *u) {
 
     p->castle &= cast_mask[from] & cast_mask[to];
 
+    /* En passant belongs to the position only while the side to move has a
+       pawn that could capture there (FIDE 9.2.2): a double push nobody can
+       answer leaves the position unchanged, so it must not change the
+       signature. Canonicalise the FIELD, not the hash delta: a capturing pawn
+       that is itself the move would make the old target look irrelevant after
+       the fact, and zob_apply would then XOR out a key that was never set.
+       The capturers stand beside the destination, on the rank the pushed pawn
+       just landed on; those squares are untouched by the push, so this reads
+       the same before and after the board update. */
     p->ep = -1;
-    if (piece == WP && to == from + 32) p->ep = from + 16;
-    else if (piece == BP && to == from - 32) p->ep = from - 16;
+    if (piece == WP && to == from + 32) {
+        if (p->board[to - 1] == BP || p->board[to + 1] == BP) p->ep = to - 16;
+    } else if (piece == BP && to == from - 32) {
+        if (p->board[to - 1] == WP || p->board[to + 1] == WP) p->ep = to + 16;
+    }
 
     if (TY(piece) == 6) p->ks[p->side] = to;
 
@@ -1154,6 +1166,16 @@ void parse_fen(Pos *p, const char *s) {
             if (*s >= '1' && *s <= '8')
                 p->ep = ((*s) - '1') * 16 + f;
         }
+    }
+    /* Same rule as do_make: no capturing pawn, no en-passant target, so the
+       parsed signature matches the one a move sequence produces. The pushed
+       pawn sits one rank behind the target and its neighbours are the
+       would-be capturers. Guard the rank range before probing the board:
+       FEN accepts any square in this field. */
+    if (p->ep >= 0x20 && p->ep <= 0x57) {
+        i16 pc = p->side ? BP : WP;
+        i16 to = p->side ? p->ep + 16 : p->ep - 16;
+        if (p->board[to - 1] != pc && p->board[to + 1] != pc) p->ep = -1;
     }
 
     g_half = 0; g_full = 1;
