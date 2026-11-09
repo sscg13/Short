@@ -203,6 +203,25 @@ static i16 rep_upcoming(Pos *p, i16 half, i16 ply) {
     return 0;
 }
 
+/* Any legal move for the side to move? Only the fifty-move rule needs this:
+   checkmate outranks the draw (FIDE 9.6.2), so a checked position at the limit
+   must show an evasion before it may score 0. Uses the ply's move row, which
+   the caller has not staged yet. */
+static i16 any_legal(Pos *p, i16 ply) {
+    u16 *list = movebuf[ply];
+    i16 n = gen_moves(p, list), us = p->side, i;
+    for (i = 0; i < n; ++i) {
+        Undo u;
+        do_make(p, list[i], &u);
+        if (!is_attacked(p, p->ks[us], p->side)) {
+            undo_move(p, list[i], &u);
+            return 1;
+        }
+        undo_move(p, list[i], &u);
+    }
+    return 0;
+}
+
 
 /* principal-variation lines for the `post` search-info output (CECP §10).
    pv[ply][0..pv_len[ply]-1] is the best line from ply, in move encoding. */
@@ -432,7 +451,15 @@ static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd)
     if (stop_now) return evaluate(p);
     if (qd <= 0) return evaluate(p);             /* ply budget spent: static eval */
     if (ply >= MAXPLY - 4) return evaluate(p);   /* stay clear of movebuf aux rows */
-    if (half >= MAX_HALF) return 0;
+    if (half >= MAX_HALF) {
+        /* Fifty-move draw, unless the position is checkmate: mate ends the
+           game even at the limit (FIDE 9.6.2), so a checked node needs a legal
+           evasion before it may score 0. Not in check: the draw stands, and a
+           stalemate is a draw too. */
+        if (!is_attacked(p, p->ks[p->side], p->side ^ 1) || any_legal(p, ply))
+            return 0;
+        return -(MATE - ply);
+    }
     /* No repetition check here: captures (every non-evasion move) reset the
        halfmove clock, and the horizon position itself is checked in alphabeta
        before this call, which also carries the draw floor into the return. */
@@ -557,8 +584,15 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
             if (alpha >= beta) { rep_n--; return 0; }
         }
 
-        /* 50-move rule: 100 half-moves without a pawn move or capture is a draw */
-        if (half >= MAX_HALF) { rep_n--; return 0; }
+        /* 50-move rule: 100 half-moves without a pawn move or capture is a
+           draw. Checkmate outranks the claim (FIDE 9.6.2): a mated position at
+           the limit is still lost, so it needs a legal evasion to draw. */
+        if (half >= MAX_HALF) {
+            i16 draw = !is_attacked(p, p->ks[p->side], p->side ^ 1) ||
+                       any_legal(p, ply);
+            rep_n--;
+            return draw ? 0 : -(MATE - ply);
+        }
     }
 
     /* Quiescence owns horizon nodes. An upcoming repetition recorded above as

@@ -205,6 +205,33 @@ static void rt_ep_canon(void) {
     for (i = 0; i < n; ++i) if (mfl(moves[i]) == MF_EP) ++caps;
     if (caps != 1) { ++rt_fails; printf("FAIL ep parsed capture %d\n", caps); }
 }
+/* Checkmate outranks the fifty-move rule (FIDE 9.6.2): at the limit a mated
+   position is still lost, while a position with an evasion, or a stalemate,
+   stays drawn. Exercises the alphabeta horizon check; qsearch mirrors it. */
+static void rt_fifty_mate(void) {
+    Pos p;
+    Score s;
+    i16 i;
+    static const char *fen[3] = {
+        "7k/6Q1/6K1/8/8/8/8/8 b - - 100 1",    /* Qg7 mate */
+        "7k/5Q2/6K1/8/8/8/8/8 b - - 100 1",    /* stalemate */
+        "7k/8/6KQ/8/8/8/8/8 b - - 100 1"       /* check with Kg8 available */
+    };
+    static const Score want[3] = { -(MATE - 1), 0, 0 };
+    nnue_active = 0;
+    for (i = 0; i < 3; ++i) {
+        parse_fen(&p, fen[i]);
+        g_sigs_n = 0; rep_reset();
+        deadline = 0; stop_now = 0; vclock_reset(); tt_clear();
+        s = alphabeta(&p, 2, -INF, INF, 1, MAX_HALF, NODE_CUT);
+        ++rt_cases;
+        if (s != want[i] || rep_n) {
+            ++rt_fails;
+            printf("FAIL fifty-move case %d score=%d want=%d rep_n=%d\n",
+                   i, (int)s, (int)want[i], (int)rep_n);
+        }
+    }
+}
 int repetition_selftest(void) {
     Pos p;
     u32 seed = 17;
@@ -227,6 +254,7 @@ int repetition_selftest(void) {
               "4k3/8/5n2/8/8/8/8/K7 w - - 8 1", 1, "black knight");
     rt_search_cycle();
     rt_ep_canon();
+    rt_fifty_mate();
     parse_fen(&p, start);
     for (i = 0; i < 4; ++i) g_sigs[i] = (Sig)(100+i);
     g_sigs[0] = p.sig; g_sigs_n = 4;
