@@ -156,7 +156,8 @@ void tt_store(Pos *p, u16 move, i16 depth, Score score, i16 flag, i16 ply,
     PCOUNT(c_tt_store);
 
     if (depth < TT_DEPTH(e->info)) return;         /* keep the deeper entry */
-    if (depth > 63) depth = 63;
+    /* depth is at most the root limit (think 10, bench/profile 20), so it
+       always fits the 6-bit field: no clamp needed. */
     score = tt_score_to_node(score, ply);
     /* A node that did not need eval can retain a same-position cached value.
        Never carry an eval over from a different position sharing this slot. */

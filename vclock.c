@@ -5,9 +5,15 @@
    then 20 moves in 1 hour, repeating. Soft/hard limits are half/1.5 times
    the average allocation, except that the last move may use the bank.
 
-   DOS uses scalar cycles/node for NNUE or material. Native VCLOCK builds
-   charge measured operation costs plus fitted per-node residuals; cached
-   TT eval writes and repetition work are included. See TESTING.md.
+   There is one model: measured per-operation costs plus a fitted per-node
+   residual, with cached TT eval writes and repetition work included. It
+   reads the PCOUNT operation counters, so it exists only in VCLOCK builds,
+   which in practice means the native build. Virtual time exists to model a
+   CPU that the real machine already is, so the 16-bit engine paces itself
+   with its real clock instead (timing.c) and the DOS release defines no
+   counters: compiling them for a default-off feature measured +2.7% on the
+   80186 bench-4 search (artifacts/vclock-fine-only-2026-11-08). The coarse
+   cycles-per-node fallback was removed in the same change.
 
    Recalibrated 2026-11-03 for the build.ps1 -os (favor code size) switch, which
    re-blocks the hot C paths to fall through instead of jumping. Measured
@@ -16,26 +22,24 @@
    the per-position search timers, and 0.9570 for the Nimbus 80186 @8 MHz from
    its marker interval minus the same build's `chess 1` interval, which removes
    the 242M-cycle DOS EXE load and leaves the search itself. The hand-written
-   NNUE assembly
-   is unaffected by a C compiler flag, so rf (materialized batch) and ev
-   (forward pass) keep their measured costs; every other row is C code and was
-   scaled by c = (k - s)/(1 - s), where s is that CPU's asm share of cycles per
-   node (20.8 / 20.7 / 21.4 / 22.6%). cpn_tab is whole-node cycles, so its NNUE
-   column scales by k directly and its material column (no NNUE asm calls) by c.
-   Every rescaled model total reproduces its measured k exactly.
+   NNUE assembly is unaffected by a C compiler flag, so rf (materialized batch)
+   and ev (forward pass) keep their measured costs; every other row is C code
+   and was scaled by c = (k - s)/(1 - s), where s is that CPU's asm share of
+   cycles per node (20.8 / 20.7 / 21.4 / 22.6%). Every rescaled model total
+   reproduces its measured k exactly.
 
    Recalibrated 2026-11-04 for the adopted hand-written is_attacked and gen_caps:
-   the vw_tab att/gc rows and both cpn_tab columns scale by the measured asm/C
-   ratio and the measured whole-search k, and rn/rm are unchanged because the
-   model's own k still lands within 1.4% of measured on every CPU where both
-   exist. Dated deltas: artifacts/asm-default-2026-11-04/REPORT.md.
+   the vw_tab att/gc rows scale by the measured asm/C ratio and the measured
+   whole-search k, and rn/rm are unchanged because the model's own k still
+   lands within 1.4% of measured on every CPU where both exist. Dated deltas:
+   artifacts/asm-default-2026-11-04/REPORT.md.
 
    Recalibrated 2026-10-08 after the Watcom attack/SEE, quiet-history, NNUE
    indexing optimizations. Original main search and TT are unchanged.
    Unprofiled -0 -ml -ox measurements:
    86Box interpreter 80286 @6 MHz, 8088 @16 MHz, 8086 @8 MHz; MAME Nimbus
    80186 @8 MHz processor totalcycles. Native PROFILE supplies matching
-   counters and all eight position results with the default v5 net 56329CCE.
+   counters and all position results with the default v5 net 56329CCE.
 
    Unchanged board/NNUE/SEE primitives retain verified sbench/nbench costs.
    Whole searches and original public TT paths are remeasured; compiled
@@ -43,8 +47,7 @@
    2 and 4, with equal relative-error least squares; depth 3 is held out.
    Full setup/output windows and counters remain in the fit. Fixed benchmark
    overhead and varying move-picker work mean one residual does not fit all
-   depths exactly. The DOS scalar rows anchor measured depth-4 cycles/node;
-   they remain coarse approximations of different search workloads.
+   depths exactly.
 
    Dated inputs, hashes, fit/holdout errors and reproduction:
    artifacts/nonfunctional-main-2026-10-08/REPORT.md and model-audit/proposal.json.
@@ -58,65 +61,41 @@ i32 vcpu_khz = 25000;       /* CPU_KHz: cycles per ms of the modeled CPU */
 i16 vcpu_model = VCPU_80286; /* CPU_model index */
 
 i32 vtotal_nodes = 0;       /* nodes searched so far in the current move */
-i32 vmax_nodes = 0;         /* scalar hard node cap (0 = none) */
-#ifndef VCLOCK
-static i32 vsoft_nodes;
-#endif
+
+/* Conservative allocation shared by the real and virtual clocks. Stop
+   after a complete depth at half the normal slice; the hard limit is 1.5x
+   that slice. This banks time rather than routinely overspending the average.
+   The last move before a refill can use the bank minus output reserve.
+   Increment arrives afterwards, so it cannot raise the current bank cap. */
+void time_limits_ms(i32 remaining_ms, i16 moves_left, i32 increment_ms,
+                    i32 *soft_ms, i32 *hard_ms) {
+    i32 available, target;
+    if (remaining_ms < 0) remaining_ms = 0;
+    if (moves_left < 1) moves_left = 40;
+    if (increment_ms < 0) increment_ms = 0;
+    available = remaining_ms > TIME_MARGIN_MS ? remaining_ms - TIME_MARGIN_MS : 1;
+    target = remaining_ms / moves_left;
+    /* Avoid overflowing if a caller supplies a very large increment. */
+    if (increment_ms >= available - target) target = available;
+    else target += increment_ms;
+    if (target < 1) target = 1;
+    if (target > available) target = available;
+    if (moves_left == 1) {
+        *soft_ms = *hard_ms = available;
+    } else {
+        *soft_ms = target / 2;
+        if (*soft_ms < 1) *soft_ms = 1;
+        *hard_ms = target > available - target / 2 ? available : target + target / 2;
+    }
+}
+
+#ifdef VCLOCK
 
 /* virtual period state: 40 moves in 2 h, then 20 moves per 1 h, repeating */
 static i32 vperiod_ms;      /* virtual ms left in the current period */
 static i16 vperiod_left;    /* moves left in the current period */
 static i16 vperiod_started; /* first period not yet granted */
 
-/* scalar cycles/node, NNUE / material (16-bit build).
-   Both columns were rescaled 2026-11-04 (third time) for the gen_caps
-   sweep/dispatch rewrite (unrolled rank sweep, resume and dispatch tables):
-   both columns by each CPU's measured whole-search ratio k, same reasoning as
-   the earlier rescales - gen_caps is compiled into NNUE and material modes
-   alike. Measured k: 0.996008 (80286), 0.996067 (8088), 0.996903 (8086),
-   0.992866 (80186); see artifacts/gencaps-sweep-2026-11-04/REPORT.md.
-   Both columns were rescaled 2026-11-04 (second time) for the is_attacked probe
-   reorder (pawn probes folded into the two diagonal rays, which now run first):
-   both columns by each CPU's measured whole-search ratio k, same reasoning as
-   the first rescale - the reordered routine is compiled into NNUE and material
-   modes alike, so there is no C-only factor. Measured k: 0.996711 (80286),
-   0.998764 (8088), 0.997931 (8086), 0.997715 (80186); see
-   artifacts/atkfold-2026-11-04/REPORT.md.
-   Both columns were rescaled 2026-11-04 for the adopted hand-written hot paths
-   (is_attacked, gen_caps): both columns by the measured whole-search ratio k,
-   because those two routines are compiled in NNUE and material modes alike, so
-   unlike the -os rescale there is no C-only factor. Measured k: 0.89101 (80286),
-   0.89131 (8088), 0.88436 (8086), 0.89193 (80186); see
-   artifacts/asm-default-2026-11-04/REPORT.md.
-   Both columns were rescaled 2026-11-03 for -os (see the header): the NNUE
-   column by the measured whole-search ratio k, the material column by the
-   C-only factor c, because -DNO_NNUE has no NNUE assembly calls to leave
-   unscaled.
-   NNUE rows shifted 2026-10-31 for the lodsb/stosw materialization bodies:
-   one materialized batch is exactly one nn_make_move_ / nn_make_cap_ call,
-   and the depth-4 bench tree materializes 63961 batches over 47627 nodes
-   (1.343 batches/node). Each row moved by 1.343 * the mean of the measured
-   quiet and capture per-call saving: faster on 8088/8086/80286, slightly
-   slower on 80186, where lodsb costs more than a disp8 load while stosw
-   still wins.
-   Both columns were rescaled 2026-11-07 for frozen quiet-ordering scores
-   (branch score-once-quiet): next_move scores each quiet list once and sorts
-   it, instead of re-reading the matrix on every scan. Measured whole-search
-   per-node ratios k (new/old) on the depth-4 bench tree: 0.912684 (80286),
-   0.899887 (8088), 0.894036 (8086), 0.925082 (80186), from each fixture's
-   guest-clock sums divided by that build's node count. The change is C code
-   in both modes, so both columns use k. See
-   artifacts/score-once-quiet-2026-11-07/REPORT.md. */
-#ifndef VCLOCK
-static const i32 cpn_tab[4][2] = {
-    {  31751L,  21416L }, /* 80286: measured depth-4 NNUE / material */
-    { 100554L,  66354L }, /* 8088: measured depth-4 NNUE / material */
-    {  85902L,  56254L }, /* 8086: measured depth-4 NNUE / material */
-    {  50062L,  33464L }, /* 80186: measured depth-4 NNUE / material */
-};
-#endif
-
-#ifdef VCLOCK
 static i64 vbudget_cyc, vsoft_cyc; /* weighted hard/soft limits */
 
 typedef struct { i32 att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm, tp, ts; } VW;
@@ -128,8 +107,7 @@ typedef struct { i32 att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm, tp, ts; } VW;
    same absolute amount as rn because ordering cost is eval-independent. rn
    falls 10531->8016 (80286), 34403->24969 (8088), 28628->20083 (8086) and
    14167->10896 (80186); the other uncharged work (control flow, flip
-   recompute, PV/history updates, fit slack) is untouched. The same update
-   rescales both cpn_tab columns by k. See
+   recompute, PV/history updates, fit slack) is untouched. See
    artifacts/score-once-quiet-2026-11-07/REPORT.md. */
 static const VW vw_tab[4] = {
     /* att ps gc gq gm mk nm rf ev rn rm tp ts: cycles per counted operation */
@@ -143,12 +121,14 @@ static const VW vw_tab[4] = {
    from the Nimbus sbench markers: att 1,081 / 2,274 = 0.4754, gc 7,188 / 16,531
    = 0.4348. Scaling rather than assigning the absolute per-call cost keeps the
    whole-search level this table was fitted at (that level is what rn/rm absorb,
-   and gc's row has always sat above the isolated sbench figure). Per-operation
-   costs are only measurable on the 80186 - 86Box guest clock() cannot time
-   sub-second sbench loops, it reports a negative att - so the same ratio is
-   applied to every CPU. Check: the model's own k then lands within 0.6% of the
-   measured whole-search k on both CPUs where both exist (80186 0.8875 vs
-   0.8919; 8088 0.8967 vs 0.8913), so rn/rm stay as fitted.
+   and gc's row has always sat above the isolated sbench figure). At refit time
+   the per-operation costs were only measurable on the 80186 - 86Box's guest
+   clock() resolved at 55 ms and could not time sub-second sbench loops (it
+   reported a negative att) - so the same ratio is applied to every CPU. The
+   DOS build now reads the PIT counter directly (timing.c), so those loops are
+   separately measurable on 86Box too. Check: the model's own k then lands
+   within 0.6% of the measured whole-search k on both CPUs where both exist
+   (80186 0.8875 vs 0.8919; 8088 0.8967 vs 0.8913), so rn/rm stay as fitted.
    att was refitted again 2026-11-04 for the probe reorder (pawn probes folded
    into the two diagonal rays, which now run first): 1,081 -> 1,041 on the
    Nimbus markers, ratio 0.96300, applied to every CPU's row by the same rule.
@@ -171,7 +151,7 @@ static const VW vw_tab[4] = {
    from their earlier measured/scaled calibration because that code is unchanged.
 
    rf was shifted 2026-10-31 by the measured lodsb/stosw per-batch change
-   (same 1.343 batches/node conversion as cpn_tab): -803 (8088), -755 (8086),
+   (same 1.343 batches/node conversion): -803 (8088), -755 (8086),
    -225 (80286) and +66 (80186, capture bodies lose to a disp8 load while the
    quiet body's stosw still wins). nm and ev are untouched because planning
    and the forward pass did not change, and rn/rm stay as fitted: they are the
@@ -242,7 +222,6 @@ i32 vclock_est_nps(i32 nodes) {
     if (cyc <= 0 || vcpu_khz <= 0) return 0;
     return (i32)((i64)nodes * vcpu_khz * 1000LL / cyc);
 }
-#endif
 
 void vclock_set_model(const char *name) {
     if (!name) return;
@@ -269,14 +248,9 @@ void vclock_newgame(void) {
     vclock_reset();
 }
 
-/* zero the per-move state (and, on VCLOCK builds, the weighted counters) */
+/* zero the per-move state and the weighted counters */
 void vclock_reset(void) {
     vtotal_nodes = 0;
-    vmax_nodes = 0;
-#ifndef VCLOCK
-    vsoft_nodes = 0;
-#endif
-#ifdef VCLOCK
     vbudget_cyc = vsoft_cyc = 0;
     c_anodes = c_qnodes = c_nextmove = 0;
     c_make = c_undo = c_gen_moves = c_gen_caps = c_gen_quiets = 0;
@@ -288,34 +262,6 @@ void vclock_reset(void) {
     c_tt_probe = 0;
     c_tt_store = 0;
     c_tt_eval = 0;
-#endif
-}
-
-/* Conservative allocation shared by the real and virtual clocks. Stop
-   after a complete depth at half the normal slice; the hard limit is 1.5x
-   that slice. This banks time rather than routinely overspending the average.
-   The last move before a refill can use the bank minus output reserve.
-   Increment arrives afterwards, so it cannot raise the current bank cap. */
-void time_limits_ms(i32 remaining_ms, i16 moves_left, i32 increment_ms,
-                    i32 *soft_ms, i32 *hard_ms) {
-    i32 available, target;
-    if (remaining_ms < 0) remaining_ms = 0;
-    if (moves_left < 1) moves_left = 40;
-    if (increment_ms < 0) increment_ms = 0;
-    available = remaining_ms > TIME_MARGIN_MS ? remaining_ms - TIME_MARGIN_MS : 1;
-    target = remaining_ms / moves_left;
-    /* Avoid overflowing if a caller supplies a very large increment. */
-    if (increment_ms >= available - target) target = available;
-    else target += increment_ms;
-    if (target < 1) target = 1;
-    if (target > available) target = available;
-    if (moves_left == 1) {
-        *soft_ms = *hard_ms = available;
-    } else {
-        *soft_ms = target / 2;
-        if (*soft_ms < 1) *soft_ms = 1;
-        *hard_ms = target > available - target / 2 ? available : target + target / 2;
-    }
 }
 
 /* Refill only after the requisite moves, regardless of how fast the host
@@ -334,56 +280,25 @@ void vclock_limits_ms(i32 *soft_ms, i32 *hard_ms) {
     time_limits_ms(vperiod_ms, vperiod_left, 0, soft_ms, hard_ms);
 }
 
-#ifndef VCLOCK
-static i32 vclock_node_limit(i32 ms) {
-    i32 cpn = cpn_tab[vcpu_model][nnue_enabled ? 0 : 1], cap;
-    if (ms <= 0) return 0;
-    cap = (i32)(((u32)ms / 100) * (u32)vcpu_khz / ((u32)cpn / 100));
-    /* A tiny or empty bank still has a stop condition. */
-    return cap > 0 ? cap : 1;
-}
-#endif
-
 void vclock_set_limits(i32 soft_ms, i32 hard_ms) {
-#ifdef VCLOCK
     vsoft_cyc = (i64)soft_ms * vcpu_khz;
     vbudget_cyc = (i64)hard_ms * vcpu_khz;
-#else
-    vsoft_nodes = vclock_node_limit(soft_ms);
-    vmax_nodes = vclock_node_limit(hard_ms);
-#endif
 }
 
 /* The soft target never interrupts a partially searched depth. */
 i16 vclock_soft_hit(void) {
-#ifdef VCLOCK
     return vsoft_cyc > 0 && vclock_cyc() >= vsoft_cyc;
-#else
-    return vsoft_nodes > 0 && vtotal_nodes >= vsoft_nodes;
-#endif
 }
 
 /* 1 when the current move has consumed its virtual budget */
 i16 vclock_budget_hit(void) {
-#ifdef VCLOCK
     return vbudget_cyc > 0 && vclock_cyc() >= vbudget_cyc;
-#else
-    return vmax_nodes > 0 && vtotal_nodes >= vmax_nodes;
-#endif
 }
 
 /* Read the same modeled elapsed time used to charge the bank. Thinking
    output can query this after each depth without changing move bookkeeping. */
 i32 vclock_elapsed_ms(void) {
-#ifdef VCLOCK
     return (i32)(vclock_cyc() / vcpu_khz);
-#else
-    i32 cpn = cpn_tab[vcpu_model][nnue_enabled ? 0 : 1];
-    if (vtotal_nodes > 0 && cpn >= 100 && vcpu_khz >= 100)
-        return (i32)(((u32)vtotal_nodes / 100) * (u32)cpn
-                     / ((u32)vcpu_khz / 100));
-    return 0;
-#endif
 }
 
 /* charge the current period the virtual ms the completed move consumed and
@@ -394,13 +309,7 @@ i32 vclock_charge(void) {
     if (vperiod_ms < 0) vperiod_ms = 0;
     if (vperiod_left > 0) vperiod_left--;
     vtotal_nodes = 0;
-    vmax_nodes = 0;
-#ifndef VCLOCK
-    vsoft_nodes = 0;
-#endif
-#ifdef VCLOCK
     vbudget_cyc = vsoft_cyc = 0;
-#endif
     return vms;
 }
 
@@ -413,7 +322,6 @@ i16 vclock_selftest(void) {
         vcpu_khz = 25000;
         vclock_reset();
         vclock_set_limits(10000, 30000);
-#ifdef VCLOCK
         {
             const VW *w = &vw_tab[model];
             i32 unit = (nnue_enabled ? w->rn : w->rm) + rep_cost[model].fixed;
@@ -428,25 +336,11 @@ i16 vclock_selftest(void) {
             c_qnodes = at_hard;
             if (!vclock_budget_hit()) ++failures;
         }
-#else
-        vtotal_nodes = vsoft_nodes - 1;
-        if (vclock_soft_hit() || vclock_budget_hit()) ++failures;
-        vtotal_nodes = vsoft_nodes;
-        if (!vclock_soft_hit() || vclock_budget_hit()) ++failures;
-        vtotal_nodes = vmax_nodes - 1;
-        if (!vclock_soft_hit() || vclock_budget_hit()) ++failures;
-        vtotal_nodes = vmax_nodes;
-        if (!vclock_budget_hit()) ++failures;
-#endif
         vclock_set_limits(0, 0);
         if (vclock_soft_hit() || vclock_budget_hit()) ++failures;
         vclock_reset();
         vclock_set_limits(1, 1);
-#ifdef VCLOCK
         c_qnodes = 100;
-#else
-        vtotal_nodes = 100;
-#endif
         if (!vclock_soft_hit() || !vclock_budget_hit()) ++failures;
     }
     vcpu_model = VCPU_80286;
@@ -456,11 +350,7 @@ i16 vclock_selftest(void) {
     if (soft != 90000L || hard != 270000L || vperiod_left != 40) ++failures;
     bank = vperiod_ms;
     vclock_set_limits(soft, hard);
-#ifdef VCLOCK
     c_qnodes = 1000;
-#else
-    vtotal_nodes = 1000;
-#endif
     spent = vclock_charge();
     if (spent <= 0 || vperiod_ms != bank - spent || vperiod_left != 39) ++failures;
     if (vclock_soft_hit() || vclock_budget_hit()) ++failures;
@@ -486,4 +376,31 @@ i16 vclock_selftest(void) {
     vclock_newgame();
     return failures;
 }
+#endif /* TIME_TEST */
+
+#else /* !VCLOCK */
+
+/* No counters, so no model: VirtualTime is a native-build feature and the
+   16-bit engine uses its real clock. Keep the interface so shared call sites
+   compile, and leave vtime_mode off even if a GUI sends the option. */
+
+void vclock_set_model(const char *name) { (void)name; }
+void vclock_set_khz(i32 khz) { (void)khz; }
+void vclock_set_enabled(const char *val) { (void)val; }
+void vclock_newgame(void) { }
+void vclock_reset(void) { vtotal_nodes = 0; }
+void vclock_limits_ms(i32 *soft_ms, i32 *hard_ms) { *soft_ms = *hard_ms = 0; }
+void vclock_set_limits(i32 soft_ms, i32 hard_ms) { (void)soft_ms; (void)hard_ms; }
+i16 vclock_soft_hit(void) { return 0; }
+i16 vclock_budget_hit(void) { return 0; }
+i32 vclock_elapsed_ms(void) { return 0; }
+i32 vclock_charge(void) { return 0; }
+
+#ifdef TIME_TEST
+i16 vclock_selftest(void) {
+    printf("virtual selftest: skipped (VCLOCK off)\n");
+    return 0;
+}
 #endif
+
+#endif /* VCLOCK */

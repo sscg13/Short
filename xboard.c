@@ -15,6 +15,7 @@ static i16 xb_st = 0;
 static i32 xb_time_cs = -1; /* full 2-hour clock fits; -1 = GUI has not sent time */
 static i16 xb_level_mps = 0, xb_level_inc = 0;   /* "level mps base inc" control */
 
+#ifdef DBG_LOG
 static FILE *fdbg;                      /* protocol debug log (chess_debug.txt) */
 
 void dbgf(const char *fmt, ...) {
@@ -25,6 +26,7 @@ void dbgf(const char *fmt, ...) {
     va_end(ap);
     fflush(fdbg);
 }
+#endif
 
 void xb_outf(const char *fmt, ...) {
     va_list ap;
@@ -33,6 +35,7 @@ void xb_outf(const char *fmt, ...) {
     va_end(ap);
     printf("\n");
     fflush(stdout);
+#ifdef DBG_LOG
     if (fdbg) {
         va_start(ap, fmt);
         vfprintf(fdbg, fmt, ap);
@@ -40,6 +43,7 @@ void xb_outf(const char *fmt, ...) {
         fprintf(fdbg, "\n");
         fflush(fdbg);
     }
+#endif
 }
 
 static const char *start_fen =
@@ -211,7 +215,12 @@ static void xb_go(void) {
     if (vtime_mode) {
         i32 cn = vtotal_nodes;
         i32 cms = vclock_charge();
+#ifndef DBG_LOG
+        (void)cn;
+        (void)cms;                      /* charge has the side effect; values are log-only */
+#else
         dbgf("vclock nodes=%ld consumed=%ldms\n", (long)cn, (long)cms);
+#endif
     }
     search_set_limits(0, 0);
     stop_now = 0;
@@ -248,12 +257,14 @@ static void xb_option(const char *nm, const char *val) {
         /* single-threaded by design; accepted for OpenBench, ignored */
     } else if (strcmp(lo, "hash") == 0) {
         /* fixed 64 KB transposition table; compatibility option, ignored */
+#ifdef VCLOCK
     } else if (strcmp(lo, "cpu_model") == 0) {
         vclock_set_model(val);
     } else if (strcmp(lo, "cpu_khz") == 0) {
         vclock_set_khz(atol(val));
     } else if (strcmp(lo, "virtualtime") == 0) {
         vclock_set_enabled(val);
+#endif
 #ifdef TUNE
     } else if (search_tune_option(lo, val) < 0) {
         xb_outf("Error (invalid option value): %s", nm);
@@ -265,11 +276,13 @@ static void xb_option(const char *nm, const char *val) {
 
 int xboard_main(void) {
     char line[256];
+#ifdef DBG_LOG
     char fname[64];
     /* per-process log file so two self-play engines don't clobber each other */
     sprintf(fname, "chess_debug_%ld.txt", DBG_PID());
     fdbg = fopen(fname, "w");
     if (fdbg) { fprintf(fdbg, "== chess protocol debug ==\n"); fflush(fdbg); }
+#endif
     xb_reset();
     while (fgets(line, sizeof(line), stdin)) {
         char *p = line;
@@ -294,9 +307,11 @@ int xboard_main(void) {
                default marked by a leading `*`; -check takes 1/0. */
             xb_outf("feature option=\"Threads -spin 1 1 16\"");
             xb_outf("feature option=\"Hash -spin 32 32 1024\"");
+#ifdef VCLOCK
             xb_outf("feature option=\"CPU_model -combo *80286 /// 80186 /// 8088 /// 8086\"");
             xb_outf("feature option=\"CPU_KHz -spin 25000 1000 50000\"");
             xb_outf("feature option=\"VirtualTime -check 0\"");
+#endif
 #ifdef TUNE
             search_tune_features();
 #endif
@@ -395,7 +410,9 @@ int xboard_main(void) {
         }
     }
     dbgf("stdin closed, exiting\n");
+#ifdef DBG_LOG
     if (fdbg) fclose(fdbg);
     fdbg = NULL;
+#endif
     return 0;
 }

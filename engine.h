@@ -131,7 +131,8 @@ typedef i16 Score;
                                            move is reported before the clock runs out.
                                            Must exceed Windows' clock() granularity
                                            (~15.6 ms) + output overhead or we lose on
-                                           time at tight clocks. */
+                                           time at tight clocks. The DOS PIT clock
+                                           resolves ~1 ms, so it is conservative there. */
 
 /* ---- profiling / vclock call counters ----
    Compiled in with -DPROFILE (`make profile`, build.ps1 -Profile) or -DVCLOCK
@@ -177,9 +178,19 @@ extern Sig g_sigs[MAX_G_SIGS];          /* position signatures for repetition */
 extern i16 g_sigs_n;
 extern u16 movebuf[32][256];            /* move lists, one row per search ply + aux */
 extern volatile i16 stop_now;
-extern clock_t deadline, soft_deadline; /* clock() ticks; 0 = no limit */
+extern clock_t deadline, soft_deadline; /* engine_clock() ticks; 0 = no limit */
 void search_set_limits(i32 soft_ms, i32 hard_ms);
 extern i16 post_on;
+
+/* ---- timing.c (wall clock) ---- */
+void timing_init(void);              /* one-time: 8253/8254 ch0 mode 2 on DOS */
+clock_t engine_clock(void);          /* monotonic, CLOCKS_PER_SEC units */
+u32 timing_counts(void);             /* PIT counts, 0.838 us each (wraps ~60 min) */
+/* Search clock: anchor once per move, then one cheap latch per poll (16-bit
+   builds). timing_search_start returns 0 when no PIT timer is available. */
+i16 timing_search_start(void);
+u32 timing_search_counts(void);
+u32 timing_bios_ticks(void);         /* BIOS tick count (DOS calibration only) */
 
 /* ---- search.c ---- */
 void do_make(Pos *p, u16 m, Undo *u);
@@ -219,7 +230,6 @@ extern u16 mt[128];
 i16 gen_caps_c(Pos *p, u16 *list);
 int gencaps_selftest(void);
 #endif
-i32 perft(Pos *p, i16 depth);
 Sig pos_sig(Pos *p);
 u16 repetition_move(Pos *p, Sig target);
 void search_root(Pos *p, i16 maxdepth);
@@ -245,7 +255,11 @@ i16 vclock_selftest(void);
 #endif
 
 /* ---- xboard.c ---- */
-void dbgf(const char *fmt, ...);
+#ifdef DBG_LOG
+void dbgf(const char *fmt, ...);          /* protocol log (chess_debug_*.txt) */
+#else
+#define dbgf(...) ((void)0)              /* release: no log, no format strings */
+#endif
 void xb_outf(const char *fmt, ...);
 int xboard_main(void);
 
@@ -279,7 +293,9 @@ int nnue_load(const char *path);
 int nnue_ensure_loaded(const char *path);
 int nnue_ensure_default(void);
 void nnue_tables_init(void);   /* one-time table builds (rowtab/fwd/castle) after net load */
+#ifdef NN_TEST
 int nnue_selftest(const char *fen);
+#endif
 int nnue_bench(void);
 
 /* ---- transposition table (tt.c) ----
@@ -305,14 +321,14 @@ void tt_store(Pos *p, u16 move, i16 depth, Score score, i16 flag, i16 ply,
    VirtualTime=1 makes the engine ignore the GUI's time commands and pace
    itself against a 40/2h + 20/1h repeating control using a per-CPU cycle
    model (CPU_model + CPU_KHz). See TESTING.md.
-   The 32-bit (VCLOCK) build charges the search's sub-functions at measured
-   per-call costs; the 16-bit build keeps a scalar cycles/node. */
+   The model reads the PCOUNT operation counters, so it exists only in
+   VCLOCK builds (the native build). The 16-bit engine paces itself with its
+   real clock instead; a DOS build without VCLOCK leaves vtime_mode off. */
 enum { VCPU_80286 = 0, VCPU_8088, VCPU_8086, VCPU_80186 };
 extern i16 vtime_mode;       /* 1 = virtual clock active (ignore GUI time) */
 extern i32 vcpu_khz;        /* CPU clock in KHz (cycles per ms); i32: 50000 KHz overflows a 16-bit int */
 extern i16 vcpu_model;       /* VCPU_* */
 extern i32 vtotal_nodes;     /* nodes searched so far in the current move */
-extern i32 vmax_nodes;       /* scalar node cap for the current move (0 = none) */
 void vclock_set_model(const char *name);
 void vclock_set_khz(i32 khz);
 void vclock_set_enabled(const char *val);
@@ -332,7 +348,7 @@ i32 vclock_charge(void);                /* deduct the move's consumed time; retu
 i32 vclock_est_nps(i32 nodes);          /* weighted-model NPS for the modeled CPU (bench output) */
 #endif
 
-/* ---- chess.c (board, movegen, eval, perft, FEN) ---- */
+/* ---- chess.c (board, movegen, eval, FEN) ---- */
 void parse_fen(Pos *p, const char *s);
 Score evaluate(Pos *p);
 void zob_init(void);              /* one-time Zobrist key tables (dedicated init) */

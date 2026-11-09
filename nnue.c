@@ -667,6 +667,7 @@ int nnue_ensure_default(void) {
 /* self-test: `chess nn [fen]`                                        */
 /* ------------------------------------------------------------------ */
 
+#ifdef NN_TEST
 static void flip_pos(Pos *dst, const Pos *src) {
     i16 c;
     memset(dst, 0, sizeof *dst);
@@ -705,6 +706,8 @@ static void hmirror_pos(Pos *dst, const Pos *src) {
     }
 }
 
+#endif /* NN_TEST helpers */
+
 /* direct per-call cost measurement (`chess nbench`): times nnue_eval and a
    make/undo pair in loops, prints ms per 1000 calls. Convert to cycles with the
    host clock (8088 16 MHz: cyc = ms*16 per call; 286 6 MHz: cyc = ms*6). */
@@ -723,15 +726,15 @@ int nnue_bench(void) {
     if (n <= 0) return 1;
 
     iters = 4000;
-    t0 = clock();
+    t0 = engine_clock();
     MAME_MARK(0x20);
     for (i = 0; i < iters; i++) nnue_eval(&pos);
     MAME_MARK(0x21);
-    t1 = clock();
+    t1 = engine_clock();
 #ifdef __WATCOMC__
-    /* Watcom's DOS clock() source wraps every 65536 ticks even though clock_t
-       is unsigned long. Each calibration block is shorter than 65.536 s, so
-       subtract modulo 16 bits before widening. */
+    /* engine_clock() is 32-bit milliseconds; each calibration block is
+       shorter than 65.536 s, so the low 16 bits of the difference are exact
+       and the multiply stays 16-bit cheap on the target. */
     eval_ms = (i32)(u16)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
 #else
     eval_ms = ((i32)(t1 - t0)) * 1000 / CLOCKS_PER_SEC;
@@ -746,7 +749,7 @@ int nnue_bench(void) {
                 break;
             }
         if (!qm) return 1;
-        t0 = clock();
+        t0 = engine_clock();
         MAME_MARK(0x22);
 #ifdef PROFILE
         {
@@ -762,7 +765,7 @@ int nnue_bench(void) {
             printf("nbench applies=%ld flips=%ld\n", (long)(c_refresh - r0), (long)(c_flip - f0));
         }
 #endif
-        t1 = clock();
+        t1 = engine_clock();
 #ifdef __WATCOMC__
         delta_ms = (i32)(u16)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
 #else
@@ -782,7 +785,7 @@ int nnue_bench(void) {
                 break;
             }
         if (!cm) return 1;
-        t0 = clock();
+        t0 = engine_clock();
         MAME_MARK(0x24);
         for (i = 0; i < iters; i++) {
             do_make(&pos, cm, &u);
@@ -790,7 +793,7 @@ int nnue_bench(void) {
             undo_move(&pos, cm, &u);
         }
         MAME_MARK(0x25);
-        t1 = clock();
+        t1 = engine_clock();
 #ifdef __WATCOMC__
         capture_ms = (i32)(u16)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
 #else
@@ -811,14 +814,14 @@ int nnue_bench(void) {
                     pm = list[i]; break;
                 }
             if (!pm) return 1;
-            t0 = clock();
+            t0 = engine_clock();
             MAME_MARK(kind ? 0x28 : 0x26);
             for (i = 0; i < iters; i++) {
                 do_make(&pos, pm, &u);
                 undo_move(&pos, pm, &u);
             }
             MAME_MARK(kind ? 0x29 : 0x27);
-            t1 = clock();
+            t1 = engine_clock();
 #ifdef __WATCOMC__
             plan_ms[kind] = (i32)(u16)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
 #else
@@ -840,6 +843,7 @@ int nnue_bench(void) {
     return 0;
 }
 
+#ifdef NN_TEST
 /* Exercise chains whose parents have never been evaluated, sibling reuse,
    horizontal king flips in both directions, castling, EP, promotions and nulls. */
 static i16 nn_chain_check(Pos *p, i16 fresh[2][NNUE_N]) {
@@ -1026,3 +1030,5 @@ int nnue_selftest(const char *fen) {
            n, asym, asymH, fail, fwd_fail, map_fail, nnue_eval(&pos));
     return (fail == 0 && asym == 0 && asymH == 0 && fwd_fail == 0 && map_fail == 0) ? 0 : 1;
 }
+
+#endif /* NN_TEST */

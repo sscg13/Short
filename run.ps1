@@ -5,7 +5,10 @@ param(
     [string]$Fen = "",
     [switch]$Profile,  # -Profile: build with -DPROFILE so `chess profile` works
     [switch]$NoAsmAttack,  # -NoAsmAttack: C is_attacked (pre-adoption baseline)
-    [switch]$NoAsmGenCaps  # -NoAsmGenCaps: C gen_caps (pre-adoption baseline)
+    [switch]$NoAsmGenCaps, # -NoAsmGenCaps: C gen_caps (pre-adoption baseline)
+    [switch]$PerftTest,    # -PerftTest: include the perft test CLI
+    [switch]$NNTest,       # -NNTest: include the NNUE selftest (`chess nn`)
+    [switch]$DebugLog      # -DebugLog: write the protocol debug log
 )
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -18,6 +21,9 @@ $buildArgs = @("-Model", $Model)
 if ($Profile)       { $buildArgs += "-Profile" }
 if ($NoAsmAttack)   { $buildArgs += "-NoAsmAttack" }
 if ($NoAsmGenCaps)  { $buildArgs += "-NoAsmGenCaps" }
+if ($PerftTest)     { $buildArgs += "-PerftTest" }
+if ($NNTest)        { $buildArgs += "-NNTest" }
+if ($DebugLog)      { $buildArgs += "-DebugLog" }
 & powershell -NoProfile -ExecutionPolicy Bypass -File "$root\build.ps1" @buildArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 popd

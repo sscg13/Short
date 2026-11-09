@@ -10,7 +10,13 @@ param(
     [switch]$NoAsmGenCaps, # -NoAsmGenCaps: compile the C gen_caps instead of gen_opt.asm
     [switch]$AtkDiff,      # -AtkDiff: also link the C reference and `chess atkdiff`
                            # (test scaffolding only)
-    [switch]$GenCapsDiff   # -GenCapsDiff: also link the C reference and `chess gencaps`
+    [switch]$GenCapsDiff,   # -GenCapsDiff: also link the C reference and `chess gencaps`
+                           # (test scaffolding only)
+    [switch]$NNTest,        # -NNTest: compile the NNUE selftest (`chess nn`)
+                            # (test scaffolding only)
+    [switch]$DebugLog,      # -DebugLog: write the protocol log (chess_debug_*.txt)
+                            # (diagnostic only)
+    [switch]$PerftTest      # -PerftTest: compile tests/perft_test.inc and `chess perft`
                            # (test scaffolding only)
 )
 
@@ -39,7 +45,7 @@ $modelFlag = switch ($Model) {
     default  { "-ml" }
 }
 
-$sources = @("chess.c", "search.c", "xboard.c", "nnue.c", "vclock.c", "tt.c")
+$sources = @("chess.c", "search.c", "xboard.c", "nnue.c", "vclock.c", "timing.c", "tt.c")
 if ($AtkDiff) { $sources += "attack_ref.c" }
 if ($GenCapsDiff) { $sources += "gen_ref.c" }
 $objs = @()
@@ -58,6 +64,9 @@ foreach ($s in $sources) {
     if ($AtkDiff) { $flags += "-DATK_DIFF" }
     if ($asmGenCaps) { $flags += "-DASM_GENCAPS" }
     if ($GenCapsDiff) { $flags += "-DGENCAPS_DIFF" }
+    if ($PerftTest) { $flags += "-DPERFT_TEST" }
+    if ($NNTest)   { $flags += "-DNN_TEST" }
+    if ($DebugLog) { $flags += "-DDBG_LOG" }
     & "$ow\binnt\wcc.exe" @flags $s
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $objs += [System.IO.Path]::GetFileNameWithoutExtension($s) + ".obj"

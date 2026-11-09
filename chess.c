@@ -1,4 +1,4 @@
-/* chess.c - board, move generation, make/unmake, eval, perft, FEN, main */
+/* chess.c - board, move generation, make/unmake, eval, FEN, main */
 
 #include "engine.h"
 
@@ -947,7 +947,8 @@ static int moveset_check(Pos *p) {
    real move list, so the compiled step cost matches the search's. Cycle costs
    come from the Nimbus port-E9 markers: 0x30/0x31 capture steps, 0x32/0x33
    quiet steps, 0x34/0x35 killer validation. The ms figures are a cross-check
-   only (DOS clock() resolves at 55 ms, so they are usually zero). */
+   only: the Nimbus BIOS tick timer is dead (they print 0 there); on 86Box the
+   engine clock resolves at about 1 ms. */
 #ifdef MAME_MARKERS
 static u16 ob_ttm, ob_k0, ob_k1;   /* mutable: keep the skip tests from folding */
 static i16 ob_score[256];          /* frozen quiet scores (near, like qscore) */
@@ -980,7 +981,7 @@ int order_bench(void) {
     history = &qhist[pos.side];
 #endif
 
-    t0 = clock();
+    t0 = engine_clock();
     MAME_MARK(0x30);
     for (k = 0; k < iters; k++) {
         i16 best = -1, bscore = -32000;
@@ -994,10 +995,10 @@ int order_bench(void) {
         acc += best + bscore;
     }
     MAME_MARK(0x31);
-    t1 = clock();
+    t1 = engine_clock();
     cap_ms = (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
 
-    t0 = clock();
+    t0 = engine_clock();
     MAME_MARK(0x32);
     for (k = 0; k < iters; k++) {
         i16 best = -1, bscore = -32000;
@@ -1011,15 +1012,15 @@ int order_bench(void) {
         acc += best + bscore;
     }
     MAME_MARK(0x33);
-    t1 = clock();
+    t1 = engine_clock();
     quiet_ms = (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
 
-    t0 = clock();
+    t0 = engine_clock();
     MAME_MARK(0x34);
     for (k = 0; k < iters; k++)
         for (i = 0; i < nq; i++) acc += quiet_killer_ok(&pos, quiets[i]);
     MAME_MARK(0x35);
-    t1 = clock();
+    t1 = engine_clock();
     kill_ms = (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
 
     /* Frozen-score variants: the one-time scoring pass over the list, the
@@ -1029,7 +1030,7 @@ int order_bench(void) {
         ob_score[i] = (*history)[TY(pos.board[mfrom(q)]) - 1][(q >> 6) & 0x3F];
     }
 
-    t0 = clock();
+    t0 = engine_clock();
     MAME_MARK(0x36);
     for (k = 0; k < iters; k++) {
         i16 best = -1, bscore = -32000;
@@ -1043,9 +1044,9 @@ int order_bench(void) {
         acc += best + bscore;
     }
     MAME_MARK(0x37);
-    t1 = clock();
+    t1 = engine_clock();
 
-    t0 = clock();
+    t0 = engine_clock();
     MAME_MARK(0x38);
     for (k = 0; k < iters; k++)
         for (i = 0; i < nq; i++) {
@@ -1053,9 +1054,9 @@ int order_bench(void) {
             acc += (*history)[TY(pos.board[mfrom(q)]) - 1][(q >> 6) & 0x3F];
         }
     MAME_MARK(0x39);
-    t1 = clock();
+    t1 = engine_clock();
 
-    t0 = clock();
+    t0 = engine_clock();
     MAME_MARK(0x3A);
     for (k = 0; k < iters; k++) {
         i16 best = 0;
@@ -1066,7 +1067,7 @@ int order_bench(void) {
             }
     }
     MAME_MARK(0x3B);
-    t1 = clock();
+    t1 = engine_clock();
 
     printf("orderbench caps=%d quiets=%d iters=%ld acc=%ld\n",
            nc, nq, (long)iters, (long)acc);
@@ -1075,30 +1076,6 @@ int order_bench(void) {
     return 0;
 }
 #endif /* MAME_MARKERS */
-
-/* ------------------------------------------------------------------ */
-/* perft                                                              */
-/* ------------------------------------------------------------------ */
-
-i32 perft(Pos *p, i16 depth) {
-    i32 nodes = 0;
-    u16 *list = movebuf[depth];
-    i16 n = gen_moves(p, list);
-    i16 i;
-
-    for (i = 0; i < n; i++) {
-        Undo u;
-        i16 us;
-        do_make(p, list[i], &u);
-        us = p->side ^ 1;              /* mover */
-        if (!is_attacked(p, p->ks[us], p->side)) {   /* enemy of mover */
-            if (depth == 1) nodes++;
-            else nodes += perft(p, depth - 1);
-        }
-        undo_move(p, list[i], &u);
-    }
-    return nodes;
-}
 
 /* ------------------------------------------------------------------ */
 /* evaluation (NNUE when a net is loaded, else material)              */
@@ -1206,14 +1183,9 @@ static const char *fens[] = {
     "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10"
 };
 
-static const u32 expv[6][6] = {
-    { 20, 400, 8902, 197281, 4865609, 119060324 },
-    { 48, 2039, 97862, 4085603, 193690690, 0 },
-    { 14, 191, 2812, 43238, 674624, 11030083 },
-    { 6, 264, 9467, 422333, 15833292, 706045033 },
-    { 44, 1486, 62379, 2103487, 89941194, 0 },
-    { 46, 2079, 89890, 3894594, 164075551, 0 }
-};
+#ifdef PERFT_TEST
+#include "tests/perft_test.inc"
+#endif
 
 #ifdef REP_TEST
 int repetition_selftest(void);
@@ -1383,12 +1355,9 @@ int attack_selftest(void) {
 }
 #endif
 int main(int argc, char **argv) {
-    i16 maxd = 5, test = 0, i, splitsel = 0;
+    i16 test = 0;
     i16 j, nn_log = 1;
     Pos pos;
-    i32 nodes;
-    clock_t t0, t1;
-    double secs;
 
     /* Metadata export must work without loading a network or printing a banner. */
     if (argc > 1 && strcmp(argv[1], "spsa") == 0) {
@@ -1406,6 +1375,7 @@ int main(int argc, char **argv) {
     cast_mask_build(); /* one-time castling-rights table (dedicated init) */
     zob_init();    /* one-time Zobrist key tables (dedicated init) */
     lmr_build();   /* one-time LMR log table (dedicated init) */
+    timing_init(); /* one-time wall clock (8253/8254 ch0 mode 2 on DOS) */
 #ifdef ASM_GENCAPS
     move_tables_build(); /* one-time move-encoding tables for gen_opt.asm */
 #endif
@@ -1440,8 +1410,14 @@ int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "seetest") == 0) return see_selftest();
     if (argc > 1 && strcmp(argv[1], "seebench") == 0) return see_microbench();
 #endif
+#ifdef PERFT_TEST
+    if (argc > 1 && strcmp(argv[1], "perft") == 0)
+        return perft_selftest(argc - 2, argv + 2);
+#endif
+#ifdef NN_TEST
     if (argc > 1 && strcmp(argv[1], "nn") == 0)
         return nnue_selftest((argc > 2) ? argv[2] : NULL);
+#endif
 
 #ifdef MAME_MARKERS
     if (argc > 1 && strcmp(argv[1], "orderbench") == 0)
@@ -1510,63 +1486,6 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    if (argc > 1) maxd = atoi(argv[1]);
-    if (argc > 2) test = atoi(argv[2]);
-    if (argc > 3 && argv[3][0] == 's') splitsel = 1;
-    if (maxd < 1) maxd = 1;
-    if (maxd > 6) maxd = 6;
-
-    if (test == 9 && argc > 4)
-        parse_fen(&pos, argv[4]);
-    else if (test == 8) {
-        FILE *f = fopen("fen.txt", "r");
-        char buf[128];
-        if (f) {
-            fgets(buf, 128, f);
-            fclose(f);
-            parse_fen(&pos, buf);
-        } else {
-            parse_fen(&pos, fens[0]);
-        }
-    } else if (test >= 0 && test <= 5)
-        parse_fen(&pos, fens[test]);
-    else
-        parse_fen(&pos, fens[0]);
-
-    printf("pos=%d CLOCKS_PER_SEC=%d\n", test + 1, (int)CLOCKS_PER_SEC);
-
-    if (splitsel) {
-        u16 *list = movebuf[29];
-        i16 n = gen_moves(&pos, list);
-        for (i = 0; i < n; i++) {
-            Undo u;
-            i16 us;
-            i32 c;
-            do_make(&pos, list[i], &u);
-            us = pos.side ^ 1;
-            if (!is_attacked(&pos, pos.ks[us], pos.side))
-                c = perft(&pos, maxd - 1);
-            else
-                c = -1;
-            undo_move(&pos, list[i], &u);
-            printf("m=%02X%02X p=%d -> %lu\n",
-                   mfrom(list[i]), mto(list[i]), mpro(list[i], us ? 8 : 0), (unsigned long)c);
-        }
-        return 0;
-    }
-
-    for (i = 1; i <= maxd; i++) {
-        u32 want, got;
-        t0 = clock();
-        nodes = perft(&pos, i);
-        t1 = clock();
-        secs = (double)(t1 - t0) / (double)CLOCKS_PER_SEC;
-        got = (u32)nodes;
-        want = expv[test][i - 1];
-        printf("perft(%d)=%lu  %8.2fs  %6lu nps  %s\n",
-               i, (unsigned long)got, secs,
-               secs > 0 ? (unsigned long)((double)nodes / secs) : 0UL,
-               (want && got != want) ? "*** WRONG ***" : "ok");
-    }
-    return 0;
+    fprintf(stderr, "unknown command: %s\n", argv[1]);
+    return 1;
 }

@@ -22,8 +22,10 @@ CC      ?= gcc
 # OpenBench overrides via EVALFILE=<net>; `make` embeds this one by default.
 EVALFILE ?= short-net2-finetune2.net
 # -DVCLOCK compiles the weighted cycle counters used by the virtual clock
-# (vclock.c). The 16-bit build does NOT define it, so the counters stay out of
-# the shipped engine; the 16-bit build keeps the scalar vclock model.
+# (vclock.c). The 16-bit build never defines it: virtual time models a CPU the
+# real machine already is, so the DOS engine paces itself with its real clock.
+# Without VCLOCK there is no vclock model and the GUI is not offered
+# VirtualTime; the weighted model exists only in this native build.
 #
 # `?=` (not `=`) lets the caller override the optimization/warning set, but the
 # two flags below are appended with `override +=` so they can NEVER be dropped:
@@ -39,16 +41,22 @@ VCLOCK  ?= 1
 ifeq ($(VCLOCK),1)
 override CFLAGS += -DVCLOCK
 endif
+# DBGLOG=1 writes the protocol debug log (chess_debug_*.txt); off for releases.
+DBGLOG  ?= 0
+ifeq ($(DBGLOG),1)
+override CFLAGS += -DDBG_LOG
+endif
 override CFLAGS += -DNN_EMBED_FILE=$(EVALFILE)
 # OpenBench uses the ordinary native Makefile build. DOS release stays fixed;
 # build.ps1 only adds TUNE on an explicit -Tune diagnostic build.
-# Shared objects do not track flags: changing TUNE requires -B or make clean.
+# Shared objects do not track flags: changing TUNE, VCLOCK, DBGLOG or any test
+# define requires -B or make clean.
 TUNE    ?= 1
 ifeq ($(TUNE),1)
 override CFLAGS += -DTUNE
 endif
-SRCS    := chess.c search.c xboard.c nnue.c vclock.c tt.c
-HDRS    := engine.h tune.h repetition.inc tests/repetition_test.inc tests/see_test.inc tests/time_test.inc tests/search_state_test.inc
+SRCS    := chess.c search.c xboard.c nnue.c vclock.c timing.c tt.c
+HDRS    := engine.h tune.h repetition.inc tests/repetition_test.inc tests/see_test.inc tests/time_test.inc tests/search_state_test.inc tests/perft_test.inc
 OBJS    := $(SRCS:.c=.o)
 
 TARGET  := $(if $(EXE),$(EXE),chess_gcc)
@@ -67,7 +75,7 @@ all: $(TARGET)
 
 # Build a profiling binary (`chess profile [depth]`) with the call counters on.
 # Uses its own *_prof.o objects so the normal build's objects stay flag-free.
-PROF_OBJS := chess_prof.o search_prof.o xboard_prof.o nnue_prof.o vclock_prof.o tt_prof.o
+PROF_OBJS := chess_prof.o search_prof.o xboard_prof.o nnue_prof.o vclock_prof.o timing_prof.o tt_prof.o
 profile: chess_prof.exe
 
 chess_prof.exe: $(PROF_OBJS)
@@ -82,6 +90,8 @@ xboard_prof.o: xboard.c $(HDRS)
 nnue_prof.o: nnue.c $(HDRS)
 	$(CC) $(CFLAGS) -DPROFILE -c -o $@ $<
 vclock_prof.o: vclock.c $(HDRS)
+	$(CC) $(CFLAGS) -DPROFILE -c -o $@ $<
+timing_prof.o: timing.c $(HDRS)
 	$(CC) $(CFLAGS) -DPROFILE -c -o $@ $<
 tt_prof.o: tt.c $(HDRS)
 	$(CC) $(CFLAGS) -DPROFILE -c -o $@ $<
@@ -98,16 +108,20 @@ endif
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # Convenience target: build the diagnostic checks binary and run all selftests.
-# Uses its own flags, so it does not pollute the release objects.
+# Uses its own flags, so it does not pollute the release objects. -O2 (the
+# level TESTING.md documents for this binary) avoids an -O3-only
+# maybe-uninitialized diagnostic in the alphabeta clone the test callers create.
 $(CHECKS): $(SRCS) $(HDRS)
-	$(CC) $(CFLAGS) -DSEE_TEST -DREP_TEST -DTIME_TEST -DSEARCH_TEST -o $@ $(SRCS)
+	$(CC) $(CFLAGS) -O2 -DSEE_TEST -DREP_TEST -DTIME_TEST -DSEARCH_TEST -DPERFT_TEST -DNN_TEST -o $@ $(SRCS)
 
 test: all $(CHECKS)
 	./$(CHECKS) seetest
 	./$(CHECKS) reptest
 	./$(CHECKS) timetest
 	./$(CHECKS) searchtest
-	./$(TARGET) nn
+	./$(CHECKS) perft 4 0
+	./$(CHECKS) perft 4 1
+	./$(CHECKS) nn
 	./$(TARGET) bench 4
 
 clean:

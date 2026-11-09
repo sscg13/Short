@@ -73,13 +73,26 @@ i16 search_tune_option(const char *name, const char *value) {
 }
 #endif
 
-#if defined(TIMING_DETAIL) && defined(__WATCOMC__)
-#include <dos.h>
-static u32 timing_bios_ticks(void);
+volatile i16 stop_now = 0;
+clock_t deadline = 0, soft_deadline = 0; /* absolute engine_clock() ticks */
+
+#if defined(__WATCOMC__) && !defined(TIME_TEST)
+/* 16-bit clock: compare 1.193 MHz counts so the per-node poll is one latch.
+   0 falls back to the ms deadline (used above ~25 min, where count wrap
+   safety runs out). */
+static u32 hard_deadline_counts;
+#define COUNT_DEADLINE_MAX_MS 1500000L
 #endif
 
-volatile i16 stop_now = 0;
-clock_t deadline = 0, soft_deadline = 0; /* absolute clock() ticks */
+/* Host-clock poll stride. 1024 native nodes are still well under a
+   millisecond, while the Windows clock resolves ~15.6 ms; TIME_TEST's fake
+   clock is indexed by node count, so it keeps 64 to exercise a stop inside a
+   depth. */
+#if defined(TIME_TEST)
+#define REAL_POLL_MASK 63
+#else
+#define REAL_POLL_MASK 1023
+#endif
 
 /* Convert without overflowing ms * CLOCKS_PER_SEC on 32-bit hosts. Limits
    are set once per move; the search only compares native clock_t values. */
@@ -91,10 +104,22 @@ static clock_t ms_ticks(i32 ms) {
 
 void search_set_limits(i32 soft_ms, i32 hard_ms) {
     if (hard_ms > 0) {
-        clock_t now = clock();
+        clock_t now = engine_clock();
         deadline = now + ms_ticks(hard_ms);
         soft_deadline = soft_ms > 0 ? now + ms_ticks(soft_ms) : 0;
-    } else deadline = soft_deadline = 0;
+#if defined(__WATCOMC__) && !defined(TIME_TEST)
+        if (hard_ms <= COUNT_DEADLINE_MAX_MS && timing_search_start())
+            hard_deadline_counts = timing_search_counts()
+                                 + (u32)hard_ms * 1193UL;
+        else
+            hard_deadline_counts = 0;
+#endif
+    } else {
+        deadline = soft_deadline = 0;
+#if defined(__WATCOMC__) && !defined(TIME_TEST)
+        hard_deadline_counts = 0;
+#endif
+    }
 }
 
 #ifdef TIME_TEST
@@ -102,7 +127,7 @@ static i16 time_test_depth, time_test_clock_calls, time_test_fake_clock;
 static clock_t time_test_clock(void);
 #define search_clock() time_test_clock()
 #else
-#define search_clock() clock()
+#define search_clock() engine_clock()
 #endif
 
 #if defined(PROFILE) || defined(VCLOCK)
@@ -206,12 +231,11 @@ static void qhist_update(Pos *p, u16 m, i16 delta) {
 #define MAX_QDEPTH 8    /* longest capture chain past the search leaf; guards against
                            qsearch explosions (deep recapture lines) */
 
-/* reverse futility pruning: a shallow, non-PV node whose static eval already
-   beats beta by more than a depth-scaled margin returns that eval without
+/* reverse futility pruning: a non-PV node whose static eval already beats
+   beta by more than a depth-scaled margin returns that eval without
    searching - even a move that loses the whole margin keeps the score above
-   beta. RFP_DEPTH caps the window; RFP_MARGIN is the centipawn slack per ply
-   (the deeper the node, the wider the margin it needs to be "safe"). */
-#define RFP_DEPTH  7
+   beta. RFP_MARGIN is the centipawn slack per ply (the deeper the node, the
+   wider the margin it needs to be "safe"). There is no depth cap. */
 
 /* Shallow non-PV SEE pruning. Allow more material loss as depth grows:
    quiets: -80 * depth; captures: -20 * depth^2, in material centipawns.
@@ -379,14 +403,29 @@ static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd)
 
     PCOUNT(c_qnodes);
     nodes_search++;
-    vtotal_nodes++;
-    /* Virtual mode must never consult the host clock for either limit.
-       Real time is polled every 64 nodes, including quiescence. */
-    if (!vtime_mode && (nodes_search & 63) == 0 &&
+#if defined(VCLOCK) || defined(TIME_TEST)
+    vtotal_nodes++;                  /* virtual-time budget; TIME_TEST fake clock */
+#endif
+    /* 16-bit build: the real clock is the only clock. Compare cheap 1.193 MHz
+       counts, so the deadline is checked on every node; the ms fallback (huge
+       limits) keeps the old 64-node poll. */
+#if defined(__WATCOMC__) && !defined(TIME_TEST)
+    if (hard_deadline_counts) {
+        if ((i32)(timing_search_counts() - hard_deadline_counts) >= 0)
+            stop_now = 1;
+    } else if (deadline > 0 && (nodes_search & 63) == 0 &&
+               search_clock() >= deadline) {
+        stop_now = 1;
+    }
+#else
+    /* Native builds poll the host clock every REAL_POLL_MASK+1 nodes; see the
+       definition above. Virtual mode never consults the host clock. */
+    if (!vtime_mode && (nodes_search & REAL_POLL_MASK) == 0 &&
         deadline > 0 && search_clock() >= deadline)
         stop_now = 1;
     if (vtime_mode && vclock_budget_hit())
         stop_now = 1;
+#endif
     pv_len[ply] = 0;                             /* qsearch is a leaf: no continuation
                                                     (cleared before the early returns so a
                                                     direct child can't copy stale lines) */
@@ -482,14 +521,29 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
     } else {
         PCOUNT(c_anodes);
         nodes_search++;
-        vtotal_nodes++;
+#if defined(VCLOCK) || defined(TIME_TEST)
+        vtotal_nodes++;              /* virtual-time budget; TIME_TEST fake clock */
+#endif
+        /* 16-bit build: the real clock is the only clock. Compare cheap
+           1.193 MHz counts, so the deadline is checked on every node; the ms
+           fallback (huge limits) keeps the old 64-node poll. */
+#if defined(__WATCOMC__) && !defined(TIME_TEST)
+        if (hard_deadline_counts) {
+            if ((i32)(timing_search_counts() - hard_deadline_counts) >= 0)
+                stop_now = 1;
+        } else if (deadline > 0 && (nodes_search & 63) == 0 &&
+                   search_clock() >= deadline) {
+            stop_now = 1;
+        }
+#else
         /* Virtual mode must never consult the host clock for either limit.
-           Real time is polled every 64 nodes, including quiescence. */
-        if (!vtime_mode && (nodes_search & 63) == 0 &&
+           The real poll uses the native stride (REAL_POLL_MASK + 1 nodes). */
+        if (!vtime_mode && (nodes_search & REAL_POLL_MASK) == 0 &&
             deadline > 0 && search_clock() >= deadline)
             stop_now = 1;
         if (vtime_mode && vclock_budget_hit())
             stop_now = 1;
+#endif
         if (stop_now) return best;
         if (ply >= MAXPLY) return evaluate(p);   /* hard depth cap: never index past pv/killers/movebuf */
         pv_len[ply] = 0;                                 /* no best line yet at this ply */
@@ -519,8 +573,10 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
     /* Transposition table (non-root only). */
     if (ply) {
         if (tt_probe(p, ply, &tt)) {
-            if (tt.move && CO(p->board[mfrom(tt.move)]) == (p->side ? 8 : 0))
-                ttm = tt.move;
+            /* A full-key hit means the same position, so the stored move is
+               pseudo-legal here; the move loop's own-piece test below still
+               rejects a wrongly-owned move from a collided entry. */
+            ttm = tt.move;
             if (node_type != NODE_PV && tt.depth >= depth && tt.score >= best &&
                 rep_prev_path[rep_n - 1] == -1) {
                 if (tt.flag == TT_EXACT) { rep_n--; return tt.score; }
@@ -599,10 +655,10 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
             if (stop_now) break;                 /* abort: stop trying moves at this node */
             pc = p->board[mfrom(m)];                 /* moving piece, before the make */
             if (!pc || CO(pc) != (p->side ? 8 : 0)) continue;  /* not our piece: skip
-                                                                  (guards a bogus TT move) */
+                                                                  (the TT move's only validity test) */
             if (!first && depth <= PVS_SEE_DEPTH &&
                 !in_check && node_type != NODE_PV && best > -MATE + MAXPLY &&
-                alpha > -MATE + MAXPLY && beta < MATE - MAXPLY &&
+                beta < MATE - MAXPLY &&
                 mfl(m) == 0 && TY(pc) != 6) {
 #ifdef SEE_TEST
                 ++st_pvs_tries;
@@ -750,7 +806,7 @@ void search_root(Pos *p, i16 maxdepth) {
             asp_hi = prev + delta;
         }
         nodes_search = 0;
-        t0 = clock();
+        t0 = engine_clock();
         rep_reset();
         for (;;) {
             bsc = alphabeta(p, d, asp_lo, asp_hi, 0, g_half, NODE_PV);
@@ -769,7 +825,7 @@ void search_root(Pos *p, i16 maxdepth) {
         }
         prev = bestscore = bsc;
         bf = mfrom(bm); bt = mto(bm);
-        t1 = clock();
+        t1 = engine_clock();
         secs = (double)(t1 - t0) / (double)CLOCKS_PER_SEC;
         printf("depth %2d  score %5d  move %02X%02X  %8ld nodes  %7.2fs\n",
                d, bestscore, bf, bt, (long)nodes_search, secs);
@@ -804,10 +860,13 @@ static void print_move(u16 m) {
 
 /* iterative deepening root search; returns best move (0 if aborted before any depth) */
 u16 think(Pos *p, i16 maxdepth) {
-    i16 d, i, completed_depth = 0;
+    i16 d, i;
+#ifdef DBG_LOG
+    i16 completed_depth = 0;        /* read only by the protocol log */
+#endif
     u16 bestm = 0;
     Score prev = -INF;
-    clock_t t0 = vtime_mode ? 0 : clock();
+    clock_t t0 = vtime_mode ? 0 : engine_clock();
 #ifdef TIME_TEST
     time_test_depth = 0;
 #endif
@@ -819,7 +878,6 @@ u16 think(Pos *p, i16 maxdepth) {
         Score asp_lo = -INF, asp_hi = INF, bsc = -INF;
         u16 bm = 0;
         i16 delta = ASP_DELTA;
-        pv_len[0] = 0;
         if (vtime_mode) {
             if (vclock_budget_hit()) break;
         } else if (deadline > 0 && search_clock() >= deadline) break;
@@ -849,7 +907,9 @@ u16 think(Pos *p, i16 maxdepth) {
         if (stop_now) break;
         prev = bsc;
         bestm = bm;
+#ifdef DBG_LOG
         completed_depth = d;
+#endif
 #ifdef TIME_TEST
         time_test_depth = d;
 #endif
@@ -860,7 +920,7 @@ u16 think(Pos *p, i16 maxdepth) {
             /* Virtual elapsed time includes earlier depths and aspiration
                retries, so report their cumulative nodes and modeled NPS too. */
             i32 cs = vtime_mode ? vclock_elapsed_ms() / 10
-                               : (i32)((clock() - t0) / (CLOCKS_PER_SEC / 100));
+                               : (i32)((engine_clock() - t0) / (CLOCKS_PER_SEC / 100));
             i32 reported_nodes = vtime_mode ? vtotal_nodes : nodes_search;
             i32 nps = (cs > 0) ? (reported_nodes / cs * 100 + (reported_nodes % cs) * 100 / cs) : 0;
             printf("%d %ld %ld %ld %d %ld 0\t", d, (long)score_to_cecp(bsc), (long)cs,
@@ -927,6 +987,7 @@ int bench(int depth) {
     double bsecs;
 #if defined(TIMING_DETAIL) && defined(__WATCOMC__)
     u32 bios0, bios1;
+    u32 cnt0, cnt1;
 #endif
 #endif
 
@@ -934,16 +995,16 @@ int bench(int depth) {
     if (depth > 20) depth = 20;
     search_set_limits(0, 0);                     /* keep the search timing-independent */
     stop_now = 0;
-    /* zero the per-move vclock state too (always present, not just under
-       VCLOCK): a stale vmax_nodes from a prior virtual-time game in the same
-       process would otherwise trip stop_now mid-bench and break determinism. */
+    /* Reset the weighted counters so bench's reported NPS covers only this
+       run. Without VCLOCK this clears vtotal_nodes and nothing else. */
     vclock_reset();
 
 #ifndef VCLOCK
 #if defined(TIMING_DETAIL) && defined(__WATCOMC__)
     bios0 = timing_bios_ticks();
+    cnt0 = timing_counts();
 #endif
-    b0 = clock();
+    b0 = engine_clock();
 #endif
     MAME_MARK(0x30);
     for (i = 0; i < BENCH_N; i++) {
@@ -962,7 +1023,7 @@ int bench(int depth) {
         for (k = 0; k < root_n; k++) root_score[k] = 0;
         if (nnue_ensure_default()) { nnue_reset(&p); nnue_active = 1; }
 
-        t0 = clock();
+        t0 = engine_clock();
         for (d = 1; d <= depth; d++) {
             Score asp_lo = -INF, asp_hi = INF, bsc = -INF;
             u16 bm = 0;
@@ -994,25 +1055,28 @@ int bench(int depth) {
             if (d == depth) { bestscore = bsc; bf = mfrom(bm); bt = mto(bm); }
         }
         nnue_active = 0;
-        t1 = clock();
+        t1 = engine_clock();
         secs = (double)(t1 - t0) / (double)CLOCKS_PER_SEC;
         total_nodes += pos_nodes;
         printf("position %2d/%d  depth %2d  score %5d  move %02X%02X  n=%10ld  t=%7.2fs\n",
                i + 1, BENCH_N, depth, bestscore, bf, bt, (long)pos_nodes, secs);
     }
-#ifndef VCLOCK
     MAME_MARK(0x31);
-    b1 = clock();
+#ifndef VCLOCK
+    b1 = engine_clock();
 #if defined(TIMING_DETAIL) && defined(__WATCOMC__)
     bios1 = timing_bios_ticks();
+    cnt1 = timing_counts();
 #endif
     bsecs = (double)(b1 - b0) / (double)CLOCKS_PER_SEC;
 #ifdef TIMING_DETAIL
-    printf("bench raw_ticks=%ld clock_hz=%ld\n",
+    printf("bench raw_ms=%ld clock_hz=%ld\n",
            (long)(b1 - b0), (long)CLOCKS_PER_SEC);
 #ifdef __WATCOMC__
     printf("bench bios_ticks=%lu bios_hz=18.20648193\n",
            (unsigned long)(bios1 - bios0));
+    printf("bench pit_counts=%lu pit_hz=1193182\n",
+           (unsigned long)(cnt1 - cnt0));
 #endif
 #endif
 #endif
@@ -1069,7 +1133,7 @@ int profile(int depth) {
     c_tt_eval = 0;
     c_see = c_see_step = 0;
 
-    b0 = clock();
+    b0 = engine_clock();
     for (i = 0; i < BENCH_N; i++) {
         Pos p;
         i32 pos_nodes = 0;
@@ -1126,7 +1190,7 @@ int profile(int depth) {
                (long)(c_refresh - s_rf), (long)(c_isattacked - s_at), (long)(c_possig - s_ps),
                (long)(c_tt_probe - s_tp), (long)(c_tt_store - s_ts));
     }
-    b1 = clock();
+    b1 = engine_clock();
     bsecs = (double)(b1 - b0) / (double)CLOCKS_PER_SEC;
 
     printf("profile depth=%d nodes=%ld time=%.2fs nps=%ld\n",
@@ -1175,84 +1239,88 @@ int sbench(void) {
         gen_moves(&pos, list);
 
         iters = 1500;
-        t0 = clock();
+        t0 = engine_clock();
         MAME_MARK(0x10);
         for (i = 0; i < iters; i++) {
             is_attacked(&pos, pos.ks[0], 1);
             is_attacked(&pos, pos.ks[1], 0);
         }
         MAME_MARK(0x11);
-        t1 = clock();
+        t1 = engine_clock();
         att += (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
 
         iters = 300;
-        t0 = clock();
+        t0 = engine_clock();
         MAME_MARK(0x12);
         for (i = 0; i < iters; i++) gen_caps(&pos, list);
         MAME_MARK(0x13);
-        t1 = clock();
+        t1 = engine_clock();
         caps += (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
 
-        t0 = clock();
+        t0 = engine_clock();
         MAME_MARK(0x14);
         for (i = 0; i < iters; i++) gen_quiets(&pos, list);
         MAME_MARK(0x15);
-        t1 = clock();
+        t1 = engine_clock();
         quiets += (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
 
-        t0 = clock();
+        t0 = engine_clock();
         MAME_MARK(0x16);
         for (i = 0; i < iters; i++) {
             mgen_init(&pos, &mg, 0, 0, 0, 0);
             while ((m = next_move(&pos, &mg)) != 0) ;
         }
         MAME_MARK(0x17);
-        t1 = clock();
+        t1 = engine_clock();
         drain += (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
 
         iters = 2000;
-        t0 = clock();
+        t0 = engine_clock();
         MAME_MARK(0x18);
         for (i = 0; i < iters; i++) {
             do_make(&pos, list[0], &u);
             undo_move(&pos, list[0], &u);
         }
         MAME_MARK(0x19);
-        t1 = clock();
+        t1 = engine_clock();
         make10k += (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
 
         iters = 400;
-        t0 = clock();
+        t0 = engine_clock();
         MAME_MARK(0x1a);
         for (i = 0; i < iters; i++) pos_sig(&pos);
         MAME_MARK(0x1b);
-        t1 = clock();
+        t1 = engine_clock();
         sig += (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
 
         /* TT probe (hit path) + store, averaged over the 8 positions */
         iters = 2000;
         tt_clear();
         tt_store(&pos, list[0], 5, 100, TT_EXACT, 0, 100, 1);
-        t0 = clock();
+        t0 = engine_clock();
         MAME_MARK(0x1c);
         for (i = 0; i < iters; i++) tt_probe(&pos, 0, &tt);
         MAME_MARK(0x1d);
-        t1 = clock();
+        t1 = engine_clock();
         ttpr += (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
-        t0 = clock();
+        t0 = engine_clock();
         MAME_MARK(0x1e);
         for (i = 0; i < iters; i++) tt_store(&pos, list[0], 5, 100, TT_EXACT, 0, 100, 1);
         MAME_MARK(0x1f);
-        t1 = clock();
+        t1 = engine_clock();
         ttst += (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
     }
 
     printf("sbench att=%ld caps=%ld quiets=%ld drain=%ld make10k=%ld sig=%ld "
            "ttprobe=%ld ttstore=%ld\n",
-           (long)(att * 1000 / (1500 * 2 * BENCH_N)), (long)(caps * 1000 / (300 * BENCH_N)),
-           (long)(quiets * 1000 / (300 * BENCH_N)), (long)(drain * 1000 / (300 * BENCH_N)),
-           (long)(make10k * 1000 / (2000 * BENCH_N)), (long)(sig * 1000 / (400 * BENCH_N)),
-           (long)(ttpr * 1000 / (2000 * BENCH_N)), (long)(ttst * 1000 / (2000 * BENCH_N)));
+           (long)(att * 1000L / (1500L * 2 * BENCH_N)),
+           (long)(caps * 1000L / (300L * BENCH_N)),
+           (long)(quiets * 1000L / (300L * BENCH_N)),
+           (long)(drain * 1000L / (300L * BENCH_N)),
+           (long)(make10k * 1000L / (2000L * BENCH_N)),
+           (long)(sig * 1000L / (400L * BENCH_N)),
+           (long)(ttpr * 1000L / (2000L * BENCH_N)),
+           (long)(ttst * 1000L / (2000L * BENCH_N)));
 #ifdef TIMING_DETAIL
     printf("sbench raw_ms att=%ld caps=%ld quiets=%ld drain=%ld make=%ld sig=%ld "
            "ttprobe=%ld ttstore=%ld\n",
@@ -1261,17 +1329,6 @@ int sbench(void) {
 #endif
     return 0;
 }
-
-#if defined(TIMING_DETAIL) && defined(__WATCOMC__)
-/* Keep this calibration-only helper after every hot search routine so enabling
-   TIMING_DETAIL does not shift their code addresses/alignment on the 8086. */
-static u32 timing_bios_ticks(void) {
-    union REGS in, out;
-    in.h.ah = 0;
-    int86(0x1a, &in, &out);
-    return ((u32)out.x.cx << 16) | out.x.dx;
-}
-#endif
 
 
 #ifdef REP_TEST

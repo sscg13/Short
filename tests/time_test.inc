@@ -1,7 +1,8 @@
-/* Diagnostic-only tests: controlled real clock and both virtual models. */
+/* Diagnostic-only tests: controlled real clock and, in VCLOCK builds, the
+   weighted virtual model. */
 static clock_t time_test_clock(void) {
     ++time_test_clock_calls;
-    return time_test_fake_clock ? (clock_t)vtotal_nodes : clock();
+    return time_test_fake_clock ? (clock_t)vtotal_nodes : engine_clock();
 }
 
 static i16 tm_failures, tm_checks;
@@ -23,8 +24,8 @@ static void tm_prepare(Pos *p, const char *fen) {
 }
 
 int time_selftest(void) {
-    i32 soft, hard, first_nodes, first_ms, second_ms;
-    i16 i, model, save_nnue = nnue_enabled;
+    i32 soft, hard, first_nodes;
+    i16 i, save_nnue = nnue_enabled;
     u16 first, full, m;
     Pos p, original;
     tm_checks = tm_failures = 0;
@@ -125,39 +126,45 @@ int time_selftest(void) {
                  "soft target preserves full depth and aspiration retries");
     }
 
-    for (model = VCPU_80286; model <= VCPU_80186; ++model) {
-        vcpu_model = model;
-        vcpu_khz = 25000;
-        vtime_mode = 1;
-        tm_prepare(&p, bench_fens[1]);
-        first = think(&p, 1);
-        first_ms = vclock_charge();
-        tm_prepare(&p, bench_fens[1]);
-        think(&p, 2);
-        second_ms = vclock_charge();
-        tm_check(second_ms > first_ms + 100, "virtual depth 2 costs more than depth 1");
-        tm_prepare(&p, bench_fens[1]);
-        original = p;
-        vclock_set_limits(1, second_ms + 10000);
-        /* Deliberately stale host deadlines must be ignored. */
-        soft_deadline = deadline = 1;
-        m = think(&p, 4);
-        tm_check(m == first && time_test_depth == 1 && !stop_now,
-                 "virtual soft stops only after complete depth");
-        tm_check(time_test_clock_calls == 0, "virtual soft ignores host clock");
-        tm_check(memcmp(&p, &original, sizeof p) == 0 && rep_n == 0,
-                 "virtual soft restores position/history");
-        tm_prepare(&p, bench_fens[1]);
-        original = p;
-        vclock_set_limits(0, first_ms + (second_ms - first_ms) / 2);
-        soft_deadline = deadline = 1;
-        m = think(&p, 4);
-        tm_check(stop_now && time_test_depth == 1 && m == first,
-                 "virtual hard interrupts incomplete depth");
-        tm_check(time_test_clock_calls == 0, "virtual hard ignores host clock");
-        tm_check(memcmp(&p, &original, sizeof p) == 0 && rep_n == 0 && !nnue_active,
-                 "virtual hard restores position/history/NNUE");
+#ifdef VCLOCK
+    {
+        i16 model;
+        i32 first_ms, second_ms;
+        for (model = VCPU_80286; model <= VCPU_80186; ++model) {
+            vcpu_model = model;
+            vcpu_khz = 25000;
+            vtime_mode = 1;
+            tm_prepare(&p, bench_fens[1]);
+            first = think(&p, 1);
+            first_ms = vclock_charge();
+            tm_prepare(&p, bench_fens[1]);
+            think(&p, 2);
+            second_ms = vclock_charge();
+            tm_check(second_ms > first_ms + 100, "virtual depth 2 costs more than depth 1");
+            tm_prepare(&p, bench_fens[1]);
+            original = p;
+            vclock_set_limits(1, second_ms + 10000);
+            /* Deliberately stale host deadlines must be ignored. */
+            soft_deadline = deadline = 1;
+            m = think(&p, 4);
+            tm_check(m == first && time_test_depth == 1 && !stop_now,
+                     "virtual soft stops only after complete depth");
+            tm_check(time_test_clock_calls == 0, "virtual soft ignores host clock");
+            tm_check(memcmp(&p, &original, sizeof p) == 0 && rep_n == 0,
+                     "virtual soft restores position/history");
+            tm_prepare(&p, bench_fens[1]);
+            original = p;
+            vclock_set_limits(0, first_ms + (second_ms - first_ms) / 2);
+            soft_deadline = deadline = 1;
+            m = think(&p, 4);
+            tm_check(stop_now && time_test_depth == 1 && m == first,
+                     "virtual hard interrupts incomplete depth");
+            tm_check(time_test_clock_calls == 0, "virtual hard ignores host clock");
+            tm_check(memcmp(&p, &original, sizeof p) == 0 && rep_n == 0 && !nnue_active,
+                     "virtual hard restores position/history/NNUE");
+        }
     }
+#endif
     nnue_enabled = save_nnue;
     vtime_mode = 0;
     vcpu_model = VCPU_80286;

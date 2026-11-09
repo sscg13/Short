@@ -305,12 +305,12 @@ int see_microbench(void) {
             parse_fen(&p,see_threshold_cases[c].fen);
         }
         vclock_reset();
-        begin = clock();
+        begin = engine_clock();
         for (i = 0; i < 4000; ++i) {
             if (phase < 0) sink ^= 1;
             else sink ^= see_ge(&p,m,threshold);
         }
-        end = clock();
+        end = engine_clock();
         printf("seemicro phase=%d calls=4000 ticks=%ld hz=%ld sink=%d",
                phase,(long)(end-begin),(long)CLOCKS_PER_SEC,sink);
 #if defined(PROFILE) || defined(VCLOCK)
