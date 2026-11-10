@@ -304,6 +304,12 @@ int nnue_selftest(const char *fen);
 #endif
 int nnue_bench(void);
 
+/* Memory budget probe (mem.c): `chess memprobe`.  On the 16-bit target it reads
+   the live DOS memory map; on the host build it predicts the image's free space
+   from chess.map and warns under 10 KB / fails under 4 KB.  Returns 1 on
+   failure. */
+int mem_probe(void);
+
 /* ---- transposition table (tt.c) ----
    One far 64 KB table on the 16-bit target (4096 x 16-byte entries), plain
    array on gcc. Probe/store keyed on the full Pos.sig; see tt.c. */

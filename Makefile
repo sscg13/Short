@@ -55,7 +55,7 @@ TUNE    ?= 1
 ifeq ($(TUNE),1)
 override CFLAGS += -DTUNE
 endif
-SRCS    := chess.c search.c xboard.c nnue.c vclock.c timing.c tt.c
+SRCS    := chess.c search.c xboard.c nnue.c vclock.c timing.c tt.c mem.c
 HDRS    := engine.h tune.h repetition.inc tests/repetition_test.inc tests/see_test.inc tests/time_test.inc tests/search_state_test.inc tests/perft_test.inc
 OBJS    := $(SRCS:.c=.o)
 
@@ -75,7 +75,7 @@ all: $(TARGET)
 
 # Build a profiling binary (`chess profile [depth]`) with the call counters on.
 # Uses its own *_prof.o objects so the normal build's objects stay flag-free.
-PROF_OBJS := chess_prof.o search_prof.o xboard_prof.o nnue_prof.o vclock_prof.o timing_prof.o tt_prof.o
+PROF_OBJS := chess_prof.o search_prof.o xboard_prof.o nnue_prof.o vclock_prof.o timing_prof.o tt_prof.o mem_prof.o
 profile: chess_prof.exe
 
 chess_prof.exe: $(PROF_OBJS)
@@ -94,6 +94,8 @@ vclock_prof.o: vclock.c $(HDRS)
 timing_prof.o: timing.c $(HDRS)
 	$(CC) $(CFLAGS) -DPROFILE -c -o $@ $<
 tt_prof.o: tt.c $(HDRS)
+	$(CC) $(CFLAGS) -DPROFILE -c -o $@ $<
+mem_prof.o: mem.c $(HDRS)
 	$(CC) $(CFLAGS) -DPROFILE -c -o $@ $<
 
 # When EXE names the checks binary, the $(CHECKS) rule below already supplies a
@@ -122,6 +124,7 @@ test: all $(CHECKS)
 	./$(CHECKS) perft 4 0
 	./$(CHECKS) perft 4 1
 	./$(CHECKS) nn
+	./$(TARGET) memprobe
 ifeq ($(VCLOCK),1)
 	./$(TARGET) calcheck
 else

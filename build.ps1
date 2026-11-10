@@ -53,7 +53,7 @@ $modelFlag = switch ($Model) {
     default  { "-ml" }
 }
 
-$sources = @("chess.c", "search.c", "xboard.c", "nnue.c", "vclock.c", "timing.c", "tt.c")
+$sources = @("chess.c", "search.c", "xboard.c", "nnue.c", "vclock.c", "timing.c", "tt.c", "mem.c")
 if ($AtkDiff) { $sources += "attack_ref.c" }
 if ($GenCapsDiff) { $sources += "gen_ref.c" }
 $objs = @()
@@ -110,12 +110,43 @@ if (-not $NoAsmPlan) {
     $objs += "nnue_plan.obj"
 }
 
+# live DOS memory map for `chess memprobe` (see memprobe.asm and mem.c)
+& "$ow\binnt\wasm.exe" "memprobe.asm"
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$objs += "memprobe.obj"
+
 $linkArgs = @("system", "dos", "name", "chess.exe")
 foreach ($o in $objs) { $linkArgs += "file"; $linkArgs += $o }
 # Search can reach MAXPLY=32; its recursive frames and helper calls exceed
 # the linker's 2 KB default. Reserve 8 KB, including saved Undo signatures.
 & "$ow\binnt\wlink.exe" @linkArgs option stack=8192 option map
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# Memory gate. The linked image is only part of what the 512 KB atami image has
+# to hold: DOS, the BIOS data area, the environment, the PSP and the runtime heap
+# are resident too (MEMORY.md, "Measured headroom"). Report the free space the
+# image would leave and warn under 10 KB / fail under 4 KB here, where the map is
+# fresh, instead of discovering it in the VM. Keep in step with mem.c.
+$memAvail = 382112 - 1840 - 15040     # atami block - exe header - PSP/env/heap
+$memWarn  = 10240
+$memFail  = 4096
+$memLine = Select-String -Path chess.map -Pattern 'Memory size:.*\((\d+)\.\)'
+if ($memLine) {
+    $memImage = [int]$memLine.Matches[0].Groups[1].Value
+    $memFree = $memAvail - $memImage
+    $memState = if ($memFree -lt $memFail) { "FAIL" } elseif ($memFree -lt $memWarn) { "WARN" } else { "ok" }
+    Write-Host ("memprobe image={0:N0}B avail={1:N0}B free={2:N0}B (warn<{3:N0} fail<{4:N0}) {5}" -f `
+        $memImage, $memAvail, $memFree, $memWarn, $memFail, $memState)
+    if ($memFree -lt $memFail) {
+        Write-Host ("memprobe: FAIL - the 512 KB atami image has only {0:N0}B free, under the {1:N0}B floor; re-measure with ``chess memprobe`` in the VM (MEMORY.md)" -f $memFree, $memFail)
+        exit 1
+    }
+    if ($memFree -lt $memWarn) {
+        Write-Host ("memprobe: WARNING - only {0:N0}B free on the 512 KB atami image (under {1:N0}B)" -f $memFree, $memWarn)
+    }
+} else {
+    Write-Host "memprobe: chess.map has no Memory size line; image budget not checked"
+}
 
 if (-not $NoNNUE) {
     # DOS loads the official net through its 8.3 filename.

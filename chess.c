@@ -1458,6 +1458,9 @@ int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "atkdiff") == 0)
         return attack_selftest();
 #endif
+    if (argc > 1 && strcmp(argv[1], "memprobe") == 0)
+        return mem_probe();
+
     if (argc > 1 && strcmp(argv[1], "nbench") == 0)
         return nnue_bench();
 
