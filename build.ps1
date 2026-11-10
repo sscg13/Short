@@ -8,6 +8,14 @@ param(
     [switch]$NoAsmAttack,  # -NoAsmAttack: compile the C is_attacked instead of
                            # attack_opt.asm (kept to reproduce pre-adoption numbers)
     [switch]$NoAsmGenCaps, # -NoAsmGenCaps: compile the C gen_caps instead of gen_opt.asm
+    [switch]$NoAsmRowAdd,  # -NoAsmRowAdd: compile the C nn_compute_persp row loop
+                           # instead of nnue_opt.asm's nn_row_add (reproduction)
+    [switch]$NoAsmCompute, # -NoAsmCompute: compile the whole C nn_compute_persp
+                           # rebuild instead of the asm walk (reproduction)
+    [switch]$NoAsmPlan,    # -NoAsmPlan: compile the C nn_plan_c row planning
+                           # instead of nnue_plan.asm (reproduction)
+    [switch]$PlanDiff,     # -PlanDiff: run both planners and report mismatches
+                           # (debug only; the C plan is what gets used)
     [switch]$AtkDiff,      # -AtkDiff: also link the C reference and `chess atkdiff`
                            # (test scaffolding only)
     [switch]$GenCapsDiff,   # -GenCapsDiff: also link the C reference and `chess gencaps`
@@ -64,6 +72,10 @@ foreach ($s in $sources) {
     if ($AtkDiff) { $flags += "-DATK_DIFF" }
     if ($asmGenCaps) { $flags += "-DASM_GENCAPS" }
     if ($GenCapsDiff) { $flags += "-DGENCAPS_DIFF" }
+    if ($NoAsmRowAdd) { $flags += "-DNNUE_DISABLE_ASM_ROWADD" }
+    if ($NoAsmCompute) { $flags += "-DNNUE_DISABLE_ASM_COMPUTE" }
+    if ($NoAsmPlan) { $flags += "-DNNUE_DISABLE_ASM_PLAN" }
+    if ($PlanDiff) { $flags += "-DNN_PLAN_DIFF" }
     if ($PerftTest) { $flags += "-DPERFT_TEST" }
     if ($NNTest)   { $flags += "-DNN_TEST" }
     if ($DebugLog) { $flags += "-DDBG_LOG" }
@@ -89,6 +101,13 @@ if ($asmGenCaps) {
     & "$ow\binnt\wasm.exe" "gen_opt.asm"
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $objs += "gen_opt.obj"
+}
+
+if (-not $NoAsmPlan) {
+    # hand-written feature-row planning for nnue_make (see nnue_plan.asm)
+    & "$ow\binnt\wasm.exe" "nnue_plan.asm"
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $objs += "nnue_plan.obj"
 }
 
 $linkArgs = @("system", "dos", "name", "chess.exe")

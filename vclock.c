@@ -155,13 +155,52 @@ typedef struct { i32 att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm, tp, ts; } VW;
    this table. See artifacts/vclock-fit-2026-11-09/REPORT.md.
    Any edit to these tables or to see_cost/rep_cost/ord_cost must be followed by
    `chess calcheck` (part of `make test`), which compares this model against the
-   dated references below; TESTING.md section 7 has the re-measurement recipe. */
+   dated references below; TESTING.md section 7 has the re-measurement recipe.
+
+   RE-MEASURED 2026-11-10 after the NNUE flip rebuild moved into asm
+   (`nn_row_add_`, one weight row into an accumulator): the same depth-4 search
+   totals were taken again on the new binary and rn/rm were refit to them, so
+   the model tracks the faster engine rather than the old one:
+     80286 21,257 -> 20,649 (86Box atami, -2.9%)
+     8088  67,787 -> 65,668 (86Box xt,    -3.1%)
+     8086  57,945 -> 56,134 (derived from the 8088 by the same ratio)
+     80186 33,157 -> 32,682 (Nimbus markers, -1.4%)
+   rn absorbed the saving on every CPU (80286 2,293 -> 1,685, 8088 5,948 ->
+   3,829, 8086 4,214 -> 2,403, 80186 2,931 -> 2,456). rm is unchanged: the
+   mirror-flip rebuild only exists with NNUE on. The 80186 delta is smaller
+   than the other CPUs' because the flip body is memory-bound there; measured
+   in situ it fell 107,179 -> 62,312 cycles per rebuild (-42%).
+
+   The same day the whole rebuild (bias copy + 0x88 walk) moved into that asm
+   routine too (`nn_compute_persp_slot_`), so the totals moved again and rn was
+   refit a second time:
+     80286 20,649 -> 20,516 (86Box atami, -0.6%)
+     8088  65,668 -> 65,229 (86Box xt,    -0.7%)
+     8086  56,134 -> 55,758 (derived)
+     80186 32,682 -> 32,492 (Nimbus markers, -0.6%)
+   rn 1,685 -> 1,552 (80286), 3,829 -> 3,390 (8088), 2,403 -> 2,027 (8086),
+   2,456 -> 2,266 (80186). A flip rebuild is now 52,882 cycles (from 107,179)
+   and the walk, bias copy and per-row call overhead that used to cost 14k of
+   that are gone.
+
+   RE-MEASURED 2026-11-10 again for the make path's feature-row planning
+   (nnue_make's plan recording moved into hand-written asm, `nnue_plan.asm`):
+     80286 20,516 -> 19,659 (86Box atami, -4.2% guest time)
+     8088  65,229 -> 62,876 (86Box xt,    -3.6%)
+     8086  55,758 -> 53,747 (derived from the 8088 by the same ratio)
+     80186 32,492 -> 31,271 (Nimbus markers, -3.8%)
+   This saving lands on `nm`, which is exactly the row that prices per-make
+   planning (nm is charged per nn_make + nn_undo call, 121,816 times per
+   bench 4): nm 853 -> 520 (80286), 2,813 -> 1,897 (8088), 2,419 -> 1,636
+   (8086), 1,382 -> 907 (80186), i.e. the measured total change divided by the
+   call count. rn/rm are untouched: they are the per-node residual, and the
+   part of the plan cost they carry is unchanged in kind. */
 static const VW vw_tab[4] = {
     /* att ps gc gq gm mk nm rf ev rn rm tp ts: cycles per counted operation */
-    {    656,      0,   4614,  12366, 135646,    950,    853,   2662,   5109,   2293,   2120,    652,    652 }, /* 80286 */
-    {   1970,      0,  12093,  37502, 465065,   3123,   2813,   8696,  15596,   5948,   4360,   2246,   2389 }, /* 8088 */
-    {   1693,      0,  10353,  32474, 413168,   2734,   2419,   7999,  13072,   4214,   3099,   1915,   2011 }, /* 8086 */
-    {   1003,    131,   6170,  18639, 215267,   1507,   1382,   4669,   7540,   2931,   2827,   1181,   1228 }, /* 80186 */
+    {    656,      0,   4614,  12366, 135646,    950,    520,   2662,   5109,   1552,   2120,    652,    652 }, /* 80286 */
+    {   1970,      0,  12093,  37502, 465065,   3123,   1897,   8696,  15596,   3390,   4360,   2246,   2389 }, /* 8088 */
+    {   1693,      0,  10353,  32474, 413168,   2734,   1636,   7999,  13072,   2027,   3099,   1915,   2011 }, /* 8086 */
+    {   1003,    131,   6170,  18639, 215267,   1507,    907,   4669,   7540,   2266,   2827,   1181,   1228 }, /* 80186 */
 };
 /* att and gc were refitted 2026-11-04 when the hand-written is_attacked and
    gen_caps became the default. Both rows are scaled by the measured asm/C ratio
@@ -318,19 +357,21 @@ i32 vclock_est_nps(i32 nodes) {
    the `bench 4` tree, i.e. sum over d = 1..4 of all 12 positions:
 
      build.ps1 [-MameMarkers] release, 86Box / MAME Nimbus, see
-     artifacts/vclock-fit-2026-11-09/REPORT.md
-       80286 @6 MHz  21,257 cyc/node   8088 @16 MHz  67,787
-       8086  @8 MHz  57,945 (derived)  80186 @8 MHz  33,157
+     artifacts/vclock-fit-2026-11-09/REPORT.md, re-measured 2026-11-10 after the
+     NNUE flip-rebuild asm (artifacts/nnue-rowadd-2026-11-10/REPORT.md) and again
+     after the asm make-path planning (artifacts/nnue-plan-2026-11-10/REPORT.md)
+       80286 @6 MHz  19,659 cyc/node   8088 @16 MHz  62,876
+       8086  @8 MHz  53,747 (derived)  80186 @8 MHz  31,271
 
    If the tree changes (bench node total differs) the reference no longer
    applies: re-measure it, do not "fix" the model to match a stale tree. */
 #define VCLOCK_CAL_NODES   47400
 #define VCLOCK_CAL_TOL_PCT 3
 static const i32 vclock_cal_cyc[4] = {
-    21257,  /* 80286 */
-    67787,  /* 8088 */
-    57945,  /* 8086 */
-    33157,  /* 80186 */
+    19659,  /* 80286 */
+    62876,  /* 8088 */
+    53747,  /* 8086 (derived: 8088 x 57,945/67,787) */
+    31271,  /* 80186 */
 };
 static const char *const vclock_cpu_name[4] = {
     "80286", "8088", "8086", "80186"

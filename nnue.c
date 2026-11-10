@@ -60,6 +60,7 @@ i8 _far nn_w1[NNUE_W1_SIZE];
 i8 nn_w1[NNUE_W1_SIZE];
 #endif
 i8 nn_b1[NNUE_N];   /* layer-1 bias (per hidden neuron, shared by both POVs) */
+i16 nn_b1w[NNUE_N]; /* sign-extended copy, refilled by nnue_reset (asm rebuild) */
 i8 nn_w2[NNUE_W2_SIZE];
 /* v7 appends one shared curve; v8 appends 64 neuron-major curves, each
    containing 256 little-endian signed i32 entries, to the v5 layout.
@@ -108,7 +109,7 @@ i16 nn_acc[MAXPLY + 1][2][NNUE_N];  /* ply-indexed pre-activation stack:
    Mirror flips have no pending operation: their accumulator is already valid.
    33*2*8-byte plans plus 33 validity bytes = 561 bytes before alignment. */
 typedef struct { i16 kind, a, b, c; } NNPlan;
-static NNPlan nn_plan[MAXPLY + 1][2];
+NNPlan nn_plan[MAXPLY + 1][2];
 static u8 nn_valid[MAXPLY + 1];
 i16 nn_ply = 0;          /* current ply: index of the active accumulator slot,
                             kept in sync with the board's make/undo depth */
@@ -138,6 +139,32 @@ Score nn_fwd_eval(i16 side);          /* generated asm forward via product table
 #pragma aux nn_fwd_eval modify [ax cx dx es]
 #ifndef NNUE_DISABLE_ASM_FWD
 #define NNUE_ASM_FWD 1
+#endif
+/* One weight row into an accumulator: out[j] += w1[row*64+j], 64 lanes.
+   The only asm body reached by the mirror-flip rebuild in nn_compute_persp;
+   the C loop stays as the oracle (build with -DNNUE_DISABLE_ASM_ROWADD). */
+void nn_row_add(i16 *out, u16 w1_off);
+#ifndef NNUE_DISABLE_ASM_ROWADD
+#define NNUE_ASM_ROWADD 1
+#endif
+
+/* The whole mirror-flip rebuild: bias copy + 0x88 board walk + inlined
+   row-adds into nn_acc[slot][persp]. pm = persp | (mirror << 1).
+   The C body stays as the oracle (build.ps1 -NoAsmCompute). */
+void nn_compute_persp_slot(Pos *p, i16 pm, i16 slot);
+#ifndef NNUE_DISABLE_ASM_COMPUTE
+#define NNUE_ASM_COMPUTE 1
+#endif
+
+/* The make path's feature-row planning: fills nn_plan[nn_ply+1][0..1] and
+   returns the mirror-flip mask (bit p = rebuild perspective p). Reads the
+   board through SS and nn_rowtab/nn_cidxw through DS, which this binary keeps
+   equal to DGROUP (see nnue_plan.asm). cap is u->cap, passed separately so the
+   routine never reads a far pointer.
+   The C body stays as the oracle (build.ps1 -NoAsmPlan). */
+i16 nn_plan_slot(Pos *p, u16 m, i16 cap);
+#ifndef NNUE_DISABLE_ASM_PLAN
+#define NNUE_ASM_PLAN 1
 #endif
 #endif
 
@@ -186,14 +213,34 @@ static i16 nn_row_dispatch(i16 pc, i16 c) {
    once from nn_row_dispatch; replaces the branchy per-call dispatch (nn_row is
    called once per feature apply, 114,921x in profile-1). 15x64 i16 = 1.9 KB
    near data (DGROUP has ~10 KB headroom). */
-static i16 nn_rowtab[15][64];
+i16 nn_rowtab[15][64];          /* read directly by the asm rebuild */
 static i16 nn_rowtab_ready;
 
+/* Same lookup, inlined for the make path (nn_row is 5-6 rows of -0 code plus a
+   call for what is two table reads). pm = perspective | (mirror << 1), so the
+   mirror is always folded into one xor and the 180 colour swap into the piece
+   xor: c ^= {0, 63, 7, 56}. Kept as a macro because Watcom -0 never inlines. */
+static const u8 nn_cm[4] = { 0, 63, 7, 56 };
+#define NN_ROW(pm, pc, sq88) \
+    (nn_rowtab[(i16)((pc) ^ (((pm) & 1) << 3))] \
+               [(i16)(((((sq88) >> 1) & 56) | ((sq88) & 7)) ^ nn_cm[(pm) & 3])])
+
+/* Pre-folded compact index for the asm plan builder: nn_cidxw[pm][sq88] is
+   ((compact(sq88) ^ nn_cm[pm]) * 2), i.e. exactly the word index into a
+   64-wide row of nn_rowtab, so a row lookup is one table read plus the
+   piece offset. 4*128 i16 = 1 KB near data, built once with the row table. */
+i16 nn_cidxw[4][128];
+
 static void nn_rowtab_build(void) {
-    i16 pc, c;
+    i16 pc, c, pm, sq;
     for (pc = 1; pc < 15; pc++)
         for (c = 0; c < 64; c++)
             nn_rowtab[pc][c] = nn_row_dispatch(pc, c);
+    for (pm = 0; pm < 4; pm++)
+        for (sq = 0; sq < 128; sq++) {
+            i16 k = ((sq >> 1) & 56) | (sq & 7);
+            nn_cidxw[pm][sq] = (i16)((k ^ nn_cm[pm]) * 2);
+        }
     nn_rowtab_ready = 1;
 }
 
@@ -264,18 +311,22 @@ static void nn_batch_cap(i16 persp, i16 to_row, i16 from_row, i16 cap_row) {
 /* compute one perspective's accumulator from scratch (init with the layer-1 bias) */
 static void nn_compute_persp(Pos *p, i16 persp, i16 *out) {
     i16 m[2], sq, k;
+    u16 base;
     nn_mirrors(p, m);
     for (k = 0; k < NNUE_N; k++) out[k] = nn_b1[k];
     for (sq = 0; sq < 128; sq += ((sq & 7) == 7) ? 9 : 1) {
         i16 pc = p->board[sq];
         i16 row;
-        u16 base;
         if (!pc) continue;
         row = nn_row(persp, pc, sq, m[persp]);
         if (row < 0) continue;
+#ifdef NNUE_ASM_ROWADD
+        nn_row_add(out, (u16)row << 6);
+#else
         base = (u16)row << 6;
         for (k = 0; k < NNUE_N; k++)
             out[k] += (i16)nn_w1[base + k];
+#endif
     }
 }
 
@@ -286,6 +337,8 @@ static void nn_compute(Pos *p, i16 out[2][NNUE_N]) {
 }
 
 void nnue_reset(Pos *p) {
+    i16 k;
+    for (k = 0; k < NNUE_N; k++) nn_b1w[k] = nn_b1[k];  /* asm bias copy */
     nn_compute(p, nn_acc[0]);       /* full recompute into slot 0 */
     nn_ply = 0;
     nn_valid[0] = 3;
@@ -378,65 +431,121 @@ static void nn_materialize(i16 persp) {
     nn_ply = target;
 }
 
-void nnue_make(Pos *p, u16 m, Undo *u) {
+/* Record the child slot's row operations (the C oracle for nnue_plan.asm).
+   Returns the flip mask: bit p means perspective p must be rebuilt from
+   scratch. Only a king move can change a mirror flag, and a promotion arrives
+   here as a pawn, so the promo replacement below cannot mask a king. */
+static i16 nn_plan_c(Pos *p, u16 m, Undo *u) {
     i16 from = mfrom(m), to = mto(m), fl = mfl(m);
     i16 mover_col = p->side ^ 1;          /* side that just moved */
     i16 mover = p->board[to];             /* mover or promo piece at 'to' */
     i16 newp = mover;
-    i16 persp, mpost[2], mpre[2], flip[2];
+    i16 pm[2], persp, flip = 0, cap_pc = 0, cap_sq = to;
+    NNPlan *d = &nn_plan[nn_ply + 1][0];
 
-    PCOUNT(c_nn_make);
-    nn_valid[nn_ply + 1] = 0;
     if (ispromo(m)) mover = (mover_col == 0) ? WP : BP;   /* it was a pawn */
 
-    /* Record the child's row operations without materializing its parent.
-       Only king mirror flips recompute immediately, while p is this child.
-       Clearing its valid bits prevents reuse of an older sibling's contents. */
-    nn_mirrors(p, mpost);
-    mpre[0] = (mover == WK) ? ((from & 4) != 0) : mpost[0];
-    mpre[1] = (mover == BK) ? ((from & 4) == 0) : mpost[1];
-    for (persp = 0; persp < 2; persp++)
-        flip[persp] = (mpre[persp] != mpost[persp]) ? 1 : 0;
-
-    for (persp = 0; persp < 2; persp++) {
-        if (flip[persp]) {
-            PCOUNT(c_flip);
+    /* pm = the per-perspective index mask: bit0 = perspective, bit1 = mirror
+       (nn_cm folds the 180 colour swap of the black POV with the file mirror). */
+    pm[0] = (p->ks[0] & 4) ? 2 : 0;       /* white POV: mirror = king on e-h */
+    pm[1] = (p->ks[1] & 4) ? 1 : 3;       /* black POV: R180, so inverted */
+    /* The parent flag is read from the king's FROM square (mirror = file >= e,
+       and for the black POV that flips: mirror = file < e). */
+    if (mover == WK) {
+        if ((pm[0] >> 1) != ((from & 4) ? 1 : 0)) flip = 1;
+    } else if (mover == BK) {
+        if ((pm[1] >> 1) != ((from & 4) ? 0 : 1)) flip = 2;
+    }
+    /* Capture target hoisted out of the perspective loop: EP's victim square
+       and pawn colour depend on the mover only, not on the perspective. */
+    if (fl == MF_EP) {
+        cap_pc = (mover_col == 0) ? BP : WP;
+        cap_sq = (mover_col == 0) ? to - 16 : to + 16;
+    } else if (u->cap != EMPTY) {
+        cap_pc = u->cap;
+    }
+    for (persp = 0; persp < 2; persp++, d++) {
+        i16 pmp = pm[persp];
+        if (flip & (persp + 1)) {
+            /* accumulator is rebuilt from scratch below */
         } else if (fl == MF_CASTLE) {
             /* castle with no mirror change: precomputed delta.
                kingside: both perspectives (own case 0, other case 1).
                queenside: only the other (nstm) perspective reaches here (the
                castling side's own perspective flipped and recomputes below). */
-            i16 case_idx;
-            NNPlan *d = &nn_plan[nn_ply + 1][persp];
+            d->kind = 3; d->b = mover_col; d->c = pmp >> 1;
             if (to == 0x06 || to == 0x76)      /* kingside */
-                case_idx = (persp == mover_col) ? 0 : 1;
+                d->a = (persp == mover_col) ? 0 : 1;
             else                                 /* queenside */
-                case_idx = 2;
-            d->kind = 3; d->a = case_idx; d->b = mover_col; d->c = mpost[persp];
+                d->a = 2;
         } else {
-            i16 to_row, from_row, cap_row = -1;
-            to_row   = nn_row(persp, newp, to, mpost[persp]);
-            from_row = nn_row(persp, mover, from, mpost[persp]);
-            if (fl == MF_EP) {
-                i16 esq = (mover_col == 0) ? to - 16 : to + 16;
-                i16 ep = (mover_col == 0) ? BP : WP;
-                cap_row = nn_row(persp, ep, esq, mpost[persp]);
-            } else if (u->cap != EMPTY) {
-                cap_row = nn_row(persp, u->cap, to, mpost[persp]);
-            }
-            {
-                NNPlan *d = &nn_plan[nn_ply + 1][persp];
-                d->kind = (cap_row >= 0) ? 2 : 1;
-                d->a = to_row; d->b = from_row; d->c = cap_row;
-            }
+            i16 cap_row = cap_pc ? NN_ROW(pmp, cap_pc, cap_sq) : -1;
+            d->kind = (cap_row >= 0) ? 2 : 1;
+            d->a = NN_ROW(pmp, newp, to);
+            d->b = NN_ROW(pmp, mover, from);
+            d->c = cap_row;
         }
     }
-    for (persp = 0; persp < 2; persp++)
-        if (flip[persp]) {
-            nn_compute_persp(p, persp, nn_acc[nn_ply + 1][persp]);
-            nn_valid[nn_ply + 1] |= persp + 1;
+    return flip;
+}
+
+#if defined(NN_PLAN_DIFF)
+i32 nn_plan_fails;   /* asm-vs-C plan mismatches (build.ps1 -PlanDiff) */
+#endif
+
+void nnue_make(Pos *p, u16 m, Undo *u) {
+    i16 slot = nn_ply + 1, flip;
+
+    PCOUNT(c_nn_make);
+    nn_valid[slot] = 0;           /* never reuse an older sibling's contents */
+#ifdef NNUE_ASM_PLAN
+    flip = nn_plan_slot(p, m, u->cap); /* nnue_plan.asm: fills nn_plan[slot] */
+#else
+    flip = nn_plan_c(p, m, u);
+#endif
+#if defined(NN_PLAN_DIFF)
+    {
+        static NNPlan ref[2];
+        i16 ref_flip;
+        memcpy(ref, nn_plan[slot], sizeof ref);
+        ref_flip = nn_plan_c(p, m, u);
+        if (ref_flip != flip || memcmp(ref, nn_plan[slot], sizeof ref) != 0) {
+            nn_plan_fails++;
+            if (nn_plan_fails <= 4) {
+                printf("plan diff mv=%04x flip asm=%d c=%d\n", (unsigned)m, flip, ref_flip);
+                printf("  asm p0=%d,%d,%d,%d p1=%d,%d,%d,%d\n",
+                       ref[0].kind, ref[0].a, ref[0].b, ref[0].c,
+                       ref[1].kind, ref[1].a, ref[1].b, ref[1].c);
+                printf("  c   p0=%d,%d,%d,%d p1=%d,%d,%d,%d\n",
+                       nn_plan[slot][0].kind, nn_plan[slot][0].a, nn_plan[slot][0].b,
+                       nn_plan[slot][0].c, nn_plan[slot][1].kind, nn_plan[slot][1].a,
+                       nn_plan[slot][1].b, nn_plan[slot][1].c);
+            }
         }
-    nn_ply++;                     /* child slot is now the active accumulator */
+        nn_plan[slot][0] = ref[0];
+        nn_plan[slot][1] = ref[1];
+        flip = ref_flip;
+    }
+#endif
+    if (flip & 1) {
+        PCOUNT(c_flip);
+#ifdef NNUE_ASM_COMPUTE
+        nn_compute_persp_slot(p, (i16)((p->ks[0] & 4) ? 2 : 0), slot);
+#else
+        nn_compute_persp(p, 0, nn_acc[slot][0]);
+#endif
+        nn_valid[slot] |= 1;
+    }
+    if (flip & 2) {
+        PCOUNT(c_flip);
+#ifdef NNUE_ASM_COMPUTE
+        nn_compute_persp_slot(p, (i16)((p->ks[1] & 4) ? 1 : 3), slot);
+#else
+        nn_compute_persp(p, 1, nn_acc[slot][1]);
+#endif
+        nn_valid[slot] |= 2;
+    }
+    nn_ply = slot;                /* child slot is now the active accumulator */
 }
 
 void nnue_undo(Pos *p) {
@@ -893,6 +1002,48 @@ static i16 nn_chain_check(Pos *p, i16 fresh[2][NNUE_N]) {
     return fails;
 }
 
+/* Make/materialize/undo round-trip for every legal move of *p: the incremental
+   accumulator must equal a fresh recompute, and undo must restore the parent
+   slot byte for byte. Returns the failure count (diagnostics print once). */
+static i16 nn_roundtrip(Pos *p, i16 before[2][NNUE_N], i16 incr[2][NNUE_N],
+                        i16 fresh[2][NNUE_N]) {
+    u16 *list = movebuf[28];
+    i16 n = gen_moves(p, list), i, fail = 0, rt = 0;
+    for (i = 0; i < n; i++) {
+        Undo u;
+        memcpy(before, nn_acc[nn_ply], sizeof(i16) * 2 * NNUE_N);
+        do_make(p, list[i], &u);
+        nn_materialize(0); nn_materialize(1);
+        memcpy(incr, nn_acc[nn_ply], sizeof(i16) * 2 * NNUE_N);
+        nn_compute(p, fresh);
+        if (memcmp(incr, fresh, sizeof(i16) * 2 * NNUE_N) != 0) {
+            if (!rt) {
+                i16 jj;
+                for (jj = 0; jj < 2 * NNUE_N; jj++)
+                    if (((i16 *)incr)[jj] != ((i16 *)fresh)[jj]) break;
+                printf("nn rt incr-vs-fresh fail move %d (mv=%04x): acc[%d/%d] incr=%d fresh=%d\n",
+                       i, list[i], jj >> 6, jj & 63, ((i16 *)incr)[jj], ((i16 *)fresh)[jj]);
+                rt = 1;
+            }
+            fail++;
+        }
+        undo_move(p, list[i], &u);
+        if (memcmp(before, nn_acc[nn_ply], sizeof(i16) * 2 * NNUE_N) != 0) {
+            if (!rt) {
+                i16 jj;
+                for (jj = 0; jj < 2 * NNUE_N; jj++)
+                    if (((i16 *)before)[jj] != nn_acc[nn_ply][jj >> 6][jj & 63]) break;
+                printf("nn rt undo-fail move %d (mv=%04x): acc[%d/%d] before=%d after=%d\n",
+                       i, list[i], jj >> 6, jj & 63, ((i16 *)before)[jj],
+                       nn_acc[nn_ply][jj >> 6][jj & 63]);
+                rt = 1;
+            }
+            fail++;
+        }
+    }
+    return fail;
+}
+
 int nnue_selftest(const char *fen) {
     /* static: keeps the 16-bit test's ~2 KB of buffers off the search stack */
     static Pos pos, flipped, hm;
@@ -947,38 +1098,23 @@ int nnue_selftest(const char *fen) {
     nnue_reset(&pos);
     n = gen_moves(&pos, list);
     nnue_active = 1;
+    fail += nn_roundtrip(&pos, before, incr, fresh);
     {
-        i16 rt = 0;   /* first-failure diagnostic flag */
-        for (i = 0; i < n; i++) {
-            Undo u;
-            memcpy(before, nn_acc[nn_ply], sizeof before);
-            do_make(&pos, list[i], &u);
-            nn_materialize(0); nn_materialize(1);
-            memcpy(incr, nn_acc[nn_ply], sizeof incr);
-            nn_compute(&pos, fresh);
-            if (memcmp(incr, fresh, sizeof incr) != 0) {
-                if (!rt) {
-                    i16 jj;
-                    for (jj = 0; jj < 2 * NNUE_N; jj++)
-                        if (((i16 *)incr)[jj] != ((i16 *)fresh)[jj]) break;
-                    printf("nn rt incr-vs-fresh fail move %d (mv=%04x): acc[%d/%d] incr=%d fresh=%d\n",
-                           i, list[i], jj >> 6, jj & 63, ((i16 *)incr)[jj], ((i16 *)fresh)[jj]);
-                    rt = 1;
-                }
-                fail++;
-            }
-            undo_move(&pos, list[i], &u);
-            if (memcmp(before, nn_acc[nn_ply], sizeof before) != 0) {
-                if (!rt) {
-                    i16 jj;
-                    for (jj = 0; jj < 2 * NNUE_N; jj++)
-                        if (((i16 *)before)[jj] != nn_acc[nn_ply][jj >> 6][jj & 63]) break;
-                    printf("nn rt undo-fail move %d (mv=%04x): acc[%d/%d] before=%d after=%d\n",
-                           i, list[i], jj >> 6, jj & 63, ((i16 *)before)[jj], nn_acc[nn_ply][jj >> 6][jj & 63]);
-                    rt = 1;
-                }
-                fail++;
-            }
+        /* Every move type the plan/make path can see: castling on both wings,
+           captures, en passant, promotions, and king moves that flip a mirror
+           (kiwipete and friends; small enough for the 16-bit test). */
+        static const char *const fens[] = {
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "rnbqkbnr/ppp1p1pp/8/3pPp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 2",
+            "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
+            "4k3/1P4P1/8/8/8/8/1p4p1/4K3 w - - 0 1",
+            "4k3/8/8/8/8/8/8/4K3 w - - 0 1",
+        };
+        i16 k;
+        for (k = 0; k < (i16)(sizeof fens / sizeof fens[0]); k++) {
+            parse_fen(&pos, fens[k]);
+            nnue_reset(&pos);
+            fail += nn_roundtrip(&pos, before, incr, fresh);
         }
     }
     {
@@ -1028,6 +1164,10 @@ int nnue_selftest(const char *fen) {
     nnue_reset(&pos);
     printf("nn selftest: moves=%d  acc-sym(R180)=%d  acc-sym(H)=%d  roundtrip-fails=%d  fwd-fails=%d  map-fails=%d  eval=%d\n",
            n, asym, asymH, fail, fwd_fail, map_fail, nnue_eval(&pos));
+#if defined(NN_PLAN_DIFF)
+    printf("nn plan-diff fails=%ld (asm plan vs C oracle)\n", (long)nn_plan_fails);
+    if (nn_plan_fails) return 1;
+#endif
     return (fail == 0 && asym == 0 && asymH == 0 && fwd_fail == 0 && map_fail == 0) ? 0 : 1;
 }
 
