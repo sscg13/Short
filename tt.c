@@ -53,6 +53,8 @@ static TTEnt tt_table[TT_ENTRIES];
 i32 c_tt_probe = 0;                 /* tt_probe entries */
 i32 c_tt_store = 0;                 /* tt_store entries */
 i32 c_tt_eval = 0;                  /* tt_store_eval attempts */
+i32 c_tt_hit = 0;                   /* probe hits seen by the search */
+i32 c_tt_cut = 0;                   /* probe cutoffs taken */
 #endif
 
 #define TT_DEPTH(i)  ((i16)((i) & 0x3F))

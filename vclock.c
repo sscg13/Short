@@ -34,6 +34,14 @@
    lands within 1.4% of measured on every CPU where both exist. Dated deltas:
    artifacts/asm-default-2026-11-04/REPORT.md.
 
+   RE-BASED 2026-11-10 against absolute emulator totals (not ratios). Measuring
+   depth-4 search-only cycles on all four CPUs showed the model 21-26% high,
+   with the charged rows within 6% of measured: the excess was the fitted rn
+   plus conservative SEE/rf/gc/gq rows. Those rows were re-measured in situ
+   (see the note above vw_tab) and rn/rm refitted, so the model now reproduces
+   the measured depth-4 cycles instead of only build-to-build ratios.
+   See artifacts/vclock-fit-2026-11-09/REPORT.md.
+
    Recalibrated 2026-10-08 after the Watcom attack/SEE, quiet-history, NNUE
    indexing optimizations. Original main search and TT are unchanged.
    Unprofiled -0 -ml -ox measurements:
@@ -108,13 +116,52 @@ typedef struct { i32 att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm, tp, ts; } VW;
    falls 10531->8016 (80286), 34403->24969 (8088), 28628->20083 (8086) and
    14167->10896 (80186); the other uncharged work (control flow, flip
    recompute, PV/history updates, fit slack) is untouched. See
-   artifacts/score-once-quiet-2026-11-07/REPORT.md. */
+   artifacts/score-once-quiet-2026-11-07/REPORT.md.
+
+   rn/rm were lowered again 2026-11-09 by the ordering row added below
+   (ord_cost), which now charges the measured ordering steps explicitly
+   instead of leaving them inside the residual: rn 8016->6192 (80286),
+   24969->18971 (8088), 20083->14831 (8086), 10896->8001 (80186); rm by the
+   same absolute amount. The depth-4 model total is unchanged; other depths
+   move by <0.5%. See artifacts/vclock-ordering-2026-11-09/REPORT.md.
+
+   TT call-site logic (probe hit handling, cutoff dispatch, store gate) was
+   measured 2026-11-09 with `chess ttbench` on the 80186 markers: ~6 cyc/node
+   on the 80286, 0.02% of the model, because the probe/store bodies are
+   already charged by tp/ts and the model overcharges probe misses and
+   early-return stores by more than that. It deliberately stays inside rn;
+   no tt_cost row. See artifacts/tt-callsite-2026-11-09/REPORT.md.
+
+   RE-BASED 2026-11-10. The model read 21-26% above the measured search on all
+   four CPUs at depth 4 (80286 26,125 vs 21,257; 8088 84,317 vs 67,787; 8086
+   71,687 vs 57,945; 80186 40,099 vs 33,157), while the charged rows on their
+   own were within 6% of measured on every CPU. The excess was therefore the
+   fitted rn plus three rows that had drifted into pessimism. Everything below
+   was re-measured, not rescaled by a whole-search ratio:
+     - SEE: every see_ge call bracketed on the Nimbus (markers 0x60/0x61),
+       4,207 cycles/call against 5,299 charged; step 4,722 -> 3,633 (80186),
+       other CPUs keep their step ratio.
+     - rf: every materialized batch bracketed (markers 0x62/0x63), 4,669
+       cycles/batch against 5,125; 63,405 batches per `bench 4`, matching
+       c_refresh.
+     - gc/gq: sbench 6,170 / 18,639 on the 80186 and 4,614 / 12,366 on the
+       80286, against 7,522 / 22,434 and 4,964 / 14,462.
+   rn/rm were then refitted to the measured whole-search totals at depth 4:
+   rn 6,192 -> 2,293 (80286), 18,971 -> 5,948 (8088), 14,831 -> 4,214 (8086),
+   8,001 -> 2,931 (80186); rm by the same ratio, so the rn/rm relationship the
+   earlier fits established is preserved. The residual is now 7-11% of each
+   search (uncharged control flow) instead of 21-26%, and the model total
+   reproduces the measured depth-4 cycles on all four CPUs to the rounding of
+   this table. See artifacts/vclock-fit-2026-11-09/REPORT.md.
+   Any edit to these tables or to see_cost/rep_cost/ord_cost must be followed by
+   `chess calcheck` (part of `make test`), which compares this model against the
+   dated references below; TESTING.md section 7 has the re-measurement recipe. */
 static const VW vw_tab[4] = {
     /* att ps gc gq gm mk nm rf ev rn rm tp ts: cycles per counted operation */
-    {    656,      0,   4964,  14462, 135646,    950,    853,   2922,   5109,   8016,   7550,    652,    652 }, /* 80286 */
-    {   1970,      0,  14743,  45138, 465065,   3123,   2813,   9545,  15596,  24969,  19904,   2246,   2389 }, /* 8088 */
-    {   1693,      0,  12621,  39086, 413168,   2734,   2419,   8780,  13072,  20083,  16157,   1915,   2011 }, /* 8086 */
-    {   1003,    131,   7522,  22434, 215267,   1507,   1382,   5125,   7540,  10896,  10612,   1181,   1228 }, /* 80186 */
+    {    656,      0,   4614,  12366, 135646,    950,    853,   2662,   5109,   2293,   2120,    652,    652 }, /* 80286 */
+    {   1970,      0,  12093,  37502, 465065,   3123,   2813,   8696,  15596,   5948,   4360,   2246,   2389 }, /* 8088 */
+    {   1693,      0,  10353,  32474, 413168,   2734,   2419,   7999,  13072,   4214,   3099,   1915,   2011 }, /* 8086 */
+    {   1003,    131,   6170,  18639, 215267,   1507,   1382,   4669,   7540,   2931,   2827,   1181,   1228 }, /* 80186 */
 };
 /* att and gc were refitted 2026-11-04 when the hand-written is_attacked and
    gen_caps became the default. Both rows are scaled by the measured asm/C ratio
@@ -137,11 +184,17 @@ static const VW vw_tab[4] = {
    gc was refitted again 2026-11-04 for the sweep/dispatch rewrite (unrolled
    rank sweep with resume table, dispatch table, STOSW emits): 7,189 -> 6,167
    on the Nimbus markers, ratio 0.85784, applied to every CPU's row by the same
-   rule. See artifacts/gencaps-sweep-2026-11-04/REPORT.md. */
+   rule. See artifacts/gencaps-sweep-2026-11-04/REPORT.md.
+   That deliberate "keep the whole-search level" offset was removed on
+   2026-11-10: gc/gq now carry the measured per-call cost and rn carries only
+   the uncharged control flow (see the re-base note above). */
 /* nm: average quiet/capture plan pair minus its matched board pair, /2.
    rf: mean quiet/capture (materialized pair - matched plan pair), /2 perspectives.
    Each pair materializes two perspective batches; undo does not materialize.
-   Quiet/capture and mirror-flip differences remain approximations in rn/rm.
+   Since 2026-11-10 rf is the measured in-situ average batch (every quiet,
+   capture and castle apply call bracketed on the Nimbus: 4,669 cycles per
+   batch in a depth-4 `bench 4`), so the quiet/capture split no longer affects
+   it. Quiet/capture and mirror-flip differences remain approximations in rn/rm.
    tp rounds the slowest measured probe up to 50 cycles. ts similarly covers
    the maximum original public result/eval path, including reused eval and
    mates. Result-store samples include the public key-fold overhead.
@@ -174,18 +227,43 @@ static const RepCost rep_cost[4] = {
     { 1066,  203,  174,  1623 }, /* 80186 */
 };
 
-/* SEE: verified unchanged uninstrumented 4000-call fixtures on all CPUs, with
-   native PROFILE call/scan/attack counts. Entry rounds up to 50 cycles.
-   Remove entry and measured attack costs from each fixture; round the slowest
-   scan residual up to 1000 cycles with at least 20% headroom. The full rate
-   is charged even when a pawn/knight scan exits early. Reproduce with
-   -DSEE_TEST and `chess seebench`; rn/rm also undergo the whole-search fit. */
+/* SEE: entry plus a per-scan step. Until 2026-11-10 the step was the slowest
+   fixture scan plus 20% headroom, charged even when a pawn/knight scan exits
+   early; measured in situ that came out 26% high. The step is now the in-situ
+   average: every see_ge call in a Nimbus `bench 4` was bracketed with port-E9
+   markers (0x60/0x61), giving 4,207 cycles/call at 1.00 scans/call, so the
+   80186 step is (4207 - 567) / 1.002 = 3,633 and the other CPUs keep their old
+   step ratio (x0.7694). Entry stays at the measured prologue. The 80186 is
+   measured; the others cannot run the markers, so they scale by ratio, the
+   same rule the att/gc rows use. See artifacts/vclock-fit-2026-11-09. */
 typedef struct { i32 entry, step; } SeeCost;
 static const SeeCost see_cost[4] = {
-    {  419,  2796 }, /* 80286: measured entry / conservative scan */
-    { 1290,  8601 }, /* 8088: measured entry / conservative scan */
-    { 1053,  7660 }, /* 8086: measured entry / conservative scan */
-    {  567,  4722 }, /* 80186: measured entry / conservative scan */
+    {  419,  2151 }, /* 80286: measured entry / scan scaled from 80186 */
+    { 1290,  6617 }, /* 8088: measured entry / scan scaled from 80186 */
+    { 1053,  5893 }, /* 8086: measured entry / scan scaled from 80186 */
+    {  567,  3633 }, /* 80186: measured entry / measured in-situ scan */
+};
+
+/* Move ordering, split out of the rn/rm residual on 2026-11-09. Steps are the
+   measured 80186 port-E9 marker prices (orderbench-2026-11-07, after the
+   mvv_lva inline, and score-once-quiet-2026-11-07 for the frozen quiet stage):
+   capture-stage comparison 434, quiet score computation 197, quiet sort
+   comparison 151, quiet return 129, killer validation 963, and the
+   next_move call/prologue estimate 470 (which also covers the two TT-stage
+   returns). Only the 80186 can be priced per step, so the other CPUs scale by
+   their board make/undo row over the 80186 one (950/1507, 3123/1507,
+   2734/1507) - the same measured-ratio rule the att/gc refits use. rn/rm are
+   lowered by each CPU's depth-4 ordering charge, so the model total is
+   unchanged at the fit point; depths 2-8 drift by under 0.6% and depth 1 (all
+   root and qsearch, no quiet stage) undercharges by 3.4% because ordering
+   operations per node vary with the tree shape.
+   See artifacts/vclock-ordering-2026-11-09/REPORT.md. */
+typedef struct { i32 cap, qsort, qret, qscore, killer, call; } OrdCost;
+static const OrdCost ord_cost[4] = {
+    {  274,    95,   81,    124,    607,  296 }, /* 80286 */
+    {  899,   313,  267,    408,   1996,  974 }, /* 8088 */
+    {  787,   274,  234,    357,   1747,  853 }, /* 8086 */
+    {  434,   151,  129,    197,    963,  470 }, /* 80186 */
 };
 
 static i64 vclock_cyc(void) {
@@ -211,6 +289,15 @@ static i64 vclock_cyc(void) {
     r += (i64)rep_cost[vcpu_model].lookup * c_rep_lookup;
     r += (i64)see_cost[vcpu_model].entry * c_see;
     r += (i64)see_cost[vcpu_model].step * c_see_step;
+    {
+        const OrdCost *o = &ord_cost[vcpu_model];
+        r += (i64)o->cap    * c_nm_capscan;
+        r += (i64)o->qsort  * c_nm_qsort;
+        r += (i64)o->qret   * c_nm_qret;
+        r += (i64)o->qscore * c_nm_qscan;
+        r += (i64)o->killer * c_nm_killer;
+        r += (i64)o->call   * c_nextmove;
+    }
     return r;
 }
 
@@ -221,6 +308,66 @@ i32 vclock_est_nps(i32 nodes) {
     i64 cyc = vclock_cyc();
     if (cyc <= 0 || vcpu_khz <= 0) return 0;
     return (i32)((i64)nodes * vcpu_khz * 1000LL / cyc);
+}
+
+/* ABSOLUTE-LEVEL GATE (`chess calcheck`, run by `make test`).
+   The model used to be re-fitted only to the measured *ratio* k between two
+   builds, which preserves whatever absolute level the table happens to have.
+   On 2026-11-10 that had drifted to +21-26% while every ratio check passed.
+   These are dated, search-only depth-4 totals per modeled CPU -- every node in
+   the `bench 4` tree, i.e. sum over d = 1..4 of all 12 positions:
+
+     build.ps1 [-MameMarkers] release, 86Box / MAME Nimbus, see
+     artifacts/vclock-fit-2026-11-09/REPORT.md
+       80286 @6 MHz  21,257 cyc/node   8088 @16 MHz  67,787
+       8086  @8 MHz  57,945 (derived)  80186 @8 MHz  33,157
+
+   If the tree changes (bench node total differs) the reference no longer
+   applies: re-measure it, do not "fix" the model to match a stale tree. */
+#define VCLOCK_CAL_NODES   47400
+#define VCLOCK_CAL_TOL_PCT 3
+static const i32 vclock_cal_cyc[4] = {
+    21257,  /* 80286 */
+    67787,  /* 8088 */
+    57945,  /* 8086 */
+    33157,  /* 80186 */
+};
+static const char *const vclock_cpu_name[4] = {
+    "80286", "8088", "8086", "80186"
+};
+
+/* Compare the current counters against the dated references (1 = failure).
+   Must be called with the depth-4 bench counters still accumulated. */
+i16 vclock_calcheck(i32 nodes) {
+    i16 m, fails = 0;
+    if (!nnue_enabled) {
+        printf("calcheck: no NNUE net loaded; the references are NNUE-search totals\n");
+        return 1;
+    }
+    if (nodes != VCLOCK_CAL_NODES) {
+        printf("calcheck: SKIP - bench tree is %ld nodes, reference is %d; "
+               "the model level is NOT verified. Re-measure the emulator "
+               "reference and update vclock_cal_cyc + VCLOCK_CAL_NODES "
+               "(TESTING.md section 7)\n", (long)nodes, VCLOCK_CAL_NODES);
+        return 0;
+    }
+    for (m = VCPU_80286; m <= VCPU_80186; ++m) {
+        i16 saved = vcpu_model;
+        i32 got, err;
+        vcpu_model = m;
+        got = (i32)(vclock_cyc() / nodes);
+        vcpu_model = saved;
+        err = (i32)(((i64)got - vclock_cal_cyc[m]) * 100 / vclock_cal_cyc[m]);
+        printf("calcheck %-5s model=%6ld measured=%6ld err=%+3ld%%%s\n",
+               vclock_cpu_name[m], (long)got, (long)vclock_cal_cyc[m], (long)err,
+               (err > VCLOCK_CAL_TOL_PCT || err < -VCLOCK_CAL_TOL_PCT) ? "  FAIL" : "");
+        if (err > VCLOCK_CAL_TOL_PCT || err < -VCLOCK_CAL_TOL_PCT) ++fails;
+    }
+    if (fails)
+        printf("calcheck: %d CPU(s) outside +/-%d%%; re-measure and re-fit the "
+               "model rows, do not rescale rn alone\n",
+               (int)fails, VCLOCK_CAL_TOL_PCT);
+    return fails;
 }
 
 void vclock_set_model(const char *name) {
@@ -262,6 +409,9 @@ void vclock_reset(void) {
     c_tt_probe = 0;
     c_tt_store = 0;
     c_tt_eval = 0;
+    c_tt_hit = 0;
+    c_tt_cut = 0;
+    c_nm_tt = c_nm_capscan = c_nm_qscan = c_nm_qret = c_nm_killer = c_nm_qsort = 0;
 }
 
 /* Refill only after the requisite moves, regardless of how fast the host

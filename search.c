@@ -610,12 +610,13 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
             /* A full-key hit means the same position, so the stored move is
                pseudo-legal here; the move loop's own-piece test below still
                rejects a wrongly-owned move from a collided entry. */
+            PCOUNT(c_tt_hit);
             ttm = tt.move;
             if (node_type != NODE_PV && tt.depth >= depth && tt.score >= best &&
                 rep_prev_path[rep_n - 1] == -1) {
-                if (tt.flag == TT_EXACT) { rep_n--; return tt.score; }
-                if (tt.flag == TT_LOWER && tt.score >= beta) { rep_n--; return tt.score; }
-                if (tt.flag == TT_UPPER && tt.score <= alpha) { rep_n--; return tt.score; }
+                if (tt.flag == TT_EXACT) { PCOUNT(c_tt_cut); rep_n--; return tt.score; }
+                if (tt.flag == TT_LOWER && tt.score >= beta) { PCOUNT(c_tt_cut); rep_n--; return tt.score; }
+                if (tt.flag == TT_UPPER && tt.score <= alpha) { PCOUNT(c_tt_cut); rep_n--; return tt.score; }
             }
         }
     }
@@ -1011,6 +1012,10 @@ static const char *bench_fens[] = {
 
 #define BENCH_N ((int)(sizeof(bench_fens) / sizeof(bench_fens[0])))
 
+#ifdef VCLOCK
+i32 bench_nodes = 0;    /* node total of the last `bench`, for `calcheck` */
+#endif
+
 int bench(int depth) {
     i16 i, d, k;
     i32 total_nodes = 0;
@@ -1047,6 +1052,7 @@ int bench(int depth) {
         clock_t t0, t1;
         double secs;
 
+        MAME_MARK(0x50);
         parse_fen(&p, bench_fens[i]);
         g_sigs_n = 0;                            /* no game-history repetitions */
         search_clear_ordering();
@@ -1054,7 +1060,9 @@ int bench(int depth) {
         root_n = gen_moves(&p, root_m);
         for (k = 0; k < root_n; k++) root_score[k] = 0;
         if (nnue_ensure_default()) { nnue_reset(&p); nnue_active = 1; }
+        MAME_MARK(0x51);
 
+        MAME_MARK(0x52);
         t0 = engine_clock();
         for (d = 1; d <= depth; d++) {
             Score asp_lo = -INF, asp_hi = INF, bsc = -INF;
@@ -1086,6 +1094,7 @@ int bench(int depth) {
             pos_nodes += nodes_search;
             if (d == depth) { bestscore = bsc; bf = mfrom(bm); bt = mto(bm); }
         }
+        MAME_MARK(0x53);
         nnue_active = 0;
         t1 = engine_clock();
         secs = (double)(t1 - t0) / (double)CLOCKS_PER_SEC;
@@ -1124,6 +1133,7 @@ int bench(int depth) {
 #endif
     printf("\nNodes searched : %ld\n", (long)total_nodes);
 #ifdef VCLOCK
+    bench_nodes = total_nodes;
     /* nps = what the weighted model predicts on the modeled CPU (default
        80286 @ 25 MHz); the host's real nps is irrelevant to the 16-bit target.
        x1000 so OpenBench displays it as X.XX million. */
@@ -1133,6 +1143,18 @@ int bench(int depth) {
 #endif
     return 0;
 }
+
+#ifdef VCLOCK
+/* `chess calcheck`: run the depth-4 bench and compare the model's cycles/node
+   against the dated emulator references (vclock_calcheck). This is the gate
+   `make test` runs so a row edit or a ratio-only refit cannot leave the table
+   at the wrong absolute level. */
+int calcheck(void) {
+    int r = bench(4);
+    if (r) return r;
+    return (int)vclock_calcheck(bench_nodes);
+}
+#endif
 
 #ifdef PROFILE
 /* ------------------------------------------------------------------ */
@@ -1155,7 +1177,7 @@ int profile(int depth) {
     vclock_reset();   /* clear a stale virtual-time budget like bench() does */
 
     c_anodes = c_qnodes = c_nextmove = 0;
-    c_nm_tt = c_nm_capscan = c_nm_qscan = c_nm_killer = c_nm_qsort = 0;
+    c_nm_tt = c_nm_capscan = c_nm_qscan = c_nm_qret = c_nm_killer = c_nm_qsort = 0;
     c_make = c_undo = c_gen_moves = c_gen_caps = c_gen_quiets = 0;
     c_nn_make = c_nn_undo = c_nn_eval = c_refresh = c_flip = 0;
     c_isattacked = 0;
@@ -1163,6 +1185,8 @@ int profile(int depth) {
     c_tt_probe = 0;
     c_tt_store = 0;
     c_tt_eval = 0;
+    c_tt_hit = 0;
+    c_tt_cut = 0;
     c_see = c_see_step = 0;
 
     b0 = engine_clock();
@@ -1235,17 +1259,109 @@ int profile(int depth) {
     printf("profile nn_make=%ld nn_undo=%ld nn_eval=%ld refresh_rows=%ld flips=%ld\n",
            (long)c_nn_make, (long)c_nn_undo, (long)c_nn_eval, (long)c_refresh, (long)c_flip);
     printf("profile is_attacked=%ld pos_sig=%ld\n", (long)c_isattacked, (long)c_possig);
-    printf("profile nm_tt=%ld nm_capscan=%ld nm_qscan=%ld nm_killer=%ld nm_qsort=%ld\n",
+    printf("profile nm_tt=%ld nm_capscan=%ld nm_qscan=%ld nm_killer=%ld nm_qsort=%ld nm_qret=%ld\n",
            (long)c_nm_tt, (long)c_nm_capscan, (long)c_nm_qscan, (long)c_nm_killer,
-           (long)c_nm_qsort);
-    printf("profile tt_probe=%ld tt_store=%ld tt_eval=%ld\n",
-           (long)c_tt_probe, (long)c_tt_store, (long)c_tt_eval);
+           (long)c_nm_qsort, (long)c_nm_qret);
+    printf("profile tt_probe=%ld tt_store=%ld tt_eval=%ld tt_hit=%ld tt_cut=%ld\n",
+           (long)c_tt_probe, (long)c_tt_store, (long)c_tt_eval,
+           (long)c_tt_hit, (long)c_tt_cut);
     printf("profile see=%ld see_step=%ld\n", (long)c_see, (long)c_see_step);
     printf("profile rep scans=%ld upscans=%ld lookups=%ld\n",
            (long)c_rep_scan, (long)c_rep_upscan, (long)c_rep_lookup);
     return 0;
 }
 #endif /* PROFILE */
+
+#ifdef MAME_MARKERS
+/* ------------------------------------------------------------------ */
+/* `chess ttbench`: prices the alphabeta call-site TT logic that the    */
+/* tp/ts rows do not cover - the probe's hit block (ttm copy, cutoff    */
+/* eligibility, flag dispatch) and the store call-site gate plus flag   */
+/* classification. Runs on bench position 1 against a controlled slot   */
+/* (one stored EXACT entry, rep path primed as at a search node).       */
+/* Markers 0x40-0x49 give exact Nimbus 80186 cycles; the ms output is a */
+/* cross-check only (DOS clock() resolves at 55 ms).                    */
+/* ------------------------------------------------------------------ */
+int tt_bench(void) {
+    static Pos pos;
+    static TTData tt;
+    static u16 list[256];
+    i32 i, iters = 20000, sink = 0;
+    i16 ply = 6, depth = 4;
+    Score best = 100, beta = 100, alpha = 50, original_alpha = -50;
+    clock_t t0, t1;
+    i32 miss_ms, hit_ms, logic_ms, gate_ms, base_ms, pv_ms;
+
+    parse_fen(&pos, bench_fens[0]);
+    gen_moves(&pos, list);
+    nnue_active = 0;
+    stop_now = 0;
+    rep_n = 1; rep_prev_path[0] = -1;   /* non-root node path, no cycle earlier */
+
+    tt_clear();                          /* entry empty: every probe misses */
+    t0 = engine_clock(); MAME_MARK(0x40);
+    for (i = 0; i < iters; i++) if (tt_probe(&pos, ply, &tt)) sink++;
+    MAME_MARK(0x41); t1 = engine_clock();
+    miss_ms = (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
+
+    tt_clear();                          /* stored entry: every probe hits */
+    tt_store(&pos, list[0], 20, 100, TT_EXACT, ply, 100, 1);
+    t0 = engine_clock(); MAME_MARK(0x42);
+    for (i = 0; i < iters; i++) if (tt_probe(&pos, ply, &tt)) sink++;
+    MAME_MARK(0x43); t1 = engine_clock();
+    hit_ms = (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
+
+    t0 = engine_clock(); MAME_MARK(0x44);
+    for (i = 0; i < iters; i++) {
+        u16 ttm = 0;
+        if (tt_probe(&pos, ply, &tt)) {
+            ttm = tt.move;
+            if (NODE_CUT != NODE_PV && tt.depth >= depth && tt.score >= best &&
+                rep_prev_path[rep_n - 1] == -1) {
+                if (tt.flag == TT_EXACT) sink += ttm;
+                else if (tt.flag == TT_LOWER && tt.score >= beta) sink++;
+                else if (tt.flag == TT_UPPER && tt.score <= alpha) sink++;
+            }
+        }
+    }
+    MAME_MARK(0x45); t1 = engine_clock();
+    logic_ms = (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
+
+    t0 = engine_clock(); MAME_MARK(0x46);
+    for (i = 0; i < iters; i++) {
+        Score b = (Score)((i & 63) + 70);
+        if (ply && !stop_now && (0 || b > 0)) {
+            i16 flag = (b >= beta) ? TT_LOWER :
+                       (b <= original_alpha) ? TT_UPPER : TT_EXACT;
+            sink += flag;
+        }
+    }
+    MAME_MARK(0x47); t1 = engine_clock();
+    gate_ms = (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
+
+    t0 = engine_clock(); MAME_MARK(0x4a);
+    for (i = 0; i < iters; i++) {
+        u16 ttm = 0;
+        if (tt_probe(&pos, ply, &tt)) ttm = tt.move;
+        sink += ttm;                    /* PV hit: copy only, no dispatch */
+    }
+    MAME_MARK(0x4b); t1 = engine_clock();
+    pv_ms = (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
+
+    t0 = engine_clock(); MAME_MARK(0x48);
+    for (i = 0; i < iters; i++) {
+        Score b = (Score)((i & 63) + 70);
+        sink += b;
+    }
+    MAME_MARK(0x49); t1 = engine_clock();
+    base_ms = (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
+
+    printf("ttbench iters=%ld miss=%ld hit=%ld pv=%ld logic=%ld gate=%ld base=%ld sink=%ld\n",
+           (long)iters, (long)miss_ms, (long)hit_ms, (long)pv_ms, (long)logic_ms,
+           (long)gate_ms, (long)base_ms, (long)sink);
+    return 0;
+}
+#endif /* MAME_MARKERS */
 
 /* ------------------------------------------------------------------ */
 /* search cost accounting (`chess sbench`): times the search's hot     */

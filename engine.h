@@ -147,6 +147,7 @@ extern i32 c_nm_tt;         /* next_move: TT-stage returns */
 extern i32 c_nm_capscan;    /* next_move: capture-stage candidate comparisons */
 extern i32 c_nm_qscan;      /* next_move: quiet-stage score computations */
 extern i32 c_nm_qsort;      /* next_move: quiet-stage sort comparisons */
+extern i32 c_nm_qret;       /* next_move: quiet-stage moves returned */
 extern i32 c_nm_killer;     /* next_move: killer validations (quiet_killer_ok) */
 extern i32 c_make;          /* do_make entry */
 extern i32 c_undo;          /* undo_move entry */
@@ -165,6 +166,8 @@ extern i32 c_see, c_see_step; /* SEE entry / least-attacker scan */
 extern i32 c_tt_probe;      /* transposition-table probe entry */
 extern i32 c_tt_store;      /* transposition-table store entry */
 extern i32 c_tt_eval;       /* eager static-eval store attempts */
+extern i32 c_tt_hit;        /* TT probe hits seen by the search */
+extern i32 c_tt_cut;        /* TT cutoffs taken */
 #ifdef PROFILE
 int profile(int depth);
 #endif
@@ -246,6 +249,9 @@ void search_clear_ordering(void);  /* clear killers and quiet history on game/po
 #define QH_MAX 30000
 extern i16 qhist[2][6][64];
 void lmr_build(void);             /* one-time LMR log-table generator (dedicated init) */
+#ifdef MAME_MARKERS
+int tt_bench(void);
+#endif
 int bench(int depth);
 int profile(int depth);
 int sbench(void);
@@ -346,6 +352,8 @@ i32 vclock_elapsed_ms(void);           /* current move's modeled time; does not 
 i32 vclock_charge(void);                /* deduct the move's consumed time; returns consumed ms */
 #ifdef VCLOCK
 i32 vclock_est_nps(i32 nodes);          /* weighted-model NPS for the modeled CPU (bench output) */
+i16 vclock_calcheck(i32 nodes);         /* absolute-level gate: model vs dated emulator totals */
+int calcheck(void);                     /* `chess calcheck`: bench 4 then the gate */
 #endif
 
 /* ---- chess.c (board, movegen, eval, FEN) ---- */

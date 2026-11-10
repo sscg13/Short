@@ -122,7 +122,11 @@ test: all $(CHECKS)
 	./$(CHECKS) perft 4 0
 	./$(CHECKS) perft 4 1
 	./$(CHECKS) nn
+ifeq ($(VCLOCK),1)
+	./$(TARGET) calcheck
+else
 	./$(TARGET) bench 4
+endif
 
 clean:
 	rm -f $(OBJS) $(PROF_OBJS) $(TARGET) $(CHECKS) chess_gcc.exe chess_gcc chess_prof.exe chess_checks chess_checks.exe

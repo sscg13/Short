@@ -370,9 +370,9 @@ static void nn_materialize(i16 persp) {
     for (slot = first + 1; slot <= target; slot++) {
         NNPlan *d = &nn_plan[slot][persp];
         nn_ply = slot - 1;
-        if (d->kind == 1) nn_batch_addsub(persp, d->a, d->b);
-        else if (d->kind == 2) nn_batch_cap(persp, d->a, d->b, d->c);
-        else { PCOUNT(c_refresh); nn_castle_apply(persp, d->a, d->b, d->c); }
+        if (d->kind == 1) { MAME_MARK(0x62); nn_batch_addsub(persp, d->a, d->b); MAME_MARK(0x63); }
+        else if (d->kind == 2) { MAME_MARK(0x62); nn_batch_cap(persp, d->a, d->b, d->c); MAME_MARK(0x63); }
+        else { PCOUNT(c_refresh); MAME_MARK(0x62); nn_castle_apply(persp, d->a, d->b, d->c); MAME_MARK(0x63); }
         nn_valid[slot] |= bit;
     }
     nn_ply = target;

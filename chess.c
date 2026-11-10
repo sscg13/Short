@@ -144,6 +144,7 @@ i32 c_nm_tt = 0;                /* next_move: TT-stage returns */
 i32 c_nm_capscan = 0;           /* next_move: capture-stage candidate comparisons */
 i32 c_nm_qscan = 0;             /* next_move: quiet-stage score computations */
 i32 c_nm_qsort = 0;             /* next_move: quiet-stage sort comparisons */
+i32 c_nm_qret = 0;              /* next_move: quiet-stage moves returned */
 i32 c_nm_killer = 0;            /* next_move: killer validations */
 i32 c_isattacked = 0;           /* is_attacked entries */
 i32 c_possig = 0;               /* pos_sig entries */
@@ -440,11 +441,12 @@ i16 see_ge(Pos *p, u16 m, i16 threshold) {
     i16 from = mfrom(m), to = mto(m), pc = p->board[from];
     i16 cap = p->board[to], balance, side, result = 1, n = 1;
     PCOUNT(c_see);
-    if (mfl(m) != 0 || TY(pc) == 6) return 1;
+    MAME_MARK(0x60);
+    if (mfl(m) != 0 || TY(pc) == 6) { MAME_MARK(0x61); return 1; }
     balance = mval[TY(cap)] - threshold;
-    if (balance < 0) return 0;
+    if (balance < 0) { MAME_MARK(0x61); return 0; }
     balance = mval[TY(pc)] - balance;
-    if (balance <= 0) return 1;
+    if (balance <= 0) { MAME_MARK(0x61); return 1; }
     squares[0] = from; pieces[0] = pc;
     p->board[from] = EMPTY; p->board[to] = pc;
     side = p->side ^ 1;
@@ -464,6 +466,7 @@ i16 see_ge(Pos *p, u16 m, i16 threshold) {
     }
     p->board[to] = cap;
     while (n > 0) { --n; p->board[squares[n]] = pieces[n]; }
+    MAME_MARK(0x61);
     return result;
 }
 
@@ -915,6 +918,7 @@ again:
         while (g->idx < g->n) {
             u16 q = g->list[g->idx++];
             if (q == g->ttm || q == g->k0 || q == g->k1) continue;  /* already tried */
+            PCOUNT(c_nm_qret);
             return q;
         }
         g->stage = MG_DONE;
@@ -1460,6 +1464,11 @@ int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "sbench") == 0)
         return sbench();
 
+#ifdef MAME_MARKERS
+    if (argc > 1 && strcmp(argv[1], "ttbench") == 0)
+        return tt_bench();
+#endif
+
     if (argc == 1 || (argc > 1 && strcmp(argv[1], "xboard") == 0))
         return xboard_main();
 
@@ -1468,6 +1477,11 @@ int main(int argc, char **argv) {
         if (argc > 2) bd = atoi(argv[2]);
         return bench(bd);
     }
+
+#ifdef VCLOCK
+    if (argc > 1 && strcmp(argv[1], "calcheck") == 0)
+        return calcheck();
+#endif
 
 #ifdef PROFILE
     if (argc > 1 && strcmp(argv[1], "profile") == 0)
