@@ -1527,6 +1527,9 @@ nn_make_cap_ ENDP
 ; act = clamp(acc, 0, 255) and fwd[p][j][act] = (act^2 * w2) >>
 ; NNUE_ACT2_SHIFT (9) (the squared product is pre-shifted so every entry
 ; fits i16 - max 255^2*127>>9 = 16129). Nonpositive terms skip all work.
+; The 255 clamp is branchless: the load uses base+510 and the sign-masked
+; index offset, so act > 255 (11.7% of live terms) reads the act=255 entry
+; without a taken branch (see _fwd_body).
 ; Table layout is the shared far array fwd[2][64][256]: fwd[0][j]
 ; base = j*512, fwd[1][j] base = 32768 + j*512 (persp 1 starts at +32768).
 ; si:cx = the 32-bit accumulator seeded from the bias; the finish shifts it
@@ -1572,13 +1575,12 @@ nn_fwd_eval_ PROC FAR
         mov     ax, ss:[bx+0]
         test    ax, ax
         jle     V2DN0_0
-        cmp     ax, 255
-        jle     V2OK0_0
-        mov     ax, 255
-V2OK0_0:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+0]
+        mov     ax, [di+510]
         cwd
         add     si, ax
         adc     cx, dx
@@ -1586,13 +1588,12 @@ V2DN0_0:
         mov     ax, ss:[bp+0]
         test    ax, ax
         jle     V2DN1_0
-        cmp     ax, 255
-        jle     V2OK1_0
-        mov     ax, 255
-V2OK1_0:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+32768]
+        mov     ax, [di+33278]
         cwd
         add     si, ax
         adc     cx, dx
@@ -1601,13 +1602,12 @@ V2DN1_0:
         mov     ax, ss:[bx+2]
         test    ax, ax
         jle     V2DN0_1
-        cmp     ax, 255
-        jle     V2OK0_1
-        mov     ax, 255
-V2OK0_1:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+512]
+        mov     ax, [di+1022]
         cwd
         add     si, ax
         adc     cx, dx
@@ -1615,13 +1615,12 @@ V2DN0_1:
         mov     ax, ss:[bp+2]
         test    ax, ax
         jle     V2DN1_1
-        cmp     ax, 255
-        jle     V2OK1_1
-        mov     ax, 255
-V2OK1_1:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+33280]
+        mov     ax, [di+33790]
         cwd
         add     si, ax
         adc     cx, dx
@@ -1630,13 +1629,12 @@ V2DN1_1:
         mov     ax, ss:[bx+4]
         test    ax, ax
         jle     V2DN0_2
-        cmp     ax, 255
-        jle     V2OK0_2
-        mov     ax, 255
-V2OK0_2:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+1024]
+        mov     ax, [di+1534]
         cwd
         add     si, ax
         adc     cx, dx
@@ -1644,13 +1642,12 @@ V2DN0_2:
         mov     ax, ss:[bp+4]
         test    ax, ax
         jle     V2DN1_2
-        cmp     ax, 255
-        jle     V2OK1_2
-        mov     ax, 255
-V2OK1_2:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+33792]
+        mov     ax, [di+34302]
         cwd
         add     si, ax
         adc     cx, dx
@@ -1659,13 +1656,12 @@ V2DN1_2:
         mov     ax, ss:[bx+6]
         test    ax, ax
         jle     V2DN0_3
-        cmp     ax, 255
-        jle     V2OK0_3
-        mov     ax, 255
-V2OK0_3:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+1536]
+        mov     ax, [di+2046]
         cwd
         add     si, ax
         adc     cx, dx
@@ -1673,13 +1669,12 @@ V2DN0_3:
         mov     ax, ss:[bp+6]
         test    ax, ax
         jle     V2DN1_3
-        cmp     ax, 255
-        jle     V2OK1_3
-        mov     ax, 255
-V2OK1_3:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+34304]
+        mov     ax, [di+34814]
         cwd
         add     si, ax
         adc     cx, dx
@@ -1688,13 +1683,12 @@ V2DN1_3:
         mov     ax, ss:[bx+8]
         test    ax, ax
         jle     V2DN0_4
-        cmp     ax, 255
-        jle     V2OK0_4
-        mov     ax, 255
-V2OK0_4:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+2048]
+        mov     ax, [di+2558]
         cwd
         add     si, ax
         adc     cx, dx
@@ -1702,13 +1696,12 @@ V2DN0_4:
         mov     ax, ss:[bp+8]
         test    ax, ax
         jle     V2DN1_4
-        cmp     ax, 255
-        jle     V2OK1_4
-        mov     ax, 255
-V2OK1_4:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+34816]
+        mov     ax, [di+35326]
         cwd
         add     si, ax
         adc     cx, dx
@@ -1717,13 +1710,12 @@ V2DN1_4:
         mov     ax, ss:[bx+10]
         test    ax, ax
         jle     V2DN0_5
-        cmp     ax, 255
-        jle     V2OK0_5
-        mov     ax, 255
-V2OK0_5:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+2560]
+        mov     ax, [di+3070]
         cwd
         add     si, ax
         adc     cx, dx
@@ -1731,13 +1723,12 @@ V2DN0_5:
         mov     ax, ss:[bp+10]
         test    ax, ax
         jle     V2DN1_5
-        cmp     ax, 255
-        jle     V2OK1_5
-        mov     ax, 255
-V2OK1_5:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+35328]
+        mov     ax, [di+35838]
         cwd
         add     si, ax
         adc     cx, dx
@@ -1746,13 +1737,12 @@ V2DN1_5:
         mov     ax, ss:[bx+12]
         test    ax, ax
         jle     V2DN0_6
-        cmp     ax, 255
-        jle     V2OK0_6
-        mov     ax, 255
-V2OK0_6:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+3072]
+        mov     ax, [di+3582]
         cwd
         add     si, ax
         adc     cx, dx
@@ -1760,13 +1750,12 @@ V2DN0_6:
         mov     ax, ss:[bp+12]
         test    ax, ax
         jle     V2DN1_6
-        cmp     ax, 255
-        jle     V2OK1_6
-        mov     ax, 255
-V2OK1_6:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+35840]
+        mov     ax, [di+36350]
         cwd
         add     si, ax
         adc     cx, dx
@@ -1775,13 +1764,12 @@ V2DN1_6:
         mov     ax, ss:[bx+14]
         test    ax, ax
         jle     V2DN0_7
-        cmp     ax, 255
-        jle     V2OK0_7
-        mov     ax, 255
-V2OK0_7:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+3584]
+        mov     ax, [di+4094]
         cwd
         add     si, ax
         adc     cx, dx
@@ -1789,13 +1777,12 @@ V2DN0_7:
         mov     ax, ss:[bp+14]
         test    ax, ax
         jle     V2DN1_7
-        cmp     ax, 255
-        jle     V2OK1_7
-        mov     ax, 255
-V2OK1_7:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+36352]
+        mov     ax, [di+36862]
         cwd
         add     si, ax
         adc     cx, dx
@@ -1804,13 +1791,12 @@ V2DN1_7:
         mov     ax, ss:[bx+16]
         test    ax, ax
         jle     V2DN0_8
-        cmp     ax, 255
-        jle     V2OK0_8
-        mov     ax, 255
-V2OK0_8:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+4096]
+        mov     ax, [di+4606]
         cwd
         add     si, ax
         adc     cx, dx
@@ -1818,13 +1804,12 @@ V2DN0_8:
         mov     ax, ss:[bp+16]
         test    ax, ax
         jle     V2DN1_8
-        cmp     ax, 255
-        jle     V2OK1_8
-        mov     ax, 255
-V2OK1_8:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+36864]
+        mov     ax, [di+37374]
         cwd
         add     si, ax
         adc     cx, dx
@@ -1833,13 +1818,12 @@ V2DN1_8:
         mov     ax, ss:[bx+18]
         test    ax, ax
         jle     V2DN0_9
-        cmp     ax, 255
-        jle     V2OK0_9
-        mov     ax, 255
-V2OK0_9:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+4608]
+        mov     ax, [di+5118]
         cwd
         add     si, ax
         adc     cx, dx
@@ -1847,13 +1831,12 @@ V2DN0_9:
         mov     ax, ss:[bp+18]
         test    ax, ax
         jle     V2DN1_9
-        cmp     ax, 255
-        jle     V2OK1_9
-        mov     ax, 255
-V2OK1_9:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+37376]
+        mov     ax, [di+37886]
         cwd
         add     si, ax
         adc     cx, dx
@@ -1862,13 +1845,12 @@ V2DN1_9:
         mov     ax, ss:[bx+20]
         test    ax, ax
         jle     V2DN0_10
-        cmp     ax, 255
-        jle     V2OK0_10
-        mov     ax, 255
-V2OK0_10:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+5120]
+        mov     ax, [di+5630]
         cwd
         add     si, ax
         adc     cx, dx
@@ -1876,13 +1858,12 @@ V2DN0_10:
         mov     ax, ss:[bp+20]
         test    ax, ax
         jle     V2DN1_10
-        cmp     ax, 255
-        jle     V2OK1_10
-        mov     ax, 255
-V2OK1_10:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+37888]
+        mov     ax, [di+38398]
         cwd
         add     si, ax
         adc     cx, dx
@@ -1891,13 +1872,12 @@ V2DN1_10:
         mov     ax, ss:[bx+22]
         test    ax, ax
         jle     V2DN0_11
-        cmp     ax, 255
-        jle     V2OK0_11
-        mov     ax, 255
-V2OK0_11:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+5632]
+        mov     ax, [di+6142]
         cwd
         add     si, ax
         adc     cx, dx
@@ -1905,13 +1885,12 @@ V2DN0_11:
         mov     ax, ss:[bp+22]
         test    ax, ax
         jle     V2DN1_11
-        cmp     ax, 255
-        jle     V2OK1_11
-        mov     ax, 255
-V2OK1_11:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+38400]
+        mov     ax, [di+38910]
         cwd
         add     si, ax
         adc     cx, dx
@@ -1920,13 +1899,12 @@ V2DN1_11:
         mov     ax, ss:[bx+24]
         test    ax, ax
         jle     V2DN0_12
-        cmp     ax, 255
-        jle     V2OK0_12
-        mov     ax, 255
-V2OK0_12:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+6144]
+        mov     ax, [di+6654]
         cwd
         add     si, ax
         adc     cx, dx
@@ -1934,13 +1912,12 @@ V2DN0_12:
         mov     ax, ss:[bp+24]
         test    ax, ax
         jle     V2DN1_12
-        cmp     ax, 255
-        jle     V2OK1_12
-        mov     ax, 255
-V2OK1_12:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+38912]
+        mov     ax, [di+39422]
         cwd
         add     si, ax
         adc     cx, dx
@@ -1949,13 +1926,12 @@ V2DN1_12:
         mov     ax, ss:[bx+26]
         test    ax, ax
         jle     V2DN0_13
-        cmp     ax, 255
-        jle     V2OK0_13
-        mov     ax, 255
-V2OK0_13:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+6656]
+        mov     ax, [di+7166]
         cwd
         add     si, ax
         adc     cx, dx
@@ -1963,13 +1939,12 @@ V2DN0_13:
         mov     ax, ss:[bp+26]
         test    ax, ax
         jle     V2DN1_13
-        cmp     ax, 255
-        jle     V2OK1_13
-        mov     ax, 255
-V2OK1_13:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+39424]
+        mov     ax, [di+39934]
         cwd
         add     si, ax
         adc     cx, dx
@@ -1978,13 +1953,12 @@ V2DN1_13:
         mov     ax, ss:[bx+28]
         test    ax, ax
         jle     V2DN0_14
-        cmp     ax, 255
-        jle     V2OK0_14
-        mov     ax, 255
-V2OK0_14:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+7168]
+        mov     ax, [di+7678]
         cwd
         add     si, ax
         adc     cx, dx
@@ -1992,13 +1966,12 @@ V2DN0_14:
         mov     ax, ss:[bp+28]
         test    ax, ax
         jle     V2DN1_14
-        cmp     ax, 255
-        jle     V2OK1_14
-        mov     ax, 255
-V2OK1_14:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+39936]
+        mov     ax, [di+40446]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2007,13 +1980,12 @@ V2DN1_14:
         mov     ax, ss:[bx+30]
         test    ax, ax
         jle     V2DN0_15
-        cmp     ax, 255
-        jle     V2OK0_15
-        mov     ax, 255
-V2OK0_15:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+7680]
+        mov     ax, [di+8190]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2021,13 +1993,12 @@ V2DN0_15:
         mov     ax, ss:[bp+30]
         test    ax, ax
         jle     V2DN1_15
-        cmp     ax, 255
-        jle     V2OK1_15
-        mov     ax, 255
-V2OK1_15:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+40448]
+        mov     ax, [di+40958]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2036,13 +2007,12 @@ V2DN1_15:
         mov     ax, ss:[bx+32]
         test    ax, ax
         jle     V2DN0_16
-        cmp     ax, 255
-        jle     V2OK0_16
-        mov     ax, 255
-V2OK0_16:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+8192]
+        mov     ax, [di+8702]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2050,13 +2020,12 @@ V2DN0_16:
         mov     ax, ss:[bp+32]
         test    ax, ax
         jle     V2DN1_16
-        cmp     ax, 255
-        jle     V2OK1_16
-        mov     ax, 255
-V2OK1_16:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+40960]
+        mov     ax, [di+41470]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2065,13 +2034,12 @@ V2DN1_16:
         mov     ax, ss:[bx+34]
         test    ax, ax
         jle     V2DN0_17
-        cmp     ax, 255
-        jle     V2OK0_17
-        mov     ax, 255
-V2OK0_17:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+8704]
+        mov     ax, [di+9214]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2079,13 +2047,12 @@ V2DN0_17:
         mov     ax, ss:[bp+34]
         test    ax, ax
         jle     V2DN1_17
-        cmp     ax, 255
-        jle     V2OK1_17
-        mov     ax, 255
-V2OK1_17:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+41472]
+        mov     ax, [di+41982]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2094,13 +2061,12 @@ V2DN1_17:
         mov     ax, ss:[bx+36]
         test    ax, ax
         jle     V2DN0_18
-        cmp     ax, 255
-        jle     V2OK0_18
-        mov     ax, 255
-V2OK0_18:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+9216]
+        mov     ax, [di+9726]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2108,13 +2074,12 @@ V2DN0_18:
         mov     ax, ss:[bp+36]
         test    ax, ax
         jle     V2DN1_18
-        cmp     ax, 255
-        jle     V2OK1_18
-        mov     ax, 255
-V2OK1_18:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+41984]
+        mov     ax, [di+42494]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2123,13 +2088,12 @@ V2DN1_18:
         mov     ax, ss:[bx+38]
         test    ax, ax
         jle     V2DN0_19
-        cmp     ax, 255
-        jle     V2OK0_19
-        mov     ax, 255
-V2OK0_19:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+9728]
+        mov     ax, [di+10238]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2137,13 +2101,12 @@ V2DN0_19:
         mov     ax, ss:[bp+38]
         test    ax, ax
         jle     V2DN1_19
-        cmp     ax, 255
-        jle     V2OK1_19
-        mov     ax, 255
-V2OK1_19:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+42496]
+        mov     ax, [di+43006]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2152,13 +2115,12 @@ V2DN1_19:
         mov     ax, ss:[bx+40]
         test    ax, ax
         jle     V2DN0_20
-        cmp     ax, 255
-        jle     V2OK0_20
-        mov     ax, 255
-V2OK0_20:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+10240]
+        mov     ax, [di+10750]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2166,13 +2128,12 @@ V2DN0_20:
         mov     ax, ss:[bp+40]
         test    ax, ax
         jle     V2DN1_20
-        cmp     ax, 255
-        jle     V2OK1_20
-        mov     ax, 255
-V2OK1_20:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+43008]
+        mov     ax, [di+43518]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2181,13 +2142,12 @@ V2DN1_20:
         mov     ax, ss:[bx+42]
         test    ax, ax
         jle     V2DN0_21
-        cmp     ax, 255
-        jle     V2OK0_21
-        mov     ax, 255
-V2OK0_21:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+10752]
+        mov     ax, [di+11262]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2195,13 +2155,12 @@ V2DN0_21:
         mov     ax, ss:[bp+42]
         test    ax, ax
         jle     V2DN1_21
-        cmp     ax, 255
-        jle     V2OK1_21
-        mov     ax, 255
-V2OK1_21:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+43520]
+        mov     ax, [di+44030]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2210,13 +2169,12 @@ V2DN1_21:
         mov     ax, ss:[bx+44]
         test    ax, ax
         jle     V2DN0_22
-        cmp     ax, 255
-        jle     V2OK0_22
-        mov     ax, 255
-V2OK0_22:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+11264]
+        mov     ax, [di+11774]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2224,13 +2182,12 @@ V2DN0_22:
         mov     ax, ss:[bp+44]
         test    ax, ax
         jle     V2DN1_22
-        cmp     ax, 255
-        jle     V2OK1_22
-        mov     ax, 255
-V2OK1_22:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+44032]
+        mov     ax, [di+44542]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2239,13 +2196,12 @@ V2DN1_22:
         mov     ax, ss:[bx+46]
         test    ax, ax
         jle     V2DN0_23
-        cmp     ax, 255
-        jle     V2OK0_23
-        mov     ax, 255
-V2OK0_23:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+11776]
+        mov     ax, [di+12286]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2253,13 +2209,12 @@ V2DN0_23:
         mov     ax, ss:[bp+46]
         test    ax, ax
         jle     V2DN1_23
-        cmp     ax, 255
-        jle     V2OK1_23
-        mov     ax, 255
-V2OK1_23:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+44544]
+        mov     ax, [di+45054]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2268,13 +2223,12 @@ V2DN1_23:
         mov     ax, ss:[bx+48]
         test    ax, ax
         jle     V2DN0_24
-        cmp     ax, 255
-        jle     V2OK0_24
-        mov     ax, 255
-V2OK0_24:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+12288]
+        mov     ax, [di+12798]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2282,13 +2236,12 @@ V2DN0_24:
         mov     ax, ss:[bp+48]
         test    ax, ax
         jle     V2DN1_24
-        cmp     ax, 255
-        jle     V2OK1_24
-        mov     ax, 255
-V2OK1_24:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+45056]
+        mov     ax, [di+45566]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2297,13 +2250,12 @@ V2DN1_24:
         mov     ax, ss:[bx+50]
         test    ax, ax
         jle     V2DN0_25
-        cmp     ax, 255
-        jle     V2OK0_25
-        mov     ax, 255
-V2OK0_25:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+12800]
+        mov     ax, [di+13310]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2311,13 +2263,12 @@ V2DN0_25:
         mov     ax, ss:[bp+50]
         test    ax, ax
         jle     V2DN1_25
-        cmp     ax, 255
-        jle     V2OK1_25
-        mov     ax, 255
-V2OK1_25:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+45568]
+        mov     ax, [di+46078]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2326,13 +2277,12 @@ V2DN1_25:
         mov     ax, ss:[bx+52]
         test    ax, ax
         jle     V2DN0_26
-        cmp     ax, 255
-        jle     V2OK0_26
-        mov     ax, 255
-V2OK0_26:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+13312]
+        mov     ax, [di+13822]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2340,13 +2290,12 @@ V2DN0_26:
         mov     ax, ss:[bp+52]
         test    ax, ax
         jle     V2DN1_26
-        cmp     ax, 255
-        jle     V2OK1_26
-        mov     ax, 255
-V2OK1_26:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+46080]
+        mov     ax, [di+46590]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2355,13 +2304,12 @@ V2DN1_26:
         mov     ax, ss:[bx+54]
         test    ax, ax
         jle     V2DN0_27
-        cmp     ax, 255
-        jle     V2OK0_27
-        mov     ax, 255
-V2OK0_27:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+13824]
+        mov     ax, [di+14334]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2369,13 +2317,12 @@ V2DN0_27:
         mov     ax, ss:[bp+54]
         test    ax, ax
         jle     V2DN1_27
-        cmp     ax, 255
-        jle     V2OK1_27
-        mov     ax, 255
-V2OK1_27:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+46592]
+        mov     ax, [di+47102]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2384,13 +2331,12 @@ V2DN1_27:
         mov     ax, ss:[bx+56]
         test    ax, ax
         jle     V2DN0_28
-        cmp     ax, 255
-        jle     V2OK0_28
-        mov     ax, 255
-V2OK0_28:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+14336]
+        mov     ax, [di+14846]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2398,13 +2344,12 @@ V2DN0_28:
         mov     ax, ss:[bp+56]
         test    ax, ax
         jle     V2DN1_28
-        cmp     ax, 255
-        jle     V2OK1_28
-        mov     ax, 255
-V2OK1_28:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+47104]
+        mov     ax, [di+47614]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2413,13 +2358,12 @@ V2DN1_28:
         mov     ax, ss:[bx+58]
         test    ax, ax
         jle     V2DN0_29
-        cmp     ax, 255
-        jle     V2OK0_29
-        mov     ax, 255
-V2OK0_29:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+14848]
+        mov     ax, [di+15358]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2427,13 +2371,12 @@ V2DN0_29:
         mov     ax, ss:[bp+58]
         test    ax, ax
         jle     V2DN1_29
-        cmp     ax, 255
-        jle     V2OK1_29
-        mov     ax, 255
-V2OK1_29:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+47616]
+        mov     ax, [di+48126]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2442,13 +2385,12 @@ V2DN1_29:
         mov     ax, ss:[bx+60]
         test    ax, ax
         jle     V2DN0_30
-        cmp     ax, 255
-        jle     V2OK0_30
-        mov     ax, 255
-V2OK0_30:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+15360]
+        mov     ax, [di+15870]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2456,13 +2398,12 @@ V2DN0_30:
         mov     ax, ss:[bp+60]
         test    ax, ax
         jle     V2DN1_30
-        cmp     ax, 255
-        jle     V2OK1_30
-        mov     ax, 255
-V2OK1_30:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+48128]
+        mov     ax, [di+48638]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2471,13 +2412,12 @@ V2DN1_30:
         mov     ax, ss:[bx+62]
         test    ax, ax
         jle     V2DN0_31
-        cmp     ax, 255
-        jle     V2OK0_31
-        mov     ax, 255
-V2OK0_31:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+15872]
+        mov     ax, [di+16382]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2485,13 +2425,12 @@ V2DN0_31:
         mov     ax, ss:[bp+62]
         test    ax, ax
         jle     V2DN1_31
-        cmp     ax, 255
-        jle     V2OK1_31
-        mov     ax, 255
-V2OK1_31:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+48640]
+        mov     ax, [di+49150]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2500,13 +2439,12 @@ V2DN1_31:
         mov     ax, ss:[bx+64]
         test    ax, ax
         jle     V2DN0_32
-        cmp     ax, 255
-        jle     V2OK0_32
-        mov     ax, 255
-V2OK0_32:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+16384]
+        mov     ax, [di+16894]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2514,13 +2452,12 @@ V2DN0_32:
         mov     ax, ss:[bp+64]
         test    ax, ax
         jle     V2DN1_32
-        cmp     ax, 255
-        jle     V2OK1_32
-        mov     ax, 255
-V2OK1_32:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+49152]
+        mov     ax, [di+49662]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2529,13 +2466,12 @@ V2DN1_32:
         mov     ax, ss:[bx+66]
         test    ax, ax
         jle     V2DN0_33
-        cmp     ax, 255
-        jle     V2OK0_33
-        mov     ax, 255
-V2OK0_33:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+16896]
+        mov     ax, [di+17406]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2543,13 +2479,12 @@ V2DN0_33:
         mov     ax, ss:[bp+66]
         test    ax, ax
         jle     V2DN1_33
-        cmp     ax, 255
-        jle     V2OK1_33
-        mov     ax, 255
-V2OK1_33:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+49664]
+        mov     ax, [di+50174]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2558,13 +2493,12 @@ V2DN1_33:
         mov     ax, ss:[bx+68]
         test    ax, ax
         jle     V2DN0_34
-        cmp     ax, 255
-        jle     V2OK0_34
-        mov     ax, 255
-V2OK0_34:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+17408]
+        mov     ax, [di+17918]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2572,13 +2506,12 @@ V2DN0_34:
         mov     ax, ss:[bp+68]
         test    ax, ax
         jle     V2DN1_34
-        cmp     ax, 255
-        jle     V2OK1_34
-        mov     ax, 255
-V2OK1_34:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+50176]
+        mov     ax, [di+50686]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2587,13 +2520,12 @@ V2DN1_34:
         mov     ax, ss:[bx+70]
         test    ax, ax
         jle     V2DN0_35
-        cmp     ax, 255
-        jle     V2OK0_35
-        mov     ax, 255
-V2OK0_35:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+17920]
+        mov     ax, [di+18430]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2601,13 +2533,12 @@ V2DN0_35:
         mov     ax, ss:[bp+70]
         test    ax, ax
         jle     V2DN1_35
-        cmp     ax, 255
-        jle     V2OK1_35
-        mov     ax, 255
-V2OK1_35:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+50688]
+        mov     ax, [di+51198]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2616,13 +2547,12 @@ V2DN1_35:
         mov     ax, ss:[bx+72]
         test    ax, ax
         jle     V2DN0_36
-        cmp     ax, 255
-        jle     V2OK0_36
-        mov     ax, 255
-V2OK0_36:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+18432]
+        mov     ax, [di+18942]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2630,13 +2560,12 @@ V2DN0_36:
         mov     ax, ss:[bp+72]
         test    ax, ax
         jle     V2DN1_36
-        cmp     ax, 255
-        jle     V2OK1_36
-        mov     ax, 255
-V2OK1_36:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+51200]
+        mov     ax, [di+51710]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2645,13 +2574,12 @@ V2DN1_36:
         mov     ax, ss:[bx+74]
         test    ax, ax
         jle     V2DN0_37
-        cmp     ax, 255
-        jle     V2OK0_37
-        mov     ax, 255
-V2OK0_37:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+18944]
+        mov     ax, [di+19454]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2659,13 +2587,12 @@ V2DN0_37:
         mov     ax, ss:[bp+74]
         test    ax, ax
         jle     V2DN1_37
-        cmp     ax, 255
-        jle     V2OK1_37
-        mov     ax, 255
-V2OK1_37:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+51712]
+        mov     ax, [di+52222]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2674,13 +2601,12 @@ V2DN1_37:
         mov     ax, ss:[bx+76]
         test    ax, ax
         jle     V2DN0_38
-        cmp     ax, 255
-        jle     V2OK0_38
-        mov     ax, 255
-V2OK0_38:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+19456]
+        mov     ax, [di+19966]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2688,13 +2614,12 @@ V2DN0_38:
         mov     ax, ss:[bp+76]
         test    ax, ax
         jle     V2DN1_38
-        cmp     ax, 255
-        jle     V2OK1_38
-        mov     ax, 255
-V2OK1_38:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+52224]
+        mov     ax, [di+52734]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2703,13 +2628,12 @@ V2DN1_38:
         mov     ax, ss:[bx+78]
         test    ax, ax
         jle     V2DN0_39
-        cmp     ax, 255
-        jle     V2OK0_39
-        mov     ax, 255
-V2OK0_39:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+19968]
+        mov     ax, [di+20478]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2717,13 +2641,12 @@ V2DN0_39:
         mov     ax, ss:[bp+78]
         test    ax, ax
         jle     V2DN1_39
-        cmp     ax, 255
-        jle     V2OK1_39
-        mov     ax, 255
-V2OK1_39:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+52736]
+        mov     ax, [di+53246]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2732,13 +2655,12 @@ V2DN1_39:
         mov     ax, ss:[bx+80]
         test    ax, ax
         jle     V2DN0_40
-        cmp     ax, 255
-        jle     V2OK0_40
-        mov     ax, 255
-V2OK0_40:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+20480]
+        mov     ax, [di+20990]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2746,13 +2668,12 @@ V2DN0_40:
         mov     ax, ss:[bp+80]
         test    ax, ax
         jle     V2DN1_40
-        cmp     ax, 255
-        jle     V2OK1_40
-        mov     ax, 255
-V2OK1_40:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+53248]
+        mov     ax, [di+53758]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2761,13 +2682,12 @@ V2DN1_40:
         mov     ax, ss:[bx+82]
         test    ax, ax
         jle     V2DN0_41
-        cmp     ax, 255
-        jle     V2OK0_41
-        mov     ax, 255
-V2OK0_41:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+20992]
+        mov     ax, [di+21502]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2775,13 +2695,12 @@ V2DN0_41:
         mov     ax, ss:[bp+82]
         test    ax, ax
         jle     V2DN1_41
-        cmp     ax, 255
-        jle     V2OK1_41
-        mov     ax, 255
-V2OK1_41:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+53760]
+        mov     ax, [di+54270]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2790,13 +2709,12 @@ V2DN1_41:
         mov     ax, ss:[bx+84]
         test    ax, ax
         jle     V2DN0_42
-        cmp     ax, 255
-        jle     V2OK0_42
-        mov     ax, 255
-V2OK0_42:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+21504]
+        mov     ax, [di+22014]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2804,13 +2722,12 @@ V2DN0_42:
         mov     ax, ss:[bp+84]
         test    ax, ax
         jle     V2DN1_42
-        cmp     ax, 255
-        jle     V2OK1_42
-        mov     ax, 255
-V2OK1_42:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+54272]
+        mov     ax, [di+54782]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2819,13 +2736,12 @@ V2DN1_42:
         mov     ax, ss:[bx+86]
         test    ax, ax
         jle     V2DN0_43
-        cmp     ax, 255
-        jle     V2OK0_43
-        mov     ax, 255
-V2OK0_43:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+22016]
+        mov     ax, [di+22526]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2833,13 +2749,12 @@ V2DN0_43:
         mov     ax, ss:[bp+86]
         test    ax, ax
         jle     V2DN1_43
-        cmp     ax, 255
-        jle     V2OK1_43
-        mov     ax, 255
-V2OK1_43:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+54784]
+        mov     ax, [di+55294]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2848,13 +2763,12 @@ V2DN1_43:
         mov     ax, ss:[bx+88]
         test    ax, ax
         jle     V2DN0_44
-        cmp     ax, 255
-        jle     V2OK0_44
-        mov     ax, 255
-V2OK0_44:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+22528]
+        mov     ax, [di+23038]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2862,13 +2776,12 @@ V2DN0_44:
         mov     ax, ss:[bp+88]
         test    ax, ax
         jle     V2DN1_44
-        cmp     ax, 255
-        jle     V2OK1_44
-        mov     ax, 255
-V2OK1_44:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+55296]
+        mov     ax, [di+55806]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2877,13 +2790,12 @@ V2DN1_44:
         mov     ax, ss:[bx+90]
         test    ax, ax
         jle     V2DN0_45
-        cmp     ax, 255
-        jle     V2OK0_45
-        mov     ax, 255
-V2OK0_45:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+23040]
+        mov     ax, [di+23550]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2891,13 +2803,12 @@ V2DN0_45:
         mov     ax, ss:[bp+90]
         test    ax, ax
         jle     V2DN1_45
-        cmp     ax, 255
-        jle     V2OK1_45
-        mov     ax, 255
-V2OK1_45:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+55808]
+        mov     ax, [di+56318]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2906,13 +2817,12 @@ V2DN1_45:
         mov     ax, ss:[bx+92]
         test    ax, ax
         jle     V2DN0_46
-        cmp     ax, 255
-        jle     V2OK0_46
-        mov     ax, 255
-V2OK0_46:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+23552]
+        mov     ax, [di+24062]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2920,13 +2830,12 @@ V2DN0_46:
         mov     ax, ss:[bp+92]
         test    ax, ax
         jle     V2DN1_46
-        cmp     ax, 255
-        jle     V2OK1_46
-        mov     ax, 255
-V2OK1_46:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+56320]
+        mov     ax, [di+56830]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2935,13 +2844,12 @@ V2DN1_46:
         mov     ax, ss:[bx+94]
         test    ax, ax
         jle     V2DN0_47
-        cmp     ax, 255
-        jle     V2OK0_47
-        mov     ax, 255
-V2OK0_47:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+24064]
+        mov     ax, [di+24574]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2949,13 +2857,12 @@ V2DN0_47:
         mov     ax, ss:[bp+94]
         test    ax, ax
         jle     V2DN1_47
-        cmp     ax, 255
-        jle     V2OK1_47
-        mov     ax, 255
-V2OK1_47:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+56832]
+        mov     ax, [di+57342]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2964,13 +2871,12 @@ V2DN1_47:
         mov     ax, ss:[bx+96]
         test    ax, ax
         jle     V2DN0_48
-        cmp     ax, 255
-        jle     V2OK0_48
-        mov     ax, 255
-V2OK0_48:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+24576]
+        mov     ax, [di+25086]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2978,13 +2884,12 @@ V2DN0_48:
         mov     ax, ss:[bp+96]
         test    ax, ax
         jle     V2DN1_48
-        cmp     ax, 255
-        jle     V2OK1_48
-        mov     ax, 255
-V2OK1_48:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+57344]
+        mov     ax, [di+57854]
         cwd
         add     si, ax
         adc     cx, dx
@@ -2993,13 +2898,12 @@ V2DN1_48:
         mov     ax, ss:[bx+98]
         test    ax, ax
         jle     V2DN0_49
-        cmp     ax, 255
-        jle     V2OK0_49
-        mov     ax, 255
-V2OK0_49:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+25088]
+        mov     ax, [di+25598]
         cwd
         add     si, ax
         adc     cx, dx
@@ -3007,13 +2911,12 @@ V2DN0_49:
         mov     ax, ss:[bp+98]
         test    ax, ax
         jle     V2DN1_49
-        cmp     ax, 255
-        jle     V2OK1_49
-        mov     ax, 255
-V2OK1_49:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+57856]
+        mov     ax, [di+58366]
         cwd
         add     si, ax
         adc     cx, dx
@@ -3022,13 +2925,12 @@ V2DN1_49:
         mov     ax, ss:[bx+100]
         test    ax, ax
         jle     V2DN0_50
-        cmp     ax, 255
-        jle     V2OK0_50
-        mov     ax, 255
-V2OK0_50:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+25600]
+        mov     ax, [di+26110]
         cwd
         add     si, ax
         adc     cx, dx
@@ -3036,13 +2938,12 @@ V2DN0_50:
         mov     ax, ss:[bp+100]
         test    ax, ax
         jle     V2DN1_50
-        cmp     ax, 255
-        jle     V2OK1_50
-        mov     ax, 255
-V2OK1_50:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+58368]
+        mov     ax, [di+58878]
         cwd
         add     si, ax
         adc     cx, dx
@@ -3051,13 +2952,12 @@ V2DN1_50:
         mov     ax, ss:[bx+102]
         test    ax, ax
         jle     V2DN0_51
-        cmp     ax, 255
-        jle     V2OK0_51
-        mov     ax, 255
-V2OK0_51:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+26112]
+        mov     ax, [di+26622]
         cwd
         add     si, ax
         adc     cx, dx
@@ -3065,13 +2965,12 @@ V2DN0_51:
         mov     ax, ss:[bp+102]
         test    ax, ax
         jle     V2DN1_51
-        cmp     ax, 255
-        jle     V2OK1_51
-        mov     ax, 255
-V2OK1_51:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+58880]
+        mov     ax, [di+59390]
         cwd
         add     si, ax
         adc     cx, dx
@@ -3080,13 +2979,12 @@ V2DN1_51:
         mov     ax, ss:[bx+104]
         test    ax, ax
         jle     V2DN0_52
-        cmp     ax, 255
-        jle     V2OK0_52
-        mov     ax, 255
-V2OK0_52:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+26624]
+        mov     ax, [di+27134]
         cwd
         add     si, ax
         adc     cx, dx
@@ -3094,13 +2992,12 @@ V2DN0_52:
         mov     ax, ss:[bp+104]
         test    ax, ax
         jle     V2DN1_52
-        cmp     ax, 255
-        jle     V2OK1_52
-        mov     ax, 255
-V2OK1_52:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+59392]
+        mov     ax, [di+59902]
         cwd
         add     si, ax
         adc     cx, dx
@@ -3109,13 +3006,12 @@ V2DN1_52:
         mov     ax, ss:[bx+106]
         test    ax, ax
         jle     V2DN0_53
-        cmp     ax, 255
-        jle     V2OK0_53
-        mov     ax, 255
-V2OK0_53:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+27136]
+        mov     ax, [di+27646]
         cwd
         add     si, ax
         adc     cx, dx
@@ -3123,13 +3019,12 @@ V2DN0_53:
         mov     ax, ss:[bp+106]
         test    ax, ax
         jle     V2DN1_53
-        cmp     ax, 255
-        jle     V2OK1_53
-        mov     ax, 255
-V2OK1_53:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+59904]
+        mov     ax, [di+60414]
         cwd
         add     si, ax
         adc     cx, dx
@@ -3138,13 +3033,12 @@ V2DN1_53:
         mov     ax, ss:[bx+108]
         test    ax, ax
         jle     V2DN0_54
-        cmp     ax, 255
-        jle     V2OK0_54
-        mov     ax, 255
-V2OK0_54:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+27648]
+        mov     ax, [di+28158]
         cwd
         add     si, ax
         adc     cx, dx
@@ -3152,13 +3046,12 @@ V2DN0_54:
         mov     ax, ss:[bp+108]
         test    ax, ax
         jle     V2DN1_54
-        cmp     ax, 255
-        jle     V2OK1_54
-        mov     ax, 255
-V2OK1_54:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+60416]
+        mov     ax, [di+60926]
         cwd
         add     si, ax
         adc     cx, dx
@@ -3167,13 +3060,12 @@ V2DN1_54:
         mov     ax, ss:[bx+110]
         test    ax, ax
         jle     V2DN0_55
-        cmp     ax, 255
-        jle     V2OK0_55
-        mov     ax, 255
-V2OK0_55:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+28160]
+        mov     ax, [di+28670]
         cwd
         add     si, ax
         adc     cx, dx
@@ -3181,13 +3073,12 @@ V2DN0_55:
         mov     ax, ss:[bp+110]
         test    ax, ax
         jle     V2DN1_55
-        cmp     ax, 255
-        jle     V2OK1_55
-        mov     ax, 255
-V2OK1_55:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+60928]
+        mov     ax, [di+61438]
         cwd
         add     si, ax
         adc     cx, dx
@@ -3196,13 +3087,12 @@ V2DN1_55:
         mov     ax, ss:[bx+112]
         test    ax, ax
         jle     V2DN0_56
-        cmp     ax, 255
-        jle     V2OK0_56
-        mov     ax, 255
-V2OK0_56:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+28672]
+        mov     ax, [di+29182]
         cwd
         add     si, ax
         adc     cx, dx
@@ -3210,13 +3100,12 @@ V2DN0_56:
         mov     ax, ss:[bp+112]
         test    ax, ax
         jle     V2DN1_56
-        cmp     ax, 255
-        jle     V2OK1_56
-        mov     ax, 255
-V2OK1_56:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+61440]
+        mov     ax, [di+61950]
         cwd
         add     si, ax
         adc     cx, dx
@@ -3225,13 +3114,12 @@ V2DN1_56:
         mov     ax, ss:[bx+114]
         test    ax, ax
         jle     V2DN0_57
-        cmp     ax, 255
-        jle     V2OK0_57
-        mov     ax, 255
-V2OK0_57:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+29184]
+        mov     ax, [di+29694]
         cwd
         add     si, ax
         adc     cx, dx
@@ -3239,13 +3127,12 @@ V2DN0_57:
         mov     ax, ss:[bp+114]
         test    ax, ax
         jle     V2DN1_57
-        cmp     ax, 255
-        jle     V2OK1_57
-        mov     ax, 255
-V2OK1_57:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+61952]
+        mov     ax, [di+62462]
         cwd
         add     si, ax
         adc     cx, dx
@@ -3254,13 +3141,12 @@ V2DN1_57:
         mov     ax, ss:[bx+116]
         test    ax, ax
         jle     V2DN0_58
-        cmp     ax, 255
-        jle     V2OK0_58
-        mov     ax, 255
-V2OK0_58:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+29696]
+        mov     ax, [di+30206]
         cwd
         add     si, ax
         adc     cx, dx
@@ -3268,13 +3154,12 @@ V2DN0_58:
         mov     ax, ss:[bp+116]
         test    ax, ax
         jle     V2DN1_58
-        cmp     ax, 255
-        jle     V2OK1_58
-        mov     ax, 255
-V2OK1_58:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+62464]
+        mov     ax, [di+62974]
         cwd
         add     si, ax
         adc     cx, dx
@@ -3283,13 +3168,12 @@ V2DN1_58:
         mov     ax, ss:[bx+118]
         test    ax, ax
         jle     V2DN0_59
-        cmp     ax, 255
-        jle     V2OK0_59
-        mov     ax, 255
-V2OK0_59:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+30208]
+        mov     ax, [di+30718]
         cwd
         add     si, ax
         adc     cx, dx
@@ -3297,13 +3181,12 @@ V2DN0_59:
         mov     ax, ss:[bp+118]
         test    ax, ax
         jle     V2DN1_59
-        cmp     ax, 255
-        jle     V2OK1_59
-        mov     ax, 255
-V2OK1_59:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+62976]
+        mov     ax, [di+63486]
         cwd
         add     si, ax
         adc     cx, dx
@@ -3312,13 +3195,12 @@ V2DN1_59:
         mov     ax, ss:[bx+120]
         test    ax, ax
         jle     V2DN0_60
-        cmp     ax, 255
-        jle     V2OK0_60
-        mov     ax, 255
-V2OK0_60:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+30720]
+        mov     ax, [di+31230]
         cwd
         add     si, ax
         adc     cx, dx
@@ -3326,13 +3208,12 @@ V2DN0_60:
         mov     ax, ss:[bp+120]
         test    ax, ax
         jle     V2DN1_60
-        cmp     ax, 255
-        jle     V2OK1_60
-        mov     ax, 255
-V2OK1_60:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+63488]
+        mov     ax, [di+63998]
         cwd
         add     si, ax
         adc     cx, dx
@@ -3341,13 +3222,12 @@ V2DN1_60:
         mov     ax, ss:[bx+122]
         test    ax, ax
         jle     V2DN0_61
-        cmp     ax, 255
-        jle     V2OK0_61
-        mov     ax, 255
-V2OK0_61:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+31232]
+        mov     ax, [di+31742]
         cwd
         add     si, ax
         adc     cx, dx
@@ -3355,13 +3235,12 @@ V2DN0_61:
         mov     ax, ss:[bp+122]
         test    ax, ax
         jle     V2DN1_61
-        cmp     ax, 255
-        jle     V2OK1_61
-        mov     ax, 255
-V2OK1_61:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+64000]
+        mov     ax, [di+64510]
         cwd
         add     si, ax
         adc     cx, dx
@@ -3370,13 +3249,12 @@ V2DN1_61:
         mov     ax, ss:[bx+124]
         test    ax, ax
         jle     V2DN0_62
-        cmp     ax, 255
-        jle     V2OK0_62
-        mov     ax, 255
-V2OK0_62:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+31744]
+        mov     ax, [di+32254]
         cwd
         add     si, ax
         adc     cx, dx
@@ -3384,13 +3262,12 @@ V2DN0_62:
         mov     ax, ss:[bp+124]
         test    ax, ax
         jle     V2DN1_62
-        cmp     ax, 255
-        jle     V2OK1_62
-        mov     ax, 255
-V2OK1_62:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+64512]
+        mov     ax, [di+65022]
         cwd
         add     si, ax
         adc     cx, dx
@@ -3399,13 +3276,12 @@ V2DN1_62:
         mov     ax, ss:[bx+126]
         test    ax, ax
         jle     V2DN0_63
-        cmp     ax, 255
-        jle     V2OK0_63
-        mov     ax, 255
-V2OK0_63:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+32256]
+        mov     ax, [di+32766]
         cwd
         add     si, ax
         adc     cx, dx
@@ -3413,13 +3289,12 @@ V2DN0_63:
         mov     ax, ss:[bp+126]
         test    ax, ax
         jle     V2DN1_63
-        cmp     ax, 255
-        jle     V2OK1_63
-        mov     ax, 255
-V2OK1_63:
+        sub     ax, 255
+        cwd
+        and     ax, dx
         add     ax, ax
         mov     di, ax
-        mov     ax, [di+65024]
+        mov     ax, [di+65534]
         cwd
         add     si, ax
         adc     cx, dx

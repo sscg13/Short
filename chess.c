@@ -1461,6 +1461,9 @@ int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "memprobe") == 0)
         return mem_probe();
 
+    if (argc > 1 && strcmp(argv[1], "fbench") == 0)
+        return nnue_fwd_bench();
+
     if (argc > 1 && strcmp(argv[1], "nbench") == 0)
         return nnue_bench();
 

@@ -197,11 +197,18 @@ typedef struct { i32 att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm, tp, ts; } VW;
    part of the plan cost they carry is unchanged in kind. */
 static const VW vw_tab[4] = {
     /* att ps gc gq gm mk nm rf ev rn rm tp ts: cycles per counted operation */
-    {    656,      0,   4614,  12366, 135646,    950,    520,   2662,   5109,   1552,   2120,    652,    652 }, /* 80286 */
-    {   1970,      0,  12093,  37502, 465065,   3123,   1897,   8696,  15596,   3390,   4360,   2246,   2389 }, /* 8088 */
-    {   1693,      0,  10353,  32474, 413168,   2734,   1636,   7999,  13072,   2027,   3099,   1915,   2011 }, /* 8086 */
-    {   1003,    131,   6170,  18639, 215267,   1507,    907,   4669,   7540,   2266,   2827,   1181,   1228 }, /* 80186 */
+    {    656,      0,   4614,  12366, 135646,    950,    520,   2662,   4504,   1552,   2120,    652,    652 }, /* 80286 */
+    {   1970,      0,  12093,  37502, 465065,   3123,   1897,   8696,  15476,   3390,   4360,   2246,   2389 }, /* 8088 */
+    {   1693,      0,  10353,  32474, 413168,   2734,   1636,   7999,  12971,   2027,   3099,   1915,   2011 }, /* 8086 */
+    {   1003,    131,   6170,  18639, 215267,   1507,    907,   4669,   6999,   2266,   2827,   1181,   1228 }, /* 80186 */
 };
+/* 2026-11-11: the forward pass's 255 clamp became branchless (gen_nnue_batch.py
+   `_fwd_body`), so `ev` was re-measured and dropped by 605 / 120 / 101 / 541
+   cycles per eval on 80286 / 8088 / 8086 / 80186 (`chess fbench`: markers on the
+   Nimbus, guest-ms on 86Box; the 8086 scales its 8088 share). The depth-4
+   references in vclock_cal_cyc are that build's bench-4 totals, so the model
+   still reproduces the measured level (calcheck +0%). No other row moved: the
+   change is entirely inside nn_fwd_eval. */
 /* att and gc were refitted 2026-11-04 when the hand-written is_attacked and
    gen_caps became the default. Both rows are scaled by the measured asm/C ratio
    from the Nimbus sbench markers: att 1,081 / 2,274 = 0.4754, gc 7,188 / 16,531
@@ -368,10 +375,10 @@ i32 vclock_est_nps(i32 nodes) {
 #define VCLOCK_CAL_NODES   47400
 #define VCLOCK_CAL_TOL_PCT 3
 static const i32 vclock_cal_cyc[4] = {
-    19659,  /* 80286 */
-    62876,  /* 8088 */
-    53747,  /* 8086 (derived: 8088 x 57,945/67,787) */
-    31271,  /* 80186 */
+    19282,  /* 80286 */
+    62819,  /* 8088 */
+    53699,  /* 8086 (derived: 8088 x 57,945/67,787) */
+    30930,  /* 80186 */
 };
 static const char *const vclock_cpu_name[4] = {
     "80286", "8088", "8086", "80186"

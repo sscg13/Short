@@ -817,6 +817,39 @@ static void hmirror_pos(Pos *dst, const Pos *src) {
 
 #endif /* NN_TEST helpers */
 
+/* Forward-pass micro-benchmark (`chess fbench`): times nn_fwd_eval alone, so the
+   forward can be priced apart from the materialize/batch path that nbench folds
+   into its eval loop. MARKERS 0x2A/0x2B. */
+int nnue_fwd_bench(void) {
+    static Pos pos;
+    i16 i;
+    i32 ms;
+    clock_t t0, t1;
+    const i16 iters = 4000;
+
+#ifdef NNUE_ASM_FWD
+    parse_fen(&pos, "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
+    nnue_reset(&pos);
+    nnue_active = 1;
+    nnue_eval(&pos);                    /* build the accumulators once */
+    t0 = engine_clock();
+    MAME_MARK(0x2A);
+    for (i = 0; i < iters; i++) nn_fwd_eval(pos.side);
+    MAME_MARK(0x2B);
+    t1 = engine_clock();
+#ifdef __WATCOMC__
+    ms = (i32)(u16)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
+#else
+    ms = ((i32)(t1 - t0)) * 1000 / CLOCKS_PER_SEC;
+#endif
+    printf("fbench iters=%d total_ms=%ld\n", (int)iters, (long)ms);
+#else
+    (void)pos; (void)i; (void)ms; (void)t0; (void)t1; (void)iters;
+    printf("fbench: only the 16-bit build has an asm forward pass\n");
+#endif
+    return 0;
+}
+
 /* direct per-call cost measurement (`chess nbench`): times nnue_eval and a
    make/undo pair in loops, prints ms per 1000 calls. Convert to cycles with the
    host clock (8088 16 MHz: cyc = ms*16 per call; 286 6 MHz: cyc = ms*6). */

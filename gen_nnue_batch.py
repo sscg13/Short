@@ -395,7 +395,16 @@ PERSP_FOOTER = (
 def _fwd_body():
     """per-slot stm+nstm blocks: acc -> act = clamp(acc,0,255) -> table load.
     bx=stm acc base, bp=nstm acc base; di = 2*act; fwd[0][j] base = j*512,
-    fwd[1][j] base = 32768 + j*512 (the shared [2][64][256] far array)."""
+    fwd[1][j] base = 32768 + j*512 (the shared [2][64][256] far array).
+
+    The clamp is branchless and folds its +255 into the load displacement, which
+    is why the index base is `base + 510`: d = act - 255, `cwd` turns d's sign
+    into dx, `and ax,dx` keeps d only when it is negative, and doubling it gives
+    the offset into `base+510`, i.e. slot[2*act] for act <= 255 and slot[510]
+    (the act=255 entry) for act > 255. act > 255 happens on 11.7% of live terms,
+    so the former `cmp ax,255 / jle` was a taken branch on the other 88.3%; this
+    form costs one extra byte and no branch. Measured (artifacts/fwd-i32-2026-11-10,
+    80186/80286/8088): forward -7.8% / -12.7% / -0.8%, tree unchanged."""
     lines = []
     for j in range(N):
         lines.append("; ---- slot %d ----" % j)
@@ -404,13 +413,12 @@ def _fwd_body():
                 "        mov     ax, ss:[%s+%d]" % (reg, 2 * j),
                 "        test    ax, ax",
                 "        jle     V2DN%s_%d" % (tag, j),
-                "        cmp     ax, 255",
-                "        jle     V2OK%s_%d" % (tag, j),
-                "        mov     ax, 255",
-                "V2OK%s_%d:" % (tag, j),
+                "        sub     ax, 255",
+                "        cwd",
+                "        and     ax, dx",
                 "        add     ax, ax",
                 "        mov     di, ax",
-                "        mov     ax, [di+%d]" % base,
+                "        mov     ax, [di+%d]" % (base + 510),
                 "        cwd",
                 "        add     si, ax",
                 "        adc     cx, dx",
@@ -425,6 +433,9 @@ FWD_HEADER = (
     "; act = clamp(acc, 0, 255) and fwd[p][j][act] = (act^2 * w2) >>\n"
     "; NNUE_ACT2_SHIFT (9) (the squared product is pre-shifted so every entry\n"
     "; fits i16 - max 255^2*127>>9 = 16129). Nonpositive terms skip all work.\n"
+    "; The 255 clamp is branchless: the load uses base+510 and the sign-masked\n"
+    "; index offset, so act > 255 (11.7% of live terms) reads the act=255 entry\n"
+    "; without a taken branch (see _fwd_body).\n"
     "; Table layout is the shared far array fwd[2][64][256]: fwd[0][j]\n"
     "; base = j*512, fwd[1][j] base = 32768 + j*512 (persp 1 starts at +32768).\n"
     "; si:cx = the 32-bit accumulator seeded from the bias; the finish shifts it\n"

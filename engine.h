@@ -303,6 +303,7 @@ void nnue_tables_init(void);   /* one-time table builds (rowtab/fwd/castle) afte
 int nnue_selftest(const char *fen);
 #endif
 int nnue_bench(void);
+int nnue_fwd_bench(void);   /* forward-pass micro-benchmark (fbench) */
 
 /* Memory budget probe (mem.c): `chess memprobe`.  On the 16-bit target it reads
    the live DOS memory map; on the host build it predicts the image's free space
