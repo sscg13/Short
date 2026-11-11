@@ -71,8 +71,15 @@ static i32 nn_curve[256]; /* one-curve streaming buffer, including on DOS */
 #if defined(__WATCOMC__) && !defined(__386__)
 #define NNUE_STREAM_CURVES 1
 #else
-/* Native arithmetic oracle retains raw curves; DOS keeps only products. */
+/* Host copy of the DOS product table: (curve[a] * w2) >> 9 per neuron, so the
+   forward pass is one table read and one add per term instead of a 32-bit load,
+   a multiply and a shift. Built whenever a curve is installed (load and TUNE).
+   The raw per-neuron responses below are kept only for the NN_TEST oracle, which
+   multiplies them independently and compares against this table. */
+static i16 nn_prod[2][NNUE_N][256];
+#ifdef NN_TEST
 static i32 nn_neuron_curve[NNUE_N][256];
+#endif
 #endif
 
 i16 nn_bias;        /* output bias, i16, quantized at 128*64 (WORD for the asm fwd) */
@@ -168,15 +175,13 @@ i16 nn_plan_slot(Pos *p, u16 m, i16 cap);
 #endif
 #endif
 
-/* The DOS scalar checks use the streamed products. Native checks independently
-   multiply the stored raw per-neuron responses; cross-build tests cover both. */
-static i32 nn_curve_term(i16 slot, i16 a) {
+/* The DOS scalar checks use the streamed products; the host forward reads the
+   same product table (nn_prod), so only the 16-bit oracle needs this. */
 #ifdef NNUE_STREAM_CURVES
+static i32 nn_curve_term(i16 slot, i16 a) {
     return (i32)nn_fwd[slot >> 6][slot & 63][a];
-#else
-    return (nn_neuron_curve[slot & 63][a] * nn_w2[slot]) >> NNUE_ACT2_SHIFT;
-#endif
 }
+#endif
 
 /* ------------------------------------------------------------------ */
 /* feature indexing                                                   */
@@ -558,6 +563,53 @@ void nnue_undo(Pos *p) {
 /* forward pass                                                       */
 /* ------------------------------------------------------------------ */
 
+#if !defined(NNUE_ASM_FWD)
+/* Scalar forward: the oracle for the DOS product-table routine and the live
+   path on hosts. act = clamp(acc, 0, 255); term = (curve[act] * w2) >> 9. The
+   bounded lookup response (max magnitude 65025) is pre-shifted so the forward
+   table fits i16; out stays i32 and the final >>5 (1.0 = 256 cp) is unchanged.
+   stm/nstm: acc[0] is the white POV, acc[1] the black POV. The net is
+   side-to-move-aware (the trainer always treats the side to move as "white" in
+   feature space), so when black is to move the weight roles SWAP (acc[1] is the
+   stm POV) and there is NO final negate - the score is already from the side to
+   move's perspective. */
+static Score nn_forward_c(i16 side) {
+    i32 out = nn_bias;
+    i16 j;
+
+#ifdef NNUE_STREAM_CURVES
+    /* 16-bit oracle (only built when the generated forward is disabled):
+       streamed products out of nn_fwd, the per-neuron product table that
+       nn_curve_install fills. */
+    for (j = 0; j < NNUE_N; j++) {
+        i16 a0 = nn_acc[nn_ply][0][j], a1 = nn_acc[nn_ply][1][j];
+        i16 as = (side == 0) ? a0 : a1;  /* stm activation */
+        i16 an = (side == 0) ? a1 : a0;  /* nstm activation */
+        i32 xs = (as < 0) ? 0 : (as > 255 ? 255 : as);
+        i32 xn = (an < 0) ? 0 : (an > 255 ? 255 : an);
+        out += nn_curve_term(j, (i16)xs);
+        out += nn_curve_term(NNUE_N + j, (i16)xn);
+    }
+#else
+    /* Host: same table, indexed directly by side so the stm/nstm swap is two
+       pointer choices instead of a test per term. The weight blocks do NOT
+       swap with the side: block 0 is always the stm term. */
+    const i16 *act0 = nn_acc[nn_ply][side ? 1 : 0];
+    const i16 *act1 = nn_acc[nn_ply][side ? 0 : 1];
+    const i16 (*prod0)[256] = nn_prod[0];
+    const i16 (*prod1)[256] = nn_prod[1];
+
+    for (j = 0; j < NNUE_N; j++) {
+        i16 a0 = act0[j], a1 = act1[j];
+        a0 = (a0 < 0) ? 0 : (a0 > 255 ? 255 : a0);
+        a1 = (a1 < 0) ? 0 : (a1 > 255 ? 255 : a1);
+        out += prod0[j][a0] + prod1[j][a1];
+    }
+#endif
+    return (Score)(out >> NNUE_SCALE_SHIFT);
+}
+#endif /* !NNUE_ASM_FWD */
+
 Score nnue_eval(Pos *p) {
     nn_materialize(0);
     nn_materialize(1);
@@ -565,29 +617,7 @@ Score nnue_eval(Pos *p) {
 #ifdef NNUE_ASM_FWD
     return nn_fwd_eval(p->side);
 #else
-    {
-        i32 out = nn_bias;
-        i16 j;
-        /* act = clamp(acc, 0, 255); term = (curve[act] * w2) >> 9. The
-           bounded lookup response (max magnitude 65025) is pre-shifted so the
-           forward table still fits i16; out stays i32 and the final >>5
-           (1.0 = 256 cp) is unchanged. stm/nstm: acc[0] is the white POV,
-           acc[1] the black POV. The net is side-to-move-aware (the trainer
-           always treats the side to move as "white" in feature space), so when
-           black is to move the weight roles SWAP (acc[1] is the stm POV) and
-           there is NO final negate - the score is already from the side to
-           move's perspective. */
-        for (j = 0; j < NNUE_N; j++) {
-            i16 a0 = nn_acc[nn_ply][0][j], a1 = nn_acc[nn_ply][1][j];
-            i16 as = (p->side == 0) ? a0 : a1;  /* stm activation */
-            i16 an = (p->side == 0) ? a1 : a0;  /* nstm activation */
-            i32 xs = (as < 0) ? 0 : (as > 255 ? 255 : as);
-            i32 xn = (an < 0) ? 0 : (an > 255 ? 255 : an);
-            out += nn_curve_term(j, (i16)xs);
-            out += nn_curve_term(NNUE_N + j, (i16)xn);
-        }
-        return (Score)(out >> NNUE_SCALE_SHIFT);
-    }
+    return nn_forward_c(p->side);
 #endif
 }
 
@@ -607,7 +637,15 @@ static void nn_curve_install(i16 j) {
         nn_fwd[1][j][a] = (i16)((nn_curve[a] * w1) >> NNUE_ACT2_SHIFT);
     }
 #else
+    i16 a;
+    i16 w0 = nn_w2[j], w1 = nn_w2[NNUE_N + j];
+#ifdef NN_TEST
     memcpy(nn_neuron_curve[j], nn_curve, sizeof nn_curve);
+#endif
+    for (a = 0; a < 256; a++) {
+        nn_prod[0][j][a] = (i16)((nn_curve[a] * w0) >> NNUE_ACT2_SHIFT);
+        nn_prod[1][j][a] = (i16)((nn_curve[a] * w1) >> NNUE_ACT2_SHIFT);
+    }
 #endif
 }
 
@@ -817,48 +855,52 @@ static void hmirror_pos(Pos *dst, const Pos *src) {
 
 #endif /* NN_TEST helpers */
 
-/* Forward-pass micro-benchmark (`chess fbench`): times nn_fwd_eval alone, so the
-   forward can be priced apart from the materialize/batch path that nbench folds
-   into its eval loop. MARKERS 0x2A/0x2B. */
+/* Forward-pass micro-benchmark (`chess fbench`): times the live forward pass
+   alone, so it can be priced apart from the materialize/batch path that nbench
+   folds into its eval loop. DOS: the generated product-table routine (markers
+   0x2A/0x2B, milliseconds). Host: the scalar oracle (TSC cycles per call). */
 int nnue_fwd_bench(void) {
     static Pos pos;
     i16 i;
-    i32 ms;
-    clock_t t0, t1;
+    BenchTick t0, t1;
     const i16 iters = 4000;
+    i32 acc;
 
-#ifdef NNUE_ASM_FWD
     parse_fen(&pos, "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
     nnue_reset(&pos);
     nnue_active = 1;
     nnue_eval(&pos);                    /* build the accumulators once */
-    t0 = engine_clock();
+    t0 = BENCH_NOW();
     MAME_MARK(0x2A);
-    for (i = 0; i < iters; i++) nn_fwd_eval(pos.side);
-    MAME_MARK(0x2B);
-    t1 = engine_clock();
-#ifdef __WATCOMC__
-    ms = (i32)(u16)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
+    for (i = 0; i < iters; i++) {
+#ifdef NNUE_ASM_FWD
+        BENCH_PROBE(nn_fwd_eval(pos.side));
 #else
-    ms = ((i32)(t1 - t0)) * 1000 / CLOCKS_PER_SEC;
+        BENCH_PROBE(nn_forward_c(pos.side));
 #endif
-    printf("fbench iters=%d total_ms=%ld\n", (int)iters, (long)ms);
+    }
+    MAME_MARK(0x2B);
+    t1 = BENCH_NOW();
+    acc = BENCH_ACC(t0, t1);
+#ifndef __WATCOMC__
+    printf("fbench iters=%d %ld %s\n", (int)iters,
+           BENCH_PER(acc, iters), BENCH_UNIT);
 #else
-    (void)pos; (void)i; (void)ms; (void)t0; (void)t1; (void)iters;
-    printf("fbench: only the 16-bit build has an asm forward pass\n");
+    printf("fbench iters=%d total_ms=%ld\n", (int)iters, (long)acc);
 #endif
     return 0;
 }
 
 /* direct per-call cost measurement (`chess nbench`): times nnue_eval and a
-   make/undo pair in loops, prints ms per 1000 calls. Convert to cycles with the
-   host clock (8088 16 MHz: cyc = ms*16 per call; 286 6 MHz: cyc = ms*6). */
+   make/undo pair in loops, prints microseconds (DOS) or TSC cycles (host) per
+   call. Convert DOS values to cycles with the clock (8088 16 MHz: cyc = us*16;
+   286 6 MHz: cyc = us*6). */
 int nnue_bench(void) {
     static Pos pos;
     static u16 list[256];
     Undo u;
     i16 i, n, iters;
-    clock_t t0, t1;
+    BenchTick t0, t1;
     i32 eval_ms, delta_ms, capture_ms;
 
     parse_fen(&pos, "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
@@ -868,19 +910,12 @@ int nnue_bench(void) {
     if (n <= 0) return 1;
 
     iters = 4000;
-    t0 = engine_clock();
+    t0 = BENCH_NOW();
     MAME_MARK(0x20);
-    for (i = 0; i < iters; i++) nnue_eval(&pos);
+    for (i = 0; i < iters; i++) BENCH_PROBE(nnue_eval(&pos));
     MAME_MARK(0x21);
-    t1 = engine_clock();
-#ifdef __WATCOMC__
-    /* engine_clock() is 32-bit milliseconds; each calibration block is
-       shorter than 65.536 s, so the low 16 bits of the difference are exact
-       and the multiply stays 16-bit cheap on the target. */
-    eval_ms = (i32)(u16)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
-#else
-    eval_ms = ((i32)(t1 - t0)) * 1000 / CLOCKS_PER_SEC;
-#endif
+    t1 = BENCH_NOW();
+    eval_ms = BENCH_ACC(t0, t1);
 
     iters = 10000;
     {
@@ -891,7 +926,7 @@ int nnue_bench(void) {
                 break;
             }
         if (!qm) return 1;
-        t0 = engine_clock();
+        t0 = BENCH_NOW();
         MAME_MARK(0x22);
 #ifdef PROFILE
         {
@@ -907,12 +942,8 @@ int nnue_bench(void) {
             printf("nbench applies=%ld flips=%ld\n", (long)(c_refresh - r0), (long)(c_flip - f0));
         }
 #endif
-        t1 = engine_clock();
-#ifdef __WATCOMC__
-        delta_ms = (i32)(u16)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
-#else
-        delta_ms = ((i32)(t1 - t0)) * 1000 / CLOCKS_PER_SEC;
-#endif
+        t1 = BENCH_NOW();
+        delta_ms = BENCH_ACC(t0, t1);
     }
 
     /* Lazy builds force materialization inside both make/undo loops, so these
@@ -927,7 +958,7 @@ int nnue_bench(void) {
                 break;
             }
         if (!cm) return 1;
-        t0 = engine_clock();
+        t0 = BENCH_NOW();
         MAME_MARK(0x24);
         for (i = 0; i < iters; i++) {
             do_make(&pos, cm, &u);
@@ -935,12 +966,8 @@ int nnue_bench(void) {
             undo_move(&pos, cm, &u);
         }
         MAME_MARK(0x25);
-        t1 = engine_clock();
-#ifdef __WATCOMC__
-        capture_ms = (i32)(u16)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
-#else
-        capture_ms = ((i32)(t1 - t0)) * 1000 / CLOCKS_PER_SEC;
-#endif
+        t1 = BENCH_NOW();
+        capture_ms = BENCH_ACC(t0, t1);
     }
 
     /* Separately measure planning plus board make/undo without evaluation.
@@ -956,27 +983,35 @@ int nnue_bench(void) {
                     pm = list[i]; break;
                 }
             if (!pm) return 1;
-            t0 = engine_clock();
+            t0 = BENCH_NOW();
             MAME_MARK(kind ? 0x28 : 0x26);
             for (i = 0; i < iters; i++) {
                 do_make(&pos, pm, &u);
                 undo_move(&pos, pm, &u);
             }
             MAME_MARK(kind ? 0x29 : 0x27);
-            t1 = engine_clock();
-#ifdef __WATCOMC__
-            plan_ms[kind] = (i32)(u16)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
-#else
-            plan_ms[kind] = ((i32)(t1 - t0)) * 1000 / CLOCKS_PER_SEC;
-#endif
+            t1 = BENCH_NOW();
+            plan_ms[kind] = BENCH_ACC(t0, t1);
         }
+#ifndef __WATCOMC__
+        printf("nbench plan quiet=%ld capture=%ld (%s)\n",
+               BENCH_PER(plan_ms[0], 10000), BENCH_PER(plan_ms[1], 10000),
+               BENCH_UNIT);
+#else
         printf("nbench plan_raw_ms quiet=%ld capture=%ld\n",
                (long)plan_ms[0], (long)plan_ms[1]);
+#endif
     }
 
+#ifndef __WATCOMC__
+    printf("nbench eval=%ld delta=%ld capture=%ld (%s)\n",
+           BENCH_PER(eval_ms, 4000), BENCH_PER(delta_ms, 10000),
+           BENCH_PER(capture_ms, 10000), BENCH_UNIT);
+#else
     printf("nbench eval1000=%ld delta1000=%ld\n",
            (long)(eval_ms * 1000 / 4000), (long)(delta_ms * 1000 / 10000));
     printf("nbench capture1000=%ld\n", (long)(capture_ms * 1000 / 10000));
+#endif
 #ifdef TIMING_DETAIL
     printf("nbench raw_ms eval=%ld delta=%ld capture=%ld\n",
            (long)eval_ms, (long)delta_ms, (long)capture_ms);
@@ -986,6 +1021,15 @@ int nnue_bench(void) {
 }
 
 #ifdef NN_TEST
+/* NN_TEST oracle for the host build: the independent raw response multiply the
+   product table is derived from, so nn_chain_check tests the table path against
+   it. The 16-bit build already streams the products (nn_curve_term above). */
+#ifndef NNUE_STREAM_CURVES
+static i32 nn_curve_term(i16 slot, i16 a) {
+    return (nn_neuron_curve[slot & 63][a] * nn_w2[slot]) >> NNUE_ACT2_SHIFT;
+}
+#endif
+
 /* Exercise chains whose parents have never been evaluated, sibling reuse,
    horizontal king flips in both directions, castling, EP, promotions and nulls. */
 static i16 nn_chain_check(Pos *p, i16 fresh[2][NNUE_N]) {

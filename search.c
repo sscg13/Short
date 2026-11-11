@@ -1376,7 +1376,7 @@ int sbench(void) {
     Undo u;
     u16 m;
     i16 i, iters, p;
-    clock_t t0, t1;
+    BenchTick t0, t1;
     i32 att = 0, caps = 0, quiets = 0, drain = 0, make10k = 0, sig = 0;
     i32 ttpr = 0, ttst = 0;
     TTData tt;
@@ -1387,88 +1387,89 @@ int sbench(void) {
         gen_moves(&pos, list);
 
         iters = 1500;
-        t0 = engine_clock();
+        t0 = BENCH_NOW();
         MAME_MARK(0x10);
         for (i = 0; i < iters; i++) {
-            is_attacked(&pos, pos.ks[0], 1);
-            is_attacked(&pos, pos.ks[1], 0);
+            BENCH_PROBE(is_attacked(&pos, pos.ks[0], 1));
+            BENCH_PROBE(is_attacked(&pos, pos.ks[1], 0));
         }
         MAME_MARK(0x11);
-        t1 = engine_clock();
-        att += (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
+        t1 = BENCH_NOW();
+        att += BENCH_ACC(t0, t1);
 
         iters = 300;
-        t0 = engine_clock();
+        t0 = BENCH_NOW();
         MAME_MARK(0x12);
-        for (i = 0; i < iters; i++) gen_caps(&pos, list);
+        for (i = 0; i < iters; i++) BENCH_PROBE(gen_caps(&pos, list));
         MAME_MARK(0x13);
-        t1 = engine_clock();
-        caps += (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
+        t1 = BENCH_NOW();
+        caps += BENCH_ACC(t0, t1);
 
-        t0 = engine_clock();
+        t0 = BENCH_NOW();
         MAME_MARK(0x14);
-        for (i = 0; i < iters; i++) gen_quiets(&pos, list);
+        for (i = 0; i < iters; i++) BENCH_PROBE(gen_quiets(&pos, list));
         MAME_MARK(0x15);
-        t1 = engine_clock();
-        quiets += (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
+        t1 = BENCH_NOW();
+        quiets += BENCH_ACC(t0, t1);
 
-        t0 = engine_clock();
+        t0 = BENCH_NOW();
         MAME_MARK(0x16);
         for (i = 0; i < iters; i++) {
             mgen_init(&pos, &mg, 0, 0, 0, 0);
-            while ((m = next_move(&pos, &mg)) != 0) ;
+            while ((m = next_move(&pos, &mg)) != 0) BENCH_PROBE(m);
         }
         MAME_MARK(0x17);
-        t1 = engine_clock();
-        drain += (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
+        t1 = BENCH_NOW();
+        drain += BENCH_ACC(t0, t1);
 
         iters = 2000;
-        t0 = engine_clock();
+        t0 = BENCH_NOW();
         MAME_MARK(0x18);
         for (i = 0; i < iters; i++) {
             do_make(&pos, list[0], &u);
             undo_move(&pos, list[0], &u);
         }
         MAME_MARK(0x19);
-        t1 = engine_clock();
-        make10k += (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
+        t1 = BENCH_NOW();
+        make10k += BENCH_ACC(t0, t1);
 
         iters = 400;
-        t0 = engine_clock();
+        t0 = BENCH_NOW();
         MAME_MARK(0x1a);
-        for (i = 0; i < iters; i++) pos_sig(&pos);
+        for (i = 0; i < iters; i++) BENCH_PROBE(pos_sig(&pos));
         MAME_MARK(0x1b);
-        t1 = engine_clock();
-        sig += (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
+        t1 = BENCH_NOW();
+        sig += BENCH_ACC(t0, t1);
 
         /* TT probe (hit path) + store, averaged over the 8 positions */
         iters = 2000;
         tt_clear();
         tt_store(&pos, list[0], 5, 100, TT_EXACT, 0, 100, 1);
-        t0 = engine_clock();
+        t0 = BENCH_NOW();
         MAME_MARK(0x1c);
-        for (i = 0; i < iters; i++) tt_probe(&pos, 0, &tt);
+        for (i = 0; i < iters; i++) BENCH_PROBE(tt_probe(&pos, 0, &tt));
         MAME_MARK(0x1d);
-        t1 = engine_clock();
-        ttpr += (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
-        t0 = engine_clock();
+        t1 = BENCH_NOW();
+        ttpr += BENCH_ACC(t0, t1);
+        t0 = BENCH_NOW();
         MAME_MARK(0x1e);
         for (i = 0; i < iters; i++) tt_store(&pos, list[0], 5, 100, TT_EXACT, 0, 100, 1);
         MAME_MARK(0x1f);
-        t1 = engine_clock();
-        ttst += (i32)(t1 - t0) * 1000 / CLOCKS_PER_SEC;
+        t1 = BENCH_NOW();
+        ttst += BENCH_ACC(t0, t1);
     }
 
     printf("sbench att=%ld caps=%ld quiets=%ld drain=%ld make10k=%ld sig=%ld "
-           "ttprobe=%ld ttstore=%ld\n",
-           (long)(att * 1000L / (1500L * 2 * BENCH_N)),
-           (long)(caps * 1000L / (300L * BENCH_N)),
-           (long)(quiets * 1000L / (300L * BENCH_N)),
-           (long)(drain * 1000L / (300L * BENCH_N)),
-           (long)(make10k * 1000L / (2000L * BENCH_N)),
-           (long)(sig * 1000L / (400L * BENCH_N)),
-           (long)(ttpr * 1000L / (2000L * BENCH_N)),
-           (long)(ttst * 1000L / (2000L * BENCH_N)));
+           "ttprobe=%ld ttstore=%ld (%s)\n",
+           BENCH_PER(att, 1500L * 2 * BENCH_N),
+           BENCH_PER(caps, 300L * BENCH_N),
+           BENCH_PER(quiets, 300L * BENCH_N),
+           BENCH_PER(drain, 300L * BENCH_N),
+           BENCH_PER(make10k, 2000L * BENCH_N),
+           BENCH_PER(sig, 400L * BENCH_N),
+           BENCH_PER(ttpr, 2000L * BENCH_N),
+           BENCH_PER(ttst, 2000L * BENCH_N),
+           BENCH_UNIT);
 #ifdef TIMING_DETAIL
     printf("sbench raw_ms att=%ld caps=%ld quiets=%ld drain=%ld make=%ld sig=%ld "
            "ttprobe=%ld ttstore=%ld\n",

@@ -189,6 +189,39 @@ extern i16 post_on;
 void timing_init(void);              /* one-time: 8253/8254 ch0 mode 2 on DOS */
 clock_t engine_clock(void);          /* monotonic, CLOCKS_PER_SEC units */
 u32 timing_counts(void);             /* PIT counts, 0.838 us each (wraps ~60 min) */
+u64 timing_cycles(void);             /* native x86 TSC; host microbenchmarks only */
+
+/* Microbenchmark clock (`sbench`, `nbench`, `fbench`). The 16-bit target has
+   engine_clock() at 0.838 us and accumulates milliseconds; a host clock()
+   resolves a few thousand calls as 0 ms, so the native build counts TSC
+   ticks instead. BENCH_PER turns either accumulator into its per-call figure:
+   microseconds on the target, TSC cycles on the host. */
+#if defined(__WATCOMC__) && !defined(__386__)
+typedef clock_t BenchTick;
+#define BENCH_NOW()          engine_clock()
+#define BENCH_ACC(t0, t1)    ((i32)(u16)((t1) - (t0)) * 1000 / CLOCKS_PER_SEC)
+#define BENCH_PER(total, n)  ((long)((total) * 1000L / (n)))
+#define BENCH_UNIT           "us/call"
+#else
+typedef u64 BenchTick;
+#define BENCH_NOW()          timing_cycles()
+#define BENCH_ACC(t0, t1)    ((i32)((t1) - (t0)))
+#define BENCH_PER(total, n)  ((long)((total) / (n)))
+#define BENCH_UNIT           "cyc/call"
+#endif
+
+/* Benchmark sink: gcc hoists a call whose result is unused when it can prove
+   the callee is pure (is_attacked, the forward pass), which turns a timed loop
+   into an empty one. BENCH_PROBE consumes the result through an empty asm that
+   also clobbers memory, so the call has to be re-executed every iteration.
+   On the 16-bit target it is a plain `(void)` cast: identical codegen. */
+#if defined(__WATCOMC__)
+#define BENCH_PROBE(x)       ((void)(x))
+#else
+#define BENCH_PROBE(x) \
+    do { i16 bench_v_ = (i16)(x); \
+         __asm__ __volatile__("" : "+r"(bench_v_) : : "memory"); } while (0)
+#endif
 /* Search clock: anchor once per move, then one cheap latch per poll (16-bit
    builds). timing_search_start returns 0 when no PIT timer is available. */
 i16 timing_search_start(void);

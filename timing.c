@@ -150,6 +150,18 @@ void timing_init(void) { }
 
 clock_t engine_clock(void) { return clock(); }
 
+/* TSC for the host microbenchmarks. clock() on a modern host resolves a few
+   thousand calls as 0 ms; the time-stamp counter is cycle-exact and monotonic,
+   which is what these per-call comparisons need. The TSC runs at a constant
+   reference rate, so its ticks track wall time even when the core clock boosts;
+   the numbers are therefore not core cycles, just a stable host yardstick. */
+#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))
+#include <x86intrin.h>
+u64 timing_cycles(void) { return (u64)__rdtsc(); }
+#else
+u64 timing_cycles(void) { return (u64)clock() * 1000ULL; }
+#endif
+
 u32 timing_counts(void) {
     return (u32)clock() * 1193UL;      /* approximation of PIT counts */
 }
