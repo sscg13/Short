@@ -656,9 +656,19 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
            even that fails high the position is winning enough to return the
            null score as a cutoff. Non-PV only, skipped in check (a pass cannot
            resolve a check) and when the side to move holds no non-pawn material
-           (zugzwang-prone endings). The 50-move guard keeps the pass from
-           walking into a forced draw. On a hit, pop this node's rep-path entry. */
-        if (depth >= NMP_DEPTH && half + 1 < MAX_HALF) {
+           (zugzwang-prone endings). On a hit, pop this node's rep-path entry.
+
+           No 50-move guard: a pass at halfmove clock 99 lands the null child on
+           100, where its own draw branch returns exactly 0 (the pass moves no
+           piece, so the child can never be in check). That 0 is a valid lower
+           bound whenever the side to move has any legal quiet move, which is
+           what the null-move lower bound already assumes; only a node whose
+           every legal move is a pawn move or capture can see it as too high,
+           and at a non-PV node with beta <= 0. The bench tree cannot change
+           either way (its clocks are 0-7); in the rare endgame where the guard
+           fired it only cost nodes (KRvK at clock 95, depth 6: 5,472 -> 5,315
+           with it removed). See artifacts/nmp-rule50-2026-11-11/REPORT.md. */
+        if (depth >= NMP_DEPTH) {
             if (eval >= beta + NMP_MARGIN && has_np_material(p)) {
                 i16 R = NMP_RED + depth / 6;
                 i16 nd = depth - 1 - R;         /* the null move spends a ply */
