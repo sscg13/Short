@@ -302,8 +302,10 @@ static i32 st_pvs_tries, st_pvs_prunes, st_pvs_checks_kept;
    d = node depth, m = legal moves already searched at this node. The minimum
    reduced child depth of 1 prevents reductions at node depths 1 and 2. LMR_MOVES 4
    protects the TT move and both killers (typically the first 1-3 searched);
-   quiet-only (captures/promos/EP/castle keep full depth); expected cut/all
-   and non-check nodes only. */
+   quiet-only (captures/promos/EP/castle keep full depth). PV nodes are
+   reduced too, one ply less than the table's cut-node value (a slot worth
+   only 1 ply is not reduced at all), so the root and every PV line beyond
+   the first child get the same treatment at a safer depth. */
 #define LMR_MOVES 4
 #define LMR_TD    32    /* lmr_tab rows: node depth 0..31 (row 31 saturates) */
 #define LMR_TM    64    /* lmr_tab cols: moves already searched 0..63 (col 63 saturates) */
@@ -750,16 +752,21 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                 } else {
                     /* PVS: zero-window search; re-search full window only if it beats alpha.
                        score < beta avoids a wasted re-search on an already-proven cutoff.
-                       LMR: a late quiet move at a non-PV, non-check node is searched at a
-                       reduced depth from lmr_tab (never below depth 1 - a qsearch probe on
-                       a quiet move only sees captures and can miss quiet defenses). A
-                       reduced search that beats alpha is re-searched at full depth. */
+                       LMR: a late quiet move is searched at a reduced depth from lmr_tab
+                       (never below depth 1 - a qsearch probe on a quiet move only sees
+                       captures and can miss quiet defenses). A PV node's score has to be
+                       exact for the parent's line, so it takes one ply less reduction than
+                       a cut node at the same table slot; a slot worth a single ply is left
+                       unreduced (the guard). Without it R - 1 would pass 0 and then -1: a
+                       no-op today, because the `new_depth < depth - 1` test below decides
+                       whether a reduction happened at all, but an extension on the shallow
+                       rows if that test ever changes. A reduced search that beats alpha is
+                       re-searched at full depth. */
                     i16 new_depth = depth - 1;
-                    if (move_count >= LMR_MOVES &&
-                        node_type != NODE_PV &&
-                        mfl(m) == 0 && u.cap == EMPTY) {
+                    if (move_count >= LMR_MOVES && mfl(m) == 0 && u.cap == EMPTY) {
                         i16 R = lmr_tab[depth < LMR_TD ? depth : LMR_TD - 1]
                                        [move_count < LMR_TM ? move_count : LMR_TM - 1];
+                        if (node_type == NODE_PV) R = (R > 1) ? (i16)(R - 1) : 0;
                         new_depth = depth - 1 - R;
                         if (new_depth < 1) new_depth = 1;
                     }
