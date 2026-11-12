@@ -1041,7 +1041,11 @@ u16 think(Pos *p, i16 maxdepth) {
    time-based cutoffs (deadline stays 0). Run "chess bench [depth]"
    with an explicit depth to compare builds at the same workload. */
 
-#define BENCH_DEPTH 6   /* shared native/DOS default with the standard horizon */
+#define BENCH_DEPTH 8   /* shared native/DOS default; deep enough to catch a
+                           ordering change that low depths hide (bench 6 misses
+                           the counter-move/follow-up effect entirely). On the
+                           8088 this is ~57 minutes of real work, so the VM
+                           harnesses always pass an explicit depth. */
 
 static const char *bench_fens[] = {
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
