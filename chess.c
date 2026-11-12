@@ -799,7 +799,7 @@ static i16 quiet_killer_ok(Pos *p, u16 m) {
     return 0;
 }
 
-void mgen_init(Pos *p, MGen *g, i16 ply, u16 k0, u16 k1, u16 ttm, u16 cm) {
+void mgen_init(Pos *p, MGen *g, i16 ply, u16 k0, u16 k1, u16 ttm, u16 cm, u16 fm) {
     (void)p;
     g->list = movebuf[ply];
     g->n = 0;
@@ -809,6 +809,7 @@ void mgen_init(Pos *p, MGen *g, i16 ply, u16 k0, u16 k1, u16 ttm, u16 cm) {
     g->k0 = k0;
     g->k1 = k1;
     g->cm = cm;
+    g->fm = fm;
     g->caps_only = 0;
 }
 
@@ -822,6 +823,7 @@ void mgen_init_q(Pos *p, MGen *g, i16 ply) {
     g->ttm = 0;
     g->k0 = g->k1 = 0;
     g->cm = 0;
+    g->fm = 0;
     g->caps_only = 1;
 }
 
@@ -915,10 +917,12 @@ again:
                 i16 s;
                 PCOUNT(c_nm_qscan);
                 s = (*history)[TY(p->board[mfrom(q)]) - 1][(q >> 6) & 0x3F];
-                /* the reply that refuted the opponent's last move goes first
-                   among the quiets; it is only a guess, so it outranks the
-                   history row rather than blocking the stage */
+                /* the replies that refuted the opponent's last move and our own
+                   move before it go first among the quiets; they are only
+                   guesses, so they outrank the history row rather than
+                   blocking the stage */
                 if (q == g->cm) s = CM_BONUS;
+                else if (q == g->fm) s = FM_BONUS;
                 qscore[i] = s;
             }
             sort_quiets(g->list, qscore, g->n);
@@ -946,7 +950,7 @@ static int moveset_check(Pos *p) {
     i16 bad = 0;
 
     n = gen_moves(p, all);
-    mgen_init(p, &mg, 0, 0, 0, 0, 0);
+    mgen_init(p, &mg, 0, 0, 0, 0, 0, 0);
     while ((m = next_move(p, &mg)) != 0) got[na++] = m;
 
     printf("gen_moves=%d next_move=%d\n", n, na);

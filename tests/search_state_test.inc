@@ -98,7 +98,7 @@ static int search_state_selftest(void) {
                      "pawn killer requires start rank and empty path/destination");
             for (slot = 0; slot < 2; slot++) {
                 n = gen_moves(&p, st_all); na = 0;
-                mgen_init(&p, &mg, 0, slot ? 0 : candidate, slot ? candidate : 0, 0, 0);
+                mgen_init(&p, &mg, 0, slot ? 0 : candidate, slot ? candidate : 0, 0, 0, 0);
                 while ((m = next_move(&p, &mg)) != 0 && na < 256) st_got[na++] = m;
                 st_check(na == n && m == 0, "killer picker move count equals generator");
                 for (i = 0; i < n; i++) {

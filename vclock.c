@@ -388,23 +388,27 @@ i32 vclock_est_nps(i32 nodes) {
      then 2026-11-12 on the PV-LMR tree, 38,348 nodes
      (artifacts/pv-lmr-root-2026-11-11/REPORT.md), and again 2026-11-12 on the
      counter-move tree, 38,362 nodes
-     (artifacts/counter-move-2026-11-12/REPORT.md):
-       80286 @6 MHz  19,726 cyc/node   8088 @16 MHz  64,301
-       8086  @8 MHz  54,981 (derived)  80186 @8 MHz  31,643
+     (artifacts/counter-move-2026-11-12/REPORT.md), and again 2026-11-12 on the
+     follow-up tree, 38,352 nodes
+     (artifacts/follow-up-2026-11-12/REPORT.md):
+       80286 @6 MHz  19,742 cyc/node   8088 @16 MHz  64,289
+       8086  @8 MHz  54,971 (derived)  80186 @8 MHz  31,639
 
    The counter-move tree's totals are ~0.4% above the PV-LMR ones on every CPU:
    the quiet scorer gained one compare per candidate and mgen_init one indexed
-   word load per node, which is what the residual below absorbs.
+   word load per node, which is what the residual below absorbs. The follow-up
+   table sits beside that compare and costs nothing measurable: the new totals
+   are within 0.08% of the counter-move ones, so the residual is unchanged.
 
    If the tree changes (bench node total differs) the reference no longer
    applies: re-measure it, do not "fix" the model to match a stale tree. */
-#define VCLOCK_CAL_NODES   38362
+#define VCLOCK_CAL_NODES   38352
 #define VCLOCK_CAL_TOL_PCT 3
 static const i32 vclock_cal_cyc[4] = {
-    19726,  /* 80286 */
-    64301,  /* 8088 */
-    54981,  /* 8086 (derived: 8088 x 54,764/64,049) */
-    31643,  /* 80186 */
+    19742,  /* 80286 */
+    64289,  /* 8088 */
+    54971,  /* 8086 (derived: 8088 x 54,981/64,301) */
+    31639,  /* 80186 */
 };
 static const char *const vclock_cpu_name[4] = {
     "80286", "8088", "8086", "80186"
