@@ -232,10 +232,18 @@ static u16 killers[MAXPLY][2];          /* two killer moves per ply (quiet only)
 
 i16 qhist[2][6][64];   /* quiet-history: side, piece-type-1, to-square-compact */
 
+/* counter-move ordering: the quiet reply that last cut off the opponent's
+   previous move. path_move/path_pc hold the move that led to each ply of the
+   current search path, which is how a node finds its counter slot. */
+u16 counter_move[64][12];
+static u16 path_move[MAXPLY];
+static i16 path_pc[MAXPLY];
+
 /* A new game/position must not inherit ordering learned in earlier games. */
 void search_clear_ordering(void) {
     memset(killers, 0, sizeof killers);
     memset(qhist, 0, sizeof qhist);
+    memset(counter_move, 0, sizeof counter_move);
 }
 
 /* bonus/penalty for a quiet move's history slot, clamped to +-QH_MAX */
@@ -472,7 +480,7 @@ static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd)
         if (stand > alpha) alpha = stand;
     }
 
-    if (in_check) mgen_init(p, &mg, ply, 0, 0, 0);  /* all legal evasions */
+    if (in_check) mgen_init(p, &mg, ply, 0, 0, 0, 0);  /* all legal evasions */
     else          mgen_init_q(p, &mg, ply);          /* captures only, MVV-LVA */
 
     while ((m = next_move(p, &mg)) != 0) {
@@ -678,6 +686,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                 i16 saved_floor = rep_floor, saved_game = rep_game;
                 i16 saved_ep;
                 rep_floor = rep_n; rep_game = 0;
+                path_move[ply] = 0;             /* the null move has no counter slot */
                 saved_ep = nm_make(p);
                 sc = -alphabeta(p, nd, -beta, -beta + 1, ply + 1, half + 1, child_type);
                 nm_undo(p, saved_ep);
@@ -690,7 +699,11 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
         }
     }
 
-    if (ply) mgen_init(p, &mg, ply, killers[ply][0], killers[ply][1], ttm);
+    if (ply) {
+        u16 pm = path_move[ply - 1];             /* the move that led here */
+        mgen_init(p, &mg, ply, killers[ply][0], killers[ply][1], ttm,
+                  pm ? counter_move[(pm >> 6) & 0x3F][CMI(path_pc[ply - 1])] : 0);
+    }
 
     {
         i16 first = 1;                     /* PVS: first legal move gets the full window */
@@ -714,6 +727,8 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                 see_prune = !see_ge(p, m,
                     pvs_see_threshold[p->board[mto(m)] != EMPTY][depth]);
             }
+            path_move[ply] = m; path_pc[ply] = pc;   /* recorded for the child's
+                                                        counter-move lookup */
             do_make(p, m, &u);
             us = p->side ^ 1;                        /* mover */
             /* Legality: if not in check, a non-king, non-EP move from a square off
@@ -810,6 +825,10 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                             killers[ply][0] = m;
                         }
                         qhist_update(p, m, dd);
+                        /* this quiet refuted the move that led to this node:
+                           try it next time that position arises */
+                        counter_move[(path_move[ply - 1] >> 6) & 0x3F]
+                                    [CMI(path_pc[ply - 1])] = m;
                     }
                     break;                            /* beta cutoff */
                 } else if (ply && score <= alpha0) {
@@ -1436,7 +1455,7 @@ int sbench(void) {
         t0 = BENCH_NOW();
         MAME_MARK(0x16);
         for (i = 0; i < iters; i++) {
-            mgen_init(&pos, &mg, 0, 0, 0, 0);
+            mgen_init(&pos, &mg, 0, 0, 0, 0, 0);
             while ((m = next_move(&pos, &mg)) != 0) BENCH_PROBE(m);
         }
         MAME_MARK(0x17);
