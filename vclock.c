@@ -197,11 +197,21 @@ typedef struct { i32 att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm, tp, ts; } VW;
    part of the plan cost they carry is unchanged in kind. */
 static const VW vw_tab[4] = {
     /* att ps gc gq gm mk nm rf ev rn rm tp ts: cycles per counted operation */
-    {    656,      0,   4614,  12366, 135646,    950,    520,   2662,   4504,   1582,   2161,    652,    652 }, /* 80286 */
-    {   1970,      0,  12093,  37502, 465065,   3123,   1897,   8696,  15476,   3514,   4519,   2246,   2389 }, /* 8088 */
-    {   1693,      0,  10353,  32474, 413168,   2734,   1636,   7999,  12971,   2133,   3261,   1915,   2011 }, /* 8086 */
-    {   1003,    131,   6170,  18639, 215267,   1507,    907,   4669,   6999,   2316,   2889,   1181,   1228 }, /* 80186 */
+    {    656,      0,   4614,  12366, 135646,    950,    520,   2662,   4504,   1656,   2235,    652,    652 }, /* 80286 */
+    {   1970,      0,  12093,  37502, 465065,   3123,   1897,   8696,  15476,   3777,   4782,   2246,   2389 }, /* 8088 */
+    {   1693,      0,  10353,  32474, 413168,   2734,   1636,   7999,  12971,   2360,   3488,   1915,   2011 }, /* 8086 */
+    {   1003,    131,   6170,  18639, 215267,   1507,    907,   4669,   6999,   2433,   3006,   1181,   1228 }, /* 80186 */
 };
+/* 2026-11-12: counter-move ordering (artifacts/counter-move-2026-11-12/).
+   The quiet scorer gained one compare per candidate and mgen_init one indexed
+   word load per node, which is a per-node cost that no priced operation
+   covers, so it lands in the residual: rn/rm both +74 (80286), +263 (8088),
+   +227 (8086), +117 (80186) - the measured minus modelled gap on the new
+   tree, applied to both rows because they multiply the same node total
+   (rn for NNUE nodes, rm otherwise) and the work is eval-independent. The
+   references were re-measured on the 38,362-node tree first, so this is a
+   level refit, not a rescale: emulated +0.35% (80286), +0.41% (8088),
+   +0.35% (80186). */
 /* 2026-11-12: PV nodes now take late-move reductions one ply softer than cut
    nodes, with the root exempt (artifacts/pv-lmr-root-2026-11-11/REPORT.md).
    That is a per-node mix change, not a change to any priced operation, so only
@@ -376,19 +386,25 @@ i32 vclock_est_nps(i32 nodes) {
      NNUE flip-rebuild asm (artifacts/nnue-rowadd-2026-11-10/REPORT.md) and again
      after the asm make-path planning (artifacts/nnue-plan-2026-11-10/REPORT.md),
      then 2026-11-12 on the PV-LMR tree, 38,348 nodes
-     (artifacts/pv-lmr-root-2026-11-11/REPORT.md):
-       80286 @6 MHz  19,656 cyc/node   8088 @16 MHz  64,049
-       8086  @8 MHz  54,764 (derived)  80186 @8 MHz  31,532
+     (artifacts/pv-lmr-root-2026-11-11/REPORT.md), and again 2026-11-12 on the
+     counter-move tree, 38,362 nodes
+     (artifacts/counter-move-2026-11-12/REPORT.md):
+       80286 @6 MHz  19,726 cyc/node   8088 @16 MHz  64,301
+       8086  @8 MHz  54,981 (derived)  80186 @8 MHz  31,643
+
+   The counter-move tree's totals are ~0.4% above the PV-LMR ones on every CPU:
+   the quiet scorer gained one compare per candidate and mgen_init one indexed
+   word load per node, which is what the residual below absorbs.
 
    If the tree changes (bench node total differs) the reference no longer
    applies: re-measure it, do not "fix" the model to match a stale tree. */
-#define VCLOCK_CAL_NODES   38348
+#define VCLOCK_CAL_NODES   38362
 #define VCLOCK_CAL_TOL_PCT 3
 static const i32 vclock_cal_cyc[4] = {
-    19656,  /* 80286 */
-    64049,  /* 8088 */
-    54764,  /* 8086 (derived: 8088 x 54,658/63,925) */
-    31532,  /* 80186 */
+    19726,  /* 80286 */
+    64301,  /* 8088 */
+    54981,  /* 8086 (derived: 8088 x 54,764/64,049) */
+    31643,  /* 80186 */
 };
 static const char *const vclock_cpu_name[4] = {
     "80286", "8088", "8086", "80186"
