@@ -300,13 +300,14 @@ static i32 st_pvs_tries, st_pvs_prunes, st_pvs_checks_kept;
    compile-time table was Python-generated from the same formula; the fixed-
    point generator reproduces it exactly, so the bench tree is unchanged).
    d = node depth, m = legal moves already searched at this node. The minimum
-   reduced child depth of 1 prevents reductions at node depths 1 and 2. LMR_MOVES 4
-   protects the TT move and both killers (typically the first 1-3 searched);
-   quiet-only (captures/promos/EP/castle keep full depth). PV nodes are reduced
+   reduced child depth of 1 prevents reductions at node depths 1 and 2. The
+   first move is never reduced, and a PV node waits for two more
+   (threshold 1 + 2 * isPV), because the TT move and both killers usually fill
+   those slots there and the PV's score has to be exact; quiet-only
+   (captures/promos/EP/castle keep full depth). PV nodes are reduced
    too, one ply less than the table's cut-node value (a slot worth only 1 ply is
    not reduced at all); the root is exempt, because any root move can become the
    best move and a reduced scout that fails low there is never re-verified. */
-#define LMR_MOVES 4
 #define LMR_TD    32    /* lmr_tab rows: node depth 0..31 (row 31 saturates) */
 #define LMR_TM    64    /* lmr_tab cols: moves already searched 0..63 (col 63 saturates) */
 
@@ -766,7 +767,11 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                        (artifacts/pv-lmr-2026-11-11/REPORT.md). A reduced search that beats
                        alpha is re-searched at full depth. */
                     i16 new_depth = depth - 1;
-                    if (move_count >= LMR_MOVES && ply != 0 &&
+                    /* Late-move cutoff: every quiet move after the first is
+                       reducible at a cut/all node; a PV node waits for two more
+                       moves (1 + 2 * isPV) so the TT move and killers - usually
+                       the first 1-3 searched - keep full depth there. */
+                    if (move_count >= (node_type == NODE_PV ? 3 : 1) && ply != 0 &&
                         mfl(m) == 0 && u.cap == EMPTY) {
                         i16 R = lmr_tab[depth < LMR_TD ? depth : LMR_TD - 1]
                                        [move_count < LMR_TM ? move_count : LMR_TM - 1];
