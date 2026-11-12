@@ -227,6 +227,12 @@ static i16 any_legal(Pos *p, i16 ply) {
    pv[ply][0..pv_len[ply]-1] is the best line from ply, in move encoding. */
 static u16 pv[MAXPLY + 1][MAXPLY];
 static i16 pv_len[MAXPLY + 1];
+/* Same-side static eval history for the "improving" test. A slot is cleared on
+   entry and filled only where a node has a usable eval (not in check, not a PV
+   node), so an absent value means "unknown", not "zero". Every node on the
+   current search path has written its own slot, so ply-2 and ply-4 are always
+   live ancestors. */
+static Score static_eval[MAXPLY];
 
 static u16 killers[MAXPLY][2];          /* two killer moves per ply (quiet only) */
 
@@ -633,7 +639,9 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
 
     /* RFP and NMP both need the static eval, and only at a non-PV, non-check
        node is it trustworthy enough to prune on, so it is computed once here
-       and shared by the two stages below. */
+       and shared by the two stages below. The same value feeds the improving
+       history that LMR reads at this node's children. */
+    static_eval[ply] = -INF;
     if (!in_check && node_type != NODE_PV) {
         Score eval;
         if (!tt.eval_valid) {
@@ -642,6 +650,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
             tt_store_eval(p, tt.slot, tt.eval);
         }
         eval = tt.eval;
+        static_eval[ply] = eval;
 
         /* reverse futility pruning. Skipped while in check (the eval is
            unreliable with the king exposed), at PV nodes (their score becomes a
@@ -694,6 +703,18 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
 
     {
         i16 first = 1;                     /* PVS: first legal move gets the full window */
+        /* "improving": this side's static eval is no worse than two plies ago -
+           the nearest same-side ancestor with a usable eval, or four plies back
+           when that one was in check or on the PV. Unknown history counts as not
+           improving. A node whose eval is climbing tends to have a good quiet
+           move deeper in the list, so LMR takes one ply less off its late quiets. */
+        i16 improving = 0;
+        if (static_eval[ply] != -INF) {
+            if (ply >= 2 && static_eval[ply - 2] != -INF)
+                improving = static_eval[ply] >= static_eval[ply - 2];
+            else if (ply >= 4 && static_eval[ply - 4] != -INF)
+                improving = static_eval[ply] >= static_eval[ply - 4];
+        }
         while ((m = ply ? next_move(p, &mg) :
                     (root_index < root_n ? root_m[root_index++] : 0)) != 0) {
             Undo u;
@@ -770,7 +791,14 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                         mfl(m) == 0 && u.cap == EMPTY) {
                         i16 R = lmr_tab[depth < LMR_TD ? depth : LMR_TD - 1]
                                        [move_count < LMR_TM ? move_count : LMR_TM - 1];
-                        if (node_type == NODE_PV) R = (R > 1) ? (i16)(R - 1) : 0;
+                        /* Adjust the table's reduction first, clip once at the end:
+                           PV takes one ply less (its score must be exact), and an
+                           improving node takes one ply less because its eval is
+                           already climbing, so the later quiet moves are more likely
+                           to hold than the log curve assumes. */
+                        if (node_type == NODE_PV) R--;
+                        if (improving) R--;
+                        if (R < 0) R = 0;
                         new_depth = depth - 1 - R;
                         if (new_depth < 1) new_depth = 1;
                     }
