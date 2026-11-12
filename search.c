@@ -756,11 +756,12 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                        (never below depth 1 - a qsearch probe on a quiet move only sees
                        captures and can miss quiet defenses). A PV node's score has to be
                        exact for the parent's line too, so it takes one ply less reduction
-                       than a cut node at the same table slot, and a slot worth a single
-                       ply is left unreduced (the guard: without it R - 1 would pass 0 and
-                       then -1, a no-op today because `new_depth < depth - 1` below decides
-                       whether a reduction happened, but an extension on the shallow rows if
-                       that test ever changes). The root stays out of it: every root move is
+                       than a cut node at the same table slot; an evasion also takes one
+                       ply less, since the table was fitted where the side to move was
+                       free to choose. Both adjustments are applied to the table value
+                       and the result is clipped to zero once at the end, so a slot worth
+                       one ply is left unreduced at a PV or in-check node. The root stays
+                       out of it: every root move is
                        a candidate best move, and a reduced root scout that fails low is
                        never re-searched, which measured -3.9 Elo when it was allowed
                        (artifacts/pv-lmr-2026-11-11/REPORT.md). A reduced search that beats
@@ -770,7 +771,14 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                         mfl(m) == 0 && u.cap == EMPTY) {
                         i16 R = lmr_tab[depth < LMR_TD ? depth : LMR_TD - 1]
                                        [move_count < LMR_TM ? move_count : LMR_TM - 1];
-                        if (node_type == NODE_PV) R = (R > 1) ? (i16)(R - 1) : 0;
+                        /* Adjust the table's reduction first, clip once at the end:
+                           PV takes one ply less (its score must be exact), and an
+                           evasion gets one ply back because every quiet move here is
+                           a tactical reply forced by the check - the table was fitted
+                           on nodes where the side to move had a free choice. */
+                        if (node_type == NODE_PV) R--;
+                        if (in_check) R--;
+                        if (R < 0) R = 0;
                         new_depth = depth - 1 - R;
                         if (new_depth < 1) new_depth = 1;
                     }
