@@ -105,6 +105,7 @@ typedef struct {
     u16 ttm;          /* transposition-table move (0 = none for now) */
     u16 k0, k1;       /* killer moves (0 = none) */
     u16 cm;           /* counter move: refuted the opponent's last move (0 = none) */
+    u16 fm;           /* follow-up move: refuted our own move two plies back */
     i16 caps_only;    /* stop after the captures stage (quiescence) */
 } MGen;
 
@@ -282,13 +283,17 @@ void search_clear_ordering(void);  /* clear killers and quiet history on game/po
    strictly below any stored value so no valid quiet is ever skipped. */
 #define QH_MAX 30000
 extern i16 qhist[2][6][64];
-#define CM_BONUS (QH_MAX + 1)     /* ranks the counter move first among quiets */
-/* counter-move ordering: for each previous move (destination in compact 0..63,
-   moving piece type-1 + 6 for black) the quiet reply that last cut it off.
-   64*12*2 = 1536 B near for the same reason as qhist: one compare per quiet
-   candidate in the scorer. 0 = unknown. */
+#define CM_BONUS (QH_MAX + 2)     /* ranks the counter move first among quiets */
+#define FM_BONUS (QH_MAX + 1)     /* and the follow-up move second */
+/* counter/follow-up ordering: for each previous move (destination in compact
+   0..63, moving piece type-1 + 6 for black) the quiet reply that last cut it
+   off. `counter_move` is keyed by the opponent's last move, `follow_move` by
+   our own move two plies back (the move that refuted our previous plan).
+   2 * 64*12*2 = 3072 B near for the same reason as qhist: one compare per
+   quiet candidate in the scorer. 0 = unknown. */
 #define CMI(pc) ((i16)(TY(pc) - 1 + (CO(pc) ? 6 : 0)))
 extern u16 counter_move[64][12];
+extern u16 follow_move[64][12];
 void lmr_build(void);             /* one-time LMR log-table generator (dedicated init) */
 #ifdef MAME_MARKERS
 int tt_bench(void);
@@ -410,7 +415,7 @@ Score evaluate(Pos *p);
 void zob_init(void);              /* one-time Zobrist key tables (dedicated init) */
 i16 gen_caps(Pos *p, u16 *list);
 i16 gen_quiets(Pos *p, u16 *list);
-void mgen_init(Pos *p, MGen *g, i16 ply, u16 k0, u16 k1, u16 ttm, u16 cm);
+void mgen_init(Pos *p, MGen *g, i16 ply, u16 k0, u16 k1, u16 ttm, u16 cm, u16 fm);
 void mgen_init_q(Pos *p, MGen *g, i16 ply);   /* captures only (quiescence) */
 u16 next_move(Pos *p, MGen *g);
 
