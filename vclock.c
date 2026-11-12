@@ -197,11 +197,19 @@ typedef struct { i32 att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm, tp, ts; } VW;
    part of the plan cost they carry is unchanged in kind. */
 static const VW vw_tab[4] = {
     /* att ps gc gq gm mk nm rf ev rn rm tp ts: cycles per counted operation */
-    {    656,      0,   4614,  12366, 135646,    950,    520,   2662,   4504,   1552,   2120,    652,    652 }, /* 80286 */
-    {   1970,      0,  12093,  37502, 465065,   3123,   1897,   8696,  15476,   3390,   4360,   2246,   2389 }, /* 8088 */
-    {   1693,      0,  10353,  32474, 413168,   2734,   1636,   7999,  12971,   2027,   3099,   1915,   2011 }, /* 8086 */
-    {   1003,    131,   6170,  18639, 215267,   1507,    907,   4669,   6999,   2266,   2827,   1181,   1228 }, /* 80186 */
+    {    656,      0,   4614,  12366, 135646,    950,    520,   2662,   4504,   1582,   2161,    652,    652 }, /* 80286 */
+    {   1970,      0,  12093,  37502, 465065,   3123,   1897,   8696,  15476,   3514,   4519,   2246,   2389 }, /* 8088 */
+    {   1693,      0,  10353,  32474, 413168,   2734,   1636,   7999,  12971,   2133,   3261,   1915,   2011 }, /* 8086 */
+    {   1003,    131,   6170,  18639, 215267,   1507,    907,   4669,   6999,   2316,   2889,   1181,   1228 }, /* 80186 */
 };
+/* 2026-11-12: PV nodes now take late-move reductions one ply softer than cut
+   nodes, with the root exempt (artifacts/pv-lmr-root-2026-11-11/REPORT.md).
+   That is a per-node mix change, not a change to any priced operation, so only
+   the residual moved: `rn` was refitted to the re-measured depth-4 totals and
+   `rm` scaled by the same ratio, rn 1,552 -> 1,582 (80286), 3,390 -> 3,514
+   (8088), 2,027 -> 2,133 (8086), 2,266 -> 2,316 (80186). The pre-refit model
+   was only 0.15% below the new references on every CPU, because the tree lost
+   19% of its nodes but kept the same cost mix. */
 /* 2026-11-11: the forward pass's 255 clamp became branchless (gen_nnue_batch.py
    `_fwd_body`), so `ev` was re-measured and dropped by 605 / 120 / 101 / 541
    cycles per eval on 80286 / 8088 / 8086 / 80186 (`chess fbench`: markers on the
@@ -366,19 +374,21 @@ i32 vclock_est_nps(i32 nodes) {
      build.ps1 [-MameMarkers] release, 86Box / MAME Nimbus, see
      artifacts/vclock-fit-2026-11-09/REPORT.md, re-measured 2026-11-10 after the
      NNUE flip-rebuild asm (artifacts/nnue-rowadd-2026-11-10/REPORT.md) and again
-     after the asm make-path planning (artifacts/nnue-plan-2026-11-10/REPORT.md)
-       80286 @6 MHz  19,659 cyc/node   8088 @16 MHz  62,876
-       8086  @8 MHz  53,747 (derived)  80186 @8 MHz  31,271
+     after the asm make-path planning (artifacts/nnue-plan-2026-11-10/REPORT.md),
+     then 2026-11-12 on the PV-LMR tree, 38,348 nodes
+     (artifacts/pv-lmr-root-2026-11-11/REPORT.md):
+       80286 @6 MHz  19,656 cyc/node   8088 @16 MHz  64,049
+       8086  @8 MHz  54,764 (derived)  80186 @8 MHz  31,532
 
    If the tree changes (bench node total differs) the reference no longer
    applies: re-measure it, do not "fix" the model to match a stale tree. */
-#define VCLOCK_CAL_NODES   47400
+#define VCLOCK_CAL_NODES   38348
 #define VCLOCK_CAL_TOL_PCT 3
 static const i32 vclock_cal_cyc[4] = {
-    19282,  /* 80286 */
-    62819,  /* 8088 */
-    53699,  /* 8086 (derived: 8088 x 57,945/67,787) */
-    30930,  /* 80186 */
+    19656,  /* 80286 */
+    64049,  /* 8088 */
+    54764,  /* 8086 (derived: 8088 x 54,658/63,925) */
+    31532,  /* 80186 */
 };
 static const char *const vclock_cpu_name[4] = {
     "80286", "8088", "8086", "80186"
