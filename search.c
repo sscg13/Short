@@ -321,6 +321,21 @@ static i32 st_pvs_tries, st_pvs_prunes, st_pvs_checks_kept;
 #define LMR_TD    32    /* lmr_tab rows: node depth 0..31 (row 31 saturates) */
 #define LMR_TM    64    /* lmr_tab cols: moves already searched 0..63 (col 63 saturates) */
 
+/* internal iterative reductions: with no TT move at this node, move ordering
+   has no anchor - nothing tells the picker which move the last visit of this
+   position found best - so the first move searched is often a quiet one that
+   history merely likes, and a full-depth search of it is wasted work. Reduce
+   the node by one ply instead; the TT move that later gets stored is what the
+   next visit will order on. IIR_DEPTH is the shallowest node that still pays:
+   below it the reduction would only move a 3-ply search to 2, where LMR has
+   already flattened the tree. The root is exempt (it is never TT-probed, so
+   `ttm` is always 0 there, and every root move is a candidate best move - the
+   same argument that keeps the root out of LMR). The reduction is taken before
+   the move loop and after RFP/NMP, so those keep their full-depth margins, and
+   the TT store at the end records the reduced depth, so a later full-depth
+   probe of the same position cannot take a cutoff on a shallower result. */
+#define IIR_DEPTH 4
+
 /* aspiration windows: from depth >= 2 the root search confines itself to a
    window of +-ASP_DELTA cp around the previous depth's score. A fail (the
    search result lands at or outside the window - with fail-soft that means
@@ -701,6 +716,11 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
             }
         }
     }
+
+    /* internal iterative reductions: no TT move here means no ordering anchor,
+       so the first move searched is a guess - search one ply shallower and let
+       the stored move order the next visit (see IIR_DEPTH). */
+    if (ply && !ttm && depth >= IIR_DEPTH) depth--;
 
     if (ply) {
         u16 pm  = path_move[ply - 1];            /* the move that led here */
