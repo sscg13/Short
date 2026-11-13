@@ -13,7 +13,7 @@ static void tm_check(i16 ok, const char *name) {
 
 static void tm_prepare(Pos *p, const char *fen) {
     parse_fen(p, fen);
-    memset(killers, 0, sizeof killers);
+    memset(killer, 0, sizeof killer);
     memset(qhist, 0, sizeof qhist);
     tt_clear();
     g_sigs_n = 0;

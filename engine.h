@@ -103,13 +103,13 @@ typedef struct {
     i16 idx;          /* next index to consider */
     i16 stage;        /* MG_TT .. MG_DONE */
     u16 ttm;          /* transposition-table move (0 = none for now) */
-    u16 k0, k1;       /* killer moves (0 = none) */
+    u16 k0;           /* killer move (0 = none) */
     u16 cm;           /* counter move: refuted the opponent's last move (0 = none) */
     u16 fm;           /* follow-up move: refuted our own move two plies back */
     i16 caps_only;    /* stop after the captures stage (quiescence) */
 } MGen;
 
-#define MAXPLY 32         /* killers[] rows; movebuf rows cover ply 0..MAXPLY-1 */
+#define MAXPLY 32         /* killer[] rows; movebuf rows cover ply 0..MAXPLY-1 */
 #define MAX_G_SIGS 128    /* game-history position signatures. A capture or pawn
                              move irreversibly changes the position, so history
                              BEFORE the last zeroing move can never be a
@@ -272,7 +272,7 @@ Sig pos_sig(Pos *p);
 u16 repetition_move(Pos *p, Sig target);
 void search_root(Pos *p, i16 maxdepth);
 u16 think(Pos *p, i16 maxdepth);
-void search_clear_ordering(void);  /* clear killers and quiet history on game/position reset */
+void search_clear_ordering(void);  /* clear the killer and quiet history on game/position reset */
 
 /* quiet-history move-ordering table. Indexed by side to move (2), moving
    piece type-1 (6) and destination square in compact 0..63 (the move already
@@ -415,7 +415,7 @@ Score evaluate(Pos *p);
 void zob_init(void);              /* one-time Zobrist key tables (dedicated init) */
 i16 gen_caps(Pos *p, u16 *list);
 i16 gen_quiets(Pos *p, u16 *list);
-void mgen_init(Pos *p, MGen *g, i16 ply, u16 k0, u16 k1, u16 ttm, u16 cm, u16 fm);
+void mgen_init(Pos *p, MGen *g, i16 ply, u16 k0, u16 ttm, u16 cm, u16 fm);
 void mgen_init_q(Pos *p, MGen *g, i16 ply);   /* captures only (quiescence) */
 u16 next_move(Pos *p, MGen *g);
 

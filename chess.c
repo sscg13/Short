@@ -699,7 +699,7 @@ i16 gen_moves(Pos *p, u16 *list) {
 
 #define MG_TT      0   /* transposition-table move (empty for now) */
 #define MG_CAPS    1   /* captures/promotions, MVV-LVA selection */
-#define MG_KILLERS 2   /* two quiet killers */
+#define MG_KILLERS 2   /* one quiet killer */
 #define MG_QUIETS  3   /* remaining quiets (as generated) */
 #define MG_DONE    4
 
@@ -760,7 +760,7 @@ static i16 quiet_killer_ok(Pos *p, u16 m) {
 
     if (!piece) return 0;
     if (CO(piece) != (p->side ? 8 : 0)) return 0;   /* must be our piece */
-    if (mfl(m) != 0) return 0;                      /* killers are flag-0 quiets */
+    if (mfl(m) != 0) return 0;                      /* a killer is a flag-0 quiet */
     if (p->board[to]) return 0;                     /* non-capture */
 
     pt = TY(piece);
@@ -799,7 +799,7 @@ static i16 quiet_killer_ok(Pos *p, u16 m) {
     return 0;
 }
 
-void mgen_init(Pos *p, MGen *g, i16 ply, u16 k0, u16 k1, u16 ttm, u16 cm, u16 fm) {
+void mgen_init(Pos *p, MGen *g, i16 ply, u16 k0, u16 ttm, u16 cm, u16 fm) {
     (void)p;
     g->list = movebuf[ply];
     g->n = 0;
@@ -807,13 +807,12 @@ void mgen_init(Pos *p, MGen *g, i16 ply, u16 k0, u16 k1, u16 ttm, u16 cm, u16 fm
     g->stage = ttm ? MG_TT : MG_CAPS;   /* skip the TT stage when no ttm */
     g->ttm = ttm;
     g->k0 = k0;
-    g->k1 = k1;
     g->cm = cm;
     g->fm = fm;
     g->caps_only = 0;
 }
 
-/* quiescence init: captures only (MVV-LVA), no killers/quiets */
+/* quiescence init: captures only (MVV-LVA), no killer/quiets */
 void mgen_init_q(Pos *p, MGen *g, i16 ply) {
     (void)p;
     g->list = movebuf[ply];
@@ -821,7 +820,7 @@ void mgen_init_q(Pos *p, MGen *g, i16 ply) {
     g->idx = 0;
     g->stage = MG_CAPS;
     g->ttm = 0;
-    g->k0 = g->k1 = 0;
+    g->k0 = 0;
     g->cm = 0;
     g->fm = 0;
     g->caps_only = 1;
@@ -888,16 +887,11 @@ again:
         goto again;
 
     case MG_KILLERS:
-        if (g->idx < 2) {
-            u16 k = (g->idx == 0) ? g->k0 : g->k1;
-            g->idx++;
-            if (k && k != g->ttm) {
-                PCOUNT(c_nm_killer);
-                if (quiet_killer_ok(p, k)) return k;
-            }
-            goto again;
-        }
         g->stage = MG_QUIETS; g->idx = 0;
+        if (g->k0 && g->k0 != g->ttm) {
+            PCOUNT(c_nm_killer);
+            if (quiet_killer_ok(p, g->k0)) return g->k0;
+        }
         goto again;
 
     case MG_QUIETS:
@@ -929,7 +923,7 @@ again:
         }
         while (g->idx < g->n) {
             u16 q = g->list[g->idx++];
-            if (q == g->ttm || q == g->k0 || q == g->k1) continue;  /* already tried */
+            if (q == g->ttm || q == g->k0) continue;  /* already tried */
             PCOUNT(c_nm_qret);
             return q;
         }
@@ -950,7 +944,7 @@ static int moveset_check(Pos *p) {
     i16 bad = 0;
 
     n = gen_moves(p, all);
-    mgen_init(p, &mg, 0, 0, 0, 0, 0, 0);
+    mgen_init(p, &mg, 0, 0, 0, 0, 0);
     while ((m = next_move(p, &mg)) != 0) got[na++] = m;
 
     printf("gen_moves=%d next_move=%d\n", n, na);
@@ -978,7 +972,7 @@ static int moveset_check(Pos *p) {
    only: the Nimbus BIOS tick timer is dead (they print 0 there); on 86Box the
    engine clock resolves at about 1 ms. */
 #ifdef MAME_MARKERS
-static u16 ob_ttm, ob_k0, ob_k1;   /* mutable: keep the skip tests from folding */
+static u16 ob_ttm, ob_k0;          /* mutable: keep the skip tests from folding */
 static i16 ob_score[256];          /* frozen quiet scores (near, like qscore) */
 
 int order_bench(void) {
@@ -1033,7 +1027,7 @@ int order_bench(void) {
         for (i = 0; i < nq; i++) {
             u16 q = quiets[i];
             i16 s;
-            if (q == ob_ttm || q == ob_k0 || q == ob_k1) continue;
+            if (q == ob_ttm || q == ob_k0) continue;
             s = (*history)[TY(pos.board[mfrom(q)]) - 1][(q >> 6) & 0x3F];
             if (s > bscore) { bscore = s; best = i; }
         }
@@ -1065,7 +1059,7 @@ int order_bench(void) {
         for (i = 0; i < nq; i++) {
             u16 q = quiets[i];
             i16 s;
-            if (q == ob_ttm || q == ob_k0 || q == ob_k1) continue;
+            if (q == ob_ttm || q == ob_k0) continue;
             s = ob_score[i];
             if (s > bscore) { bscore = s; best = i; }
         }

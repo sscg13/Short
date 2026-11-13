@@ -39,7 +39,7 @@ static int search_state_selftest(void) {
     Undo u;
     Score initial, parent_score;
     u16 candidate, m;
-    i16 c, ep, nested_ep, n, i, j, k, slot, na, expected;
+    i16 c, ep, nested_ep, n, i, j, k, na, expected;
     st_checks = st_fails = 0;
     nnue_active = nnue_enabled;
     for (c = 0; c < 6; c++) {
@@ -79,7 +79,9 @@ static int search_state_selftest(void) {
         if (c == 2 || c == 3) st_check(expected == 1, "real EP right restored");
     }
     /* Both colours, friendly/enemy blockers, clear path, wrong start rank,
-       occupied destination, and either killer slot. Compare whole move sets. */
+       occupied destination, and a killer that is not a legal move. Compare
+       whole move sets: the picker must yield every generated move exactly once
+       whether or not the killer is accepted. */
     for (c = 0; c < 2; c++) {
         i16 from = c ? 0x63 : 0x13, fwd = c ? -16 : 16;
         i16 to = from + 2 * fwd;
@@ -96,16 +98,14 @@ static int search_state_selftest(void) {
             expected = k == 2;
             st_check(quiet_killer_ok(&p, candidate) == expected,
                      "pawn killer requires start rank and empty path/destination");
-            for (slot = 0; slot < 2; slot++) {
-                n = gen_moves(&p, st_all); na = 0;
-                mgen_init(&p, &mg, 0, slot ? 0 : candidate, slot ? candidate : 0, 0, 0, 0);
-                while ((m = next_move(&p, &mg)) != 0 && na < 256) st_got[na++] = m;
-                st_check(na == n && m == 0, "killer picker move count equals generator");
-                for (i = 0; i < n; i++) {
-                    j = 0;
-                    for (ep = 0; ep < na; ep++) if (st_got[ep] == st_all[i]) j++;
-                    st_check(j == 1, "killer picker yields each generated move once");
-                }
+            n = gen_moves(&p, st_all); na = 0;
+            mgen_init(&p, &mg, 0, candidate, 0, 0, 0);
+            while ((m = next_move(&p, &mg)) != 0 && na < 256) st_got[na++] = m;
+            st_check(na == n && m == 0, "killer picker move count equals generator");
+            for (i = 0; i < n; i++) {
+                j = 0;
+                for (ep = 0; ep < na; ep++) if (st_got[ep] == st_all[i]) j++;
+                st_check(j == 1, "killer picker yields each generated move once");
             }
         }
     }

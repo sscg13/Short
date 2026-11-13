@@ -228,7 +228,7 @@ static i16 any_legal(Pos *p, i16 ply) {
 static u16 pv[MAXPLY + 1][MAXPLY];
 static i16 pv_len[MAXPLY + 1];
 
-static u16 killers[MAXPLY][2];          /* two killer moves per ply (quiet only) */
+static u16 killer[MAXPLY];              /* one killer move per ply (quiet only) */
 
 i16 qhist[2][6][64];   /* quiet-history: side, piece-type-1, to-square-compact */
 
@@ -243,7 +243,7 @@ static i16 path_pc[MAXPLY];
 
 /* A new game/position must not inherit ordering learned in earlier games. */
 void search_clear_ordering(void) {
-    memset(killers, 0, sizeof killers);
+    memset(killer, 0, sizeof killer);
     memset(qhist, 0, sizeof qhist);
     memset(counter_move, 0, sizeof counter_move);
     memset(follow_move, 0, sizeof follow_move);
@@ -312,7 +312,8 @@ static i32 st_pvs_tries, st_pvs_prunes, st_pvs_checks_kept;
    point generator reproduces it exactly, so the bench tree is unchanged).
    d = node depth, m = legal moves already searched at this node. The minimum
    reduced child depth of 1 prevents reductions at node depths 1 and 2. LMR_MOVES 4
-   protects the TT move and both killers (typically the first 1-3 searched);
+   protects the TT move and the killer even when captures push them down the
+   list (typically the first 1-3 searched);
    quiet-only (captures/promos/EP/castle keep full depth). PV nodes are reduced
    too, one ply less than the table's cut-node value (a slot worth only 1 ply is
    not reduced at all); the root is exempt, because any root move can become the
@@ -483,7 +484,7 @@ static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd)
         if (stand > alpha) alpha = stand;
     }
 
-    if (in_check) mgen_init(p, &mg, ply, 0, 0, 0, 0, 0);  /* all legal evasions */
+    if (in_check) mgen_init(p, &mg, ply, 0, 0, 0, 0);  /* all legal evasions */
     else          mgen_init_q(p, &mg, ply);          /* captures only, MVV-LVA */
 
     while ((m = next_move(p, &mg)) != 0) {
@@ -584,7 +585,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
         stop_now = 1;
 #endif
     if (stop_now) return best;
-    if (ply >= MAXPLY) return evaluate(p);       /* hard depth cap: never index past pv/killers/movebuf */
+    if (ply >= MAXPLY) return evaluate(p);       /* hard depth cap: never index past pv/killer/movebuf */
 
     /* Repetition check before quiescence so horizon positions are covered
        here instead of in qsearch; the draw floor is carried through the
@@ -705,7 +706,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
     if (ply) {
         u16 pm  = path_move[ply - 1];            /* the move that led here */
         u16 pm2 = (ply >= 2) ? path_move[ply - 2] : 0;   /* our move before it */
-        mgen_init(p, &mg, ply, killers[ply][0], killers[ply][1], ttm,
+        mgen_init(p, &mg, ply, killer[ply], ttm,
                   pm  ? counter_move[(pm >> 6) & 0x3F][CMI(path_pc[ply - 1])] : 0,
                   pm2 ? follow_move[(pm2 >> 6) & 0x3F][CMI(path_pc[ply - 2])] : 0);
     }
@@ -819,16 +820,12 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                 undo_move(p, m, &u);
                 if (alpha >= beta) {
                     /* killer + history: a true quiet (no promo/ep/castle flag, empty
-                       target) that caused the cutoff gets a depth^2 bonus; the deeper
-                       the cutoff, the more reliable the move, so it dominates. */
+                       target) that caused the cutoff gets a depth^2 bonus and becomes
+                       the ply's killer; the deeper the cutoff, the more reliable the
+                       move, so it dominates. */
                     if (ply && !stop_now && mfl(m) == 0 && u.cap == EMPTY) {
                         i16 dd = depth * depth;
-                        if (m != killers[ply][0]) {  /* a move already in killer slot 0 must
-                                                        not be duplicated into slot 1 - the
-                                                        MG_KILLERS stage would return it twice */
-                            killers[ply][1] = killers[ply][0];
-                            killers[ply][0] = m;
-                        }
+                        killer[ply] = m;
                         qhist_update(p, m, dd);
                         /* this quiet refuted the move that led to this node:
                            try it next time that position arises, and also after
@@ -1468,7 +1465,7 @@ int sbench(void) {
         t0 = BENCH_NOW();
         MAME_MARK(0x16);
         for (i = 0; i < iters; i++) {
-            mgen_init(&pos, &mg, 0, 0, 0, 0, 0, 0);
+            mgen_init(&pos, &mg, 0, 0, 0, 0, 0);
             while ((m = next_move(&pos, &mg)) != 0) BENCH_PROBE(m);
         }
         MAME_MARK(0x17);
