@@ -1,5 +1,19 @@
 /* search.c - alpha-beta search and iterative deepening */
 
+/* Root bookkeeping.
+   The root keeps its own score-sorted move list (sort_root): ordering it by the
+   previous iteration's subtree scores measured better than the staged picker
+   every interior node uses, twice (artifacts/root-staged-2026-11-12). What the
+   root did *not* do is feed the ordering tables: it never stored to the TT and
+   never updated killers or quiet history, even though its cutoffs and fail-lows
+   are the deepest quiet moves in the tree. ROOT_UPDATES lets ply 0 do that
+   while keeping the flat list. `-DROOT_BOOKING=0` restores the old behaviour
+   for an A/B in one tree. */
+#ifndef ROOT_BOOKING
+#define ROOT_BOOKING 1
+#endif
+#define ROOT_UPDATES(ply) ((ply) || ROOT_BOOKING)
+
 #include "engine.h"
 
 #ifdef TUNE
@@ -617,8 +631,11 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
         return _r > best ? _r : best;
     }
 
-    /* Transposition table (non-root only). */
-    if (ply) {
+    /* Transposition table. With ROOT_BOOKING the root probes too - for the
+       stored eval (the move is only used by the staged picker, and the root
+       has its own list) and so its own store has a slot to reuse. The cutoff
+       stays non-PV, and the root is always a PV node. */
+    if (ROOT_UPDATES(ply)) {
         if (tt_probe(p, ply, &tt)) {
             /* A full-key hit means the same position, so the stored move is
                pseudo-legal here; the move loop's own-piece test below still
@@ -820,27 +837,35 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                 if (alpha >= beta) {
                     /* killer + history: a true quiet (no promo/ep/castle flag, empty
                        target) that caused the cutoff gets a depth^2 bonus; the deeper
-                       the cutoff, the more reliable the move, so it dominates. */
-                    if (ply && !stop_now && mfl(m) == 0 && u.cap == EMPTY) {
+                       the cutoff, the more reliable the move, so it dominates.
+                       ROOT_UPDATES: the root's cutoffs count too - they are the
+                       deepest quiet moves in the tree. It has no killer slot of
+                       its own (nothing reads killers[0] while the root keeps its
+                       score-sorted list) and no parent, so it writes history
+                       only. */
+                    if (ROOT_UPDATES(ply) && !stop_now && mfl(m) == 0 && u.cap == EMPTY) {
                         i16 dd = depth * depth;
-                        if (m != killers[ply][0]) {  /* a move already in killer slot 0 must
-                                                        not be duplicated into slot 1 - the
-                                                        MG_KILLERS stage would return it twice */
-                            killers[ply][1] = killers[ply][0];
-                            killers[ply][0] = m;
-                        }
                         qhist_update(p, m, dd);
-                        /* this quiet refuted the move that led to this node:
-                           try it next time that position arises, and also after
-                           our own previous move, which set up that position */
-                        counter_move[(path_move[ply - 1] >> 6) & 0x3F]
-                                    [CMI(path_pc[ply - 1])] = m;
-                        if (ply >= 2)
-                            follow_move[(path_move[ply - 2] >> 6) & 0x3F]
-                                       [CMI(path_pc[ply - 2])] = m;
+                        if (ply) {
+                            if (m != killers[ply][0]) {  /* a move already in killer slot 0 must
+                                                            not be duplicated into slot 1 - the
+                                                            MG_KILLERS stage would return it twice */
+                                killers[ply][1] = killers[ply][0];
+                                killers[ply][0] = m;
+                            }
+                            /* this quiet refuted the move that led to this node:
+                               try it next time that position arises, and also
+                               after our own previous move, which set up that
+                               position */
+                            counter_move[(path_move[ply - 1] >> 6) & 0x3F]
+                                        [CMI(path_pc[ply - 1])] = m;
+                            if (ply >= 2)
+                                follow_move[(path_move[ply - 2] >> 6) & 0x3F]
+                                           [CMI(path_pc[ply - 2])] = m;
+                        }
                     }
                     break;                            /* beta cutoff */
-                } else if (ply && score <= alpha0) {
+                } else if (ROOT_UPDATES(ply) && score <= alpha0) {
                     /* fail low: a quiet that failed to beat its window is penalized
                        (symmetric depth^2), so it sorts behind unsearched quiets. */
                     if (!stop_now && mfl(m) == 0 && u.cap == EMPTY)
@@ -860,7 +885,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
         if (ply && !stop_now) tt_store(p, 0, depth, r, TT_EXACT, ply, tt.eval, tt.eval_valid);
         return r;
     }
-    if (ply && !stop_now && (!upcoming || best > 0)) {
+    if (ROOT_UPDATES(ply) && !stop_now && (!upcoming || best > 0)) {
         /* Classify against the entry window; alpha has risen during search. */
         i16 flag = (best >= beta) ? TT_LOWER :
                    (best <= original_alpha) ? TT_UPPER : TT_EXACT;
