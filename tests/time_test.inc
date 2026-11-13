@@ -97,7 +97,7 @@ int time_selftest(void) {
             Score score;
             tm_prepare(&p, terminal_fens[i]); original = p;
             g_sigs_n = 1; g_sigs[0] = p.sig; rep_reset();
-            root_n = gen_moves(&p, root_m);
+            root_prepare(&p);
             score = alphabeta(&p, 2, -INF, INF, 0, 0, NODE_PV);
             tm_check(score == (i ? 0 : -MATE) && !pv_len[0] && !rep_n &&
                      g_sigs_n == 1 && g_sigs[0] == p.sig &&

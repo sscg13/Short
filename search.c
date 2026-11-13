@@ -1,5 +1,16 @@
 /* search.c - alpha-beta search and iterative deepening */
 
+/* Root move ordering.
+   STAGED (default): the root is searched with the ordinary staged picker, the
+   same one every interior node uses - the previous iteration's best move plays
+   the role of the TT move, then captures by MVV-LVA, then quiet moves by
+   history. FLAT (the previous scheme, kept for A/B measurement with
+   -DROOT_STAGED=0): the root consumes gen_moves' fixed order, re-sorted every
+   pass by the previous iteration's subtree score. */
+#ifndef ROOT_STAGED
+#define ROOT_STAGED 1
+#endif
+
 #include "engine.h"
 
 #ifdef TUNE
@@ -391,10 +402,17 @@ static i16 has_np_material(Pos *p) {
     return 0;
 }
 
-/* root move list + scores, reused across iterative-deepening iterations */
+/* Root move list and ordering state, reset once per position and kept across
+   the iterative-deepening passes.
+   `root_m` is the pseudo-legal root list: the search consumes it in flat mode
+   and the caller uses it to validate the returned move in both modes.
+   `root_prev` is the previous iteration's best root move, which is the root's
+   "TT move" for the ordinary staged picker. */
 static u16 root_m[256];
-static Score root_score[256];
 static i16 root_n;
+static u16 root_prev;
+#if !ROOT_STAGED
+static Score root_score[256];
 
 /* selection sort the root moves by last iteration's score (best first) */
 static void sort_root(void) {
@@ -409,6 +427,20 @@ static void sort_root(void) {
             root_score[i] = root_score[best]; root_score[best] = ts;
         }
     }
+}
+#endif
+
+/* Start a new position: the root list and the previous best move belong to the
+   position, not to the search, so a new one must not inherit either. */
+static void root_prepare(Pos *p) {
+#if !ROOT_STAGED
+    i16 i;
+#endif
+    root_n = gen_moves(p, root_m);
+#if !ROOT_STAGED
+    for (i = 0; i < root_n; i++) root_score[i] = 0;
+#endif
+    root_prev = 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -547,8 +579,14 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                       NodeType node_type) {
     MGen mg;
     u16 m, ttm = 0, bestmove = 0;
+#if ROOT_STAGED
+    u16 rtt = 0;
+#endif
     Score best = -INF, original_alpha = alpha;
-    i16 legal = 0, in_check = 0, move_count = 0, upcoming = 0, root_index = 0;
+    i16 legal = 0, in_check = 0, move_count = 0, upcoming = 0;
+#if !ROOT_STAGED
+    i16 root_index = 0;
+#endif
     NodeType child_type;     /* non-PV child expectation: PV scouts also expect cut */
     TTData tt;
 
@@ -556,7 +594,13 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
        up outside the recursive-node path. Node accounting and the limit checks
        are shared - one counted root node and one deadline read per root call
        cost less than the special case, and keep the deadline honest at ply 0. */
-    if (!ply) sort_root();
+    if (!ply) {
+#if ROOT_STAGED
+        rtt = root_prev;               /* the picker's TT move at the root */
+#else
+        sort_root();
+#endif
+    }
     pv_len[ply] = 0;                             /* no best line yet at this ply */
     PCOUNT(c_anodes);
     nodes_search++;
@@ -709,11 +753,23 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                   pm  ? counter_move[(pm >> 6) & 0x3F][CMI(path_pc[ply - 1])] : 0,
                   pm2 ? follow_move[(pm2 >> 6) & 0x3F][CMI(path_pc[ply - 2])] : 0);
     }
+#if ROOT_STAGED
+    else {
+        /* The root gets the same staged picker as every interior node, seeded
+           only with the previous iteration's best move: it has no parent, so
+           there are no killers, and no path, so no counter or follow-up. */
+        mgen_init(p, &mg, 0, 0, 0, rtt, 0, 0);
+    }
+#endif
 
     {
         i16 first = 1;                     /* PVS: first legal move gets the full window */
+#if ROOT_STAGED
+        while ((m = next_move(p, &mg)) != 0) {
+#else
         while ((m = ply ? next_move(p, &mg) :
                     (root_index < root_n ? root_m[root_index++] : 0)) != 0) {
+#endif
             Undo u;
             i16 us, pc, is_cap, child_half, legal_move = 0;
             i16 see_prune = 0;
@@ -804,7 +860,9 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                         score = -alphabeta(p, depth - 1, -beta, -alpha, ply + 1, child_half, NODE_PV);
                     }
                 }
+#if !ROOT_STAGED
                 if (!ply) root_score[root_index - 1] = score;
+#endif
                 if (score > best) {
                     best = score;
                     bestmove = m;
@@ -870,10 +928,9 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
 }
 
 void search_root(Pos *p, i16 maxdepth) {
-    i16 d, i;
+    i16 d;
     Score prev = -INF;
-    root_n = gen_moves(p, root_m);
-    for (i = 0; i < root_n; i++) root_score[i] = 0;
+    root_prepare(p);
     if (nnue_ensure_default()) { nnue_reset(p); nnue_active = 1; }
     for (d = 1; d <= maxdepth; d++) {
         Score asp_lo = -INF, asp_hi = INF, bestscore = -INF, bsc = -INF;
@@ -906,6 +963,7 @@ void search_root(Pos *p, i16 maxdepth) {
             else delta *= 2;
         }
         prev = bestscore = bsc;
+        root_prev = bm;                  /* next pass's picker TT move */
         bf = mfrom(bm); bt = mto(bm);
         t1 = engine_clock();
         secs = (double)(t1 - t0) / (double)CLOCKS_PER_SEC;
@@ -953,8 +1011,7 @@ u16 think(Pos *p, i16 maxdepth) {
     time_test_depth = 0;
 #endif
     dbgf("think begin maxdepth=%d deadline=%ld\n", maxdepth, (long)deadline);
-    root_n = gen_moves(p, root_m);
-    for (i = 0; i < root_n; i++) root_score[i] = 0;
+    root_prepare(p);
     if (nnue_ensure_default()) { nnue_reset(p); nnue_active = 1; }
     for (d = 1; d <= maxdepth; d++) {
         Score asp_lo = -INF, asp_hi = INF, bsc = -INF;
@@ -989,6 +1046,7 @@ u16 think(Pos *p, i16 maxdepth) {
         if (stop_now) break;
         prev = bsc;
         bestm = bm;
+        root_prev = bm;                  /* next pass's picker TT move */
 #ifdef DBG_LOG
         completed_depth = d;
 #endif
@@ -1070,7 +1128,7 @@ i32 bench_nodes = 0;    /* node total of the last `bench`, for `calcheck` */
 #endif
 
 int bench(int depth) {
-    i16 i, d, k;
+    i16 i, d;
     i32 total_nodes = 0;
 #ifndef VCLOCK
     clock_t b0, b1;
@@ -1110,8 +1168,7 @@ int bench(int depth) {
         g_sigs_n = 0;                            /* no game-history repetitions */
         search_clear_ordering();
         tt_clear();                              /* no cross-position TT reuse */
-        root_n = gen_moves(&p, root_m);
-        for (k = 0; k < root_n; k++) root_score[k] = 0;
+        root_prepare(&p);
         if (nnue_ensure_default()) { nnue_reset(&p); nnue_active = 1; }
         MAME_MARK(0x51);
 
@@ -1144,6 +1201,7 @@ int bench(int depth) {
                 else delta *= 2;
             }
             prev = bsc;
+            root_prev = bm;                  /* next pass's picker TT move */
             pos_nodes += nodes_search;
             if (d == depth) { bestscore = bsc; bf = mfrom(bm); bt = mto(bm); }
         }
@@ -1218,7 +1276,7 @@ int calcheck(void) {
 /* Builds need -DPROFILE.                                              */
 /* ------------------------------------------------------------------ */
 int profile(int depth) {
-    i16 i, d, k;
+    i16 i, d;
     i32 total_nodes = 0;
     clock_t b0, b1;
     double bsecs;
@@ -1257,8 +1315,7 @@ int profile(int depth) {
         g_sigs_n = 0;                            /* no game-history repetitions */
         search_clear_ordering();
         tt_clear();                              /* no cross-position TT reuse */
-        root_n = gen_moves(&p, root_m);
-        for (k = 0; k < root_n; k++) root_score[k] = 0;
+        root_prepare(&p);
         if (nnue_ensure_default()) { nnue_reset(&p); nnue_active = 1; }
 
         for (d = 1; d <= depth; d++) {
@@ -1286,6 +1343,7 @@ int profile(int depth) {
                 else delta *= 2;
             }
             prev = bsc;
+            root_prev = bm;                  /* next pass's picker TT move */
             pos_nodes += nodes_search;
         }
         nnue_active = 0;

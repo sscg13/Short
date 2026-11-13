@@ -121,7 +121,10 @@ static void rt_search_cycle(void) {
     g_sigs_n = 0; rep_reset();
 }
 /* At halfmove 99, quiet king moves draw while pawn moves can preserve the
-   material advantage. Exercise both root paths and non-capturing promotions. */
+   material advantage. Exercise both root entry points and non-capturing
+   promotions. Per-move scores come from an independent 1-ply child search, the
+   same work the root loop does for each move, so this checks the result of the
+   root rather than whichever order it chose to search in. */
 static void rt_root_halfmove(const char *fen, i16 promotion) {
     Pos p, original;
     i16 path, i, pawns, quiets;
@@ -137,22 +140,37 @@ static void rt_root_halfmove(const char *fen, i16 promotion) {
         search_set_limits(0, 0); stop_now = 0;
         g_sigs_n = 1; g_sigs[0] = p.sig; rep_reset();
         if (path == 0) best = think(&p, 1);
-        else search_root(&p, 1);
+        else { search_root(&p, 1); best = pv_len[0] ? pv[0][0] : 0; }
+        /* score every root move: a quiet move at halfmove 99 must draw exactly,
+           and only a pawn move may score above zero */
+        nnue_ensure_default(); nnue_reset(&p); nnue_active = 1;
         pawns = quiets = 0;
         for (i = 0; i < root_n; ++i) {
             u16 m = root_m[i];
-            if (TY(p.board[mfrom(m)]) == 1) {
+            Undo u;
+            i16 pc = p.board[mfrom(m)], child_half;
+            if (TY(pc) == 1) {
                 ++pawns;
                 if ((!!ispromo(m)) != promotion) failed = 1;
             } else {
                 ++quiets;
-                if (root_score[i] != 0) failed = 1;
             }
-            if (root_score[i] > best_score) {
-                best_score = root_score[i];
-                if (path) best = m;
+            do_make(&p, m, &u);
+            if (is_attacked(&p, p.ks[p.side ^ 1], p.side)) {
+                undo_move(&p, m, &u);            /* illegal here: no score */
+                continue;
             }
+            child_half = (TY(pc) == 1 || u.cap != EMPTY || mfl(m) == MF_EP)
+                             ? 0 : (i16)(g_half + 1);
+            path_move[0] = m; path_pc[0] = pc;
+            {
+                Score sc = -alphabeta(&p, 0, -INF, INF, 1, child_half, NODE_CUT);
+                if (TY(pc) != 1 && sc != 0) failed = 1;
+                if (sc > best_score) { best_score = sc; if (path) best = m; }
+            }
+            undo_move(&p, m, &u);
         }
+        nnue_active = 0;
         ++rt_cases;
         if (failed || !pawns || !quiets || !best || best_score <= 0 ||
             TY(p.board[mfrom(best)]) != 1 ||
