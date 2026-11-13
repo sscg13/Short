@@ -15,6 +15,7 @@ static void tm_prepare(Pos *p, const char *fen) {
     parse_fen(p, fen);
     memset(killers, 0, sizeof killers);
     memset(qhist, 0, sizeof qhist);
+    memset(chist, 0, sizeof chist);
     tt_clear();
     g_sigs_n = 0;
     stop_now = 0;

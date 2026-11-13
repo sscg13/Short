@@ -232,6 +232,8 @@ static u16 killers[MAXPLY][2];          /* two killer moves per ply (quiet only)
 
 i16 qhist[2][6][64];   /* quiet-history: side, piece-type-1, to-square-compact */
 
+i16 chist[2][6][64];   /* capture-history: side, moving-piece-type-1, to-square-compact */
+
 /* counter/follow-up ordering: the quiet reply that last cut off a move.
    `counter_move` is keyed by the opponent's last move, `follow_move` by our own
    move two plies back. path_move/path_pc hold the move that led to each ply of
@@ -245,6 +247,7 @@ static i16 path_pc[MAXPLY];
 void search_clear_ordering(void) {
     memset(killers, 0, sizeof killers);
     memset(qhist, 0, sizeof qhist);
+    memset(chist, 0, sizeof chist);
     memset(counter_move, 0, sizeof counter_move);
     memset(follow_move, 0, sizeof follow_move);
 }
@@ -256,6 +259,21 @@ static void qhist_update(Pos *p, u16 m, i16 delta) {
     if (v >  QH_MAX) v =  QH_MAX;
     if (v < -QH_MAX) v = -QH_MAX;
     *h = v;
+}
+
+/* Reward a capture that caused a beta cutoff: h += bonus - h*bonus/CH_MAX, so
+   the increment shrinks as the slot fills and the value settles near +CH_MAX
+   instead of slamming into a cap after two deep cutoffs. Rewards only - a
+   capture that fails to beat its window is usually still a fine move (the node
+   is decided elsewhere), and penalizing it just shuffles good captures down,
+   which measured as a regression when capture history was first tried
+   (artifacts/capture-history-2-2026-11-13, tests 2039/2040). */
+static void chist_update(Pos *p, u16 m, i16 bonus) {
+    i16 *h = &chist[p->side][TY(p->board[mfrom(m)]) - 1][(m >> 6) & 0x3F];
+    i32 v = (i32)*h + (i32)bonus - (((i32)*h * (i32)bonus) >> CH_SHIFT);
+    if (v >  CH_MAX) v =  CH_MAX;
+    if (v < -CH_MAX) v = -CH_MAX;
+    *h = (i16)v;
 }
 
 #define MAX_QDEPTH 8    /* longest capture chain past the search leaf; guards against
@@ -820,12 +838,15 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                 if (alpha >= beta) {
                     /* killer + history: a true quiet (no promo/ep/castle flag, empty
                        target) that caused the cutoff gets a depth^2 bonus; the deeper
-                       the cutoff, the more reliable the move, so it dominates. */
+                       the cutoff, the more reliable the move, so it dominates. A
+                       capture that cut off gets the same bonus in chist instead -
+                       it is the only ordering evidence a capture can have, since
+                       captures are never killers and carry no counter/follow-up. */
                     if (ply && !stop_now && mfl(m) == 0 && u.cap == EMPTY) {
                         i16 dd = depth * depth;
                         if (m != killers[ply][0]) {  /* a move already in killer slot 0 must
-                                                        not be duplicated into slot 1 - the
-                                                        MG_KILLERS stage would return it twice */
+                                                        not be duplicated into slot 1 -
+                                                        the MG_KILLERS stage would return it twice */
                             killers[ply][1] = killers[ply][0];
                             killers[ply][0] = m;
                         }
@@ -838,6 +859,9 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                         if (ply >= 2)
                             follow_move[(path_move[ply - 2] >> 6) & 0x3F]
                                        [CMI(path_pc[ply - 2])] = m;
+                    } else if (ply && !stop_now && (u.cap != EMPTY || mfl(m) == MF_EP)) {
+                        /* EP clears cap (the pawn is not on the to-square) */
+                        chist_update(p, m, (i16)(depth * depth));
                     }
                     break;                            /* beta cutoff */
                 } else if (ply && score <= alpha0) {

@@ -741,13 +741,20 @@ static void king_line_build(void) {
 /* MVV-LVA capture score, inlined at its call sites. next_move makes 93,314
    comparisons per bench-4 run; as a function that was a real far call each
    time (512 cycles/step on the 80186 vs 274 for the inlined quiet step, see
-   artifacts/orderbench-2026-11-07). Score and order are unchanged: same
-   table, same victim/promotion rules. mv is a register-resident move word at
-   both call sites, so the repeated subexpressions cost nothing. */
+   artifacts/orderbench-2026-11-07). mv is a register-resident move word at
+   both call sites, so the repeated subexpressions cost nothing.
+   The capture-history term is added on top: it is clamped to +-CH_MAX, which
+   is below the smallest victim-material step (mval[3]-mval[2] = 160 at the x16
+   scale), so it can never move a capture across a victim tier - it only
+   reorders captures of the same victim, where it stands in for the crude
+   attacker-type tiebreak. A quiet promotion (empty to-square) reads a real
+   chist slot too: the key is the moving piece and the destination, not the
+   victim. */
 #define MVV_LVA(p, mv) \
     (mvv_tab[(mfl(mv) == MF_EP) ? 1 : \
              ((p)->board[mto(mv)] ? TY((p)->board[mto(mv)]) : 0)] \
-            [TY((p)->board[mfrom(mv)])] + (ispromo(mv) ? PROMO_BONUS : 0))
+            [TY((p)->board[mfrom(mv)])] + (ispromo(mv) ? PROMO_BONUS : 0) \
+     + chist[(p)->side][TY((p)->board[mfrom(mv)]) - 1][(mv >> 6) & 0x3F])
 
 /* killer sanity: the move must be a genuine quiet pseudo-legal move of the
    side to move. A bare "from occupied, to empty" check is not enough: a

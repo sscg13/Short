@@ -323,11 +323,29 @@ static const SeeCost see_cost[4] = {
    operations per node vary with the tree shape.
    See artifacts/vclock-ordering-2026-11-09/REPORT.md. */
 typedef struct { i32 cap, qsort, qret, qscore, killer, call; } OrdCost;
+/* 2026-11-13: capture history (artifacts/capture-history-2-2026-11-13) added
+   one near read plus its index arithmetic to every capture-stage comparison.
+   The emulated depth-4 totals rose +2.17% (80286), +3.04% (8088) and +2.42%
+   (80186) against the previous tree, and on the new tree the model with the old
+   rows sat 273 / 1,378 / 1,170 / 487 cycles per node below the measurements, so
+   `cap` - the only priced operation the change touches - carries the gap:
+   +130 / +657 / +558 / +232 per comparison, which is the measured per-node
+   delta divided by the capture scans per node (80,837 / 38,523 = 2.098) - the
+   same "measured total change / operation count" rule `nm` was fitted with.
+   Cross-check: the isolated orderbench step (`chess orderbench`, Nimbus markers
+   0x30/0x31, 16,000 Kiwipete steps) went 405.7 -> 586.3, +45% - the same
+   direction and a comparable size; the row sits above the isolated figure
+   because the in-situ scan runs under the node loop's register pressure (SEE
+   has the same offset). The per-CPU values are fitted from each CPU's own
+   measurement rather than scaled by the mk ratio (the rule for the other
+   ordering rows) because the added work is index arithmetic and a near load,
+   which the 8088/8086 pay proportionally more than their board make/undo
+   ratio. rn/rm are untouched, so the residual keeps its meaning. */
 static const OrdCost ord_cost[4] = {
-    {  274,    95,   81,    124,    607,  296 }, /* 80286 */
-    {  899,   313,  267,    408,   1996,  974 }, /* 8088 */
-    {  787,   274,  234,    357,   1747,  853 }, /* 8086 */
-    {  434,   151,  129,    197,    963,  470 }, /* 80186 */
+    {  404,    95,   81,    124,    607,  296 }, /* 80286 */
+    { 1556,   313,  267,    408,   1996,  974 }, /* 8088 */
+    { 1345,   274,  234,    357,   1747,  853 }, /* 8086 */
+    {  666,   151,  129,    197,    963,  470 }, /* 80186 */
 };
 
 static i64 vclock_cyc(void) {
@@ -390,9 +408,11 @@ i32 vclock_est_nps(i32 nodes) {
      counter-move tree, 38,362 nodes
      (artifacts/counter-move-2026-11-12/REPORT.md), and again 2026-11-12 on the
      follow-up tree, 38,352 nodes
-     (artifacts/follow-up-2026-11-12/REPORT.md):
-       80286 @6 MHz  19,742 cyc/node   8088 @16 MHz  64,289
-       8086  @8 MHz  54,971 (derived)  80186 @8 MHz  31,639
+     (artifacts/follow-up-2026-11-12/REPORT.md), and again 2026-11-13 on the
+     capture-history tree, 38,523 nodes
+     (artifacts/capture-history-2-2026-11-13/REPORT.md):
+       80286 @6 MHz  20,171 cyc/node   8088 @16 MHz  66,246
+       8086  @8 MHz  56,645 (derived)  80186 @8 MHz  32,406
 
    The counter-move tree's totals are ~0.4% above the PV-LMR ones on every CPU:
    the quiet scorer gained one compare per candidate and mgen_init one indexed
@@ -402,13 +422,13 @@ i32 vclock_est_nps(i32 nodes) {
 
    If the tree changes (bench node total differs) the reference no longer
    applies: re-measure it, do not "fix" the model to match a stale tree. */
-#define VCLOCK_CAL_NODES   38352
+#define VCLOCK_CAL_NODES   38523
 #define VCLOCK_CAL_TOL_PCT 3
 static const i32 vclock_cal_cyc[4] = {
-    19742,  /* 80286 */
-    64289,  /* 8088 */
-    54971,  /* 8086 (derived: 8088 x 54,981/64,301) */
-    31639,  /* 80186 */
+    20171,  /* 80286 */
+    66246,  /* 8088 */
+    56645,  /* 8086 (derived: 8088 x 54,971/64,289) */
+    32406,  /* 80186 */
 };
 static const char *const vclock_cpu_name[4] = {
     "80286", "8088", "8086", "80186"

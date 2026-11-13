@@ -272,7 +272,7 @@ Sig pos_sig(Pos *p);
 u16 repetition_move(Pos *p, Sig target);
 void search_root(Pos *p, i16 maxdepth);
 u16 think(Pos *p, i16 maxdepth);
-void search_clear_ordering(void);  /* clear killers and quiet history on game/position reset */
+void search_clear_ordering(void);  /* clear killers/history on game/position reset */
 
 /* quiet-history move-ordering table. Indexed by side to move (2), moving
    piece type-1 (6) and destination square in compact 0..63 (the move already
@@ -283,6 +283,23 @@ void search_clear_ordering(void);  /* clear killers and quiet history on game/po
    strictly below any stored value so no valid quiet is ever skipped. */
 #define QH_MAX 30000
 extern i16 qhist[2][6][64];
+
+/* capture-history move-ordering table: the same shape as qhist but for
+   captures - [side to move][moving piece type-1][destination square compact].
+   Its value is added to the MVV-LVA score of a capture candidate in the
+   selection scan, so it reorders captures the material term considers equal.
+   It REPLACES the LVA (least-valuable-attacker) tiebreak in practice but not in
+   the score: MVV-LVA stays the base term, so the learned bonus can only
+   reorder captures of the same victim. CH_MAX is small on purpose - the
+   smallest step between two victim tiers is mval[3]-mval[2] = 160 at the x16
+   scale used by mvv_tab, so no amount of history can lift a capture past a
+   more valuable victim, while +-128 still dominates the 0..5 attacker
+   tiebreak. Values are reward-only (a beta cutoff), decayed toward +CH_MAX so
+   a slot settles instead of saturating after two deep cutoffs. 2*6*64 i16 =
+   1536 B near, same size as qhist. */
+#define CH_SHIFT 7
+#define CH_MAX (1 << CH_SHIFT)
+extern i16 chist[2][6][64];
 #define CM_BONUS (QH_MAX + 2)     /* ranks the counter move first among quiets */
 #define FM_BONUS (QH_MAX + 1)     /* and the follow-up move second */
 /* counter/follow-up ordering: for each previous move (destination in compact
