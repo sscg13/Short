@@ -1,15 +1,18 @@
 /* search.c - alpha-beta search and iterative deepening */
 
 /* Root move ordering.
-   STAGED (default): the root is searched with the ordinary staged picker, the
-   same one every interior node uses - the previous iteration's best move plays
-   the role of the TT move, then captures by MVV-LVA, then quiet moves by
-   history. FLAT (the previous scheme, kept for A/B measurement with
+   STAGED (default): the root is an ordinary PV node. It probes the TT, runs the
+   shared staged picker (TT move, captures by MVV-LVA, killers, quiets by
+   history) and feeds the same killer/history tables and TT on the way out, so
+   the previous iteration's best move reaches it through the TT like everywhere
+   else. FLAT (the previous scheme, kept for A/B measurement with
    -DROOT_STAGED=0): the root consumes gen_moves' fixed order, re-sorted every
-   pass by the previous iteration's subtree score. */
+   pass by the previous iteration's subtree score, and touches none of the
+   ordering tables. */
 #ifndef ROOT_STAGED
 #define ROOT_STAGED 1
 #endif
+#define ROOT_ORDERS(ply) ((ply) || ROOT_STAGED)
 
 #include "engine.h"
 
@@ -402,15 +405,12 @@ static i16 has_np_material(Pos *p) {
     return 0;
 }
 
-/* Root move list and ordering state, reset once per position and kept across
-   the iterative-deepening passes.
-   `root_m` is the pseudo-legal root list: the search consumes it in flat mode
-   and the caller uses it to validate the returned move in both modes.
-   `root_prev` is the previous iteration's best root move, which is the root's
-   "TT move" for the ordinary staged picker. */
+/* Root move list, reset once per position and kept across the
+   iterative-deepening passes. `root_m` is the pseudo-legal root list: the
+   search consumes it in flat mode and the caller uses it to validate the
+   returned move in both modes. */
 static u16 root_m[256];
 static i16 root_n;
-static u16 root_prev;
 #if !ROOT_STAGED
 static Score root_score[256];
 
@@ -430,8 +430,9 @@ static void sort_root(void) {
 }
 #endif
 
-/* Start a new position: the root list and the previous best move belong to the
-   position, not to the search, so a new one must not inherit either. */
+/* Start a new position: the root list belongs to the position, not to the
+   search, so a new one must not inherit the old one. In flat mode the scores
+   that drive its ordering are per-position too. */
 static void root_prepare(Pos *p) {
 #if !ROOT_STAGED
     i16 i;
@@ -440,7 +441,6 @@ static void root_prepare(Pos *p) {
 #if !ROOT_STAGED
     for (i = 0; i < root_n; i++) root_score[i] = 0;
 #endif
-    root_prev = 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -579,9 +579,6 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                       NodeType node_type) {
     MGen mg;
     u16 m, ttm = 0, bestmove = 0;
-#if ROOT_STAGED
-    u16 rtt = 0;
-#endif
     Score best = -INF, original_alpha = alpha;
     i16 legal = 0, in_check = 0, move_count = 0, upcoming = 0;
 #if !ROOT_STAGED
@@ -590,14 +587,12 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
     NodeType child_type;     /* non-PV child expectation: PV scouts also expect cut */
     TTData tt;
 
-    /* The root already belongs to game history: only its move ordering is set
-       up outside the recursive-node path. Node accounting and the limit checks
-       are shared - one counted root node and one deadline read per root call
-       cost less than the special case, and keep the deadline honest at ply 0. */
+    /* The root belongs to game history: its move list is prepared outside the
+       recursive-node path, and in flat mode so is its ordering. Everything else
+       - the TT probe, the killers/history writes, node accounting and the limit
+       checks - is shared, so ply 0 behaves like any other PV node. */
     if (!ply) {
-#if ROOT_STAGED
-        rtt = root_prev;               /* the picker's TT move at the root */
-#else
+#if !ROOT_STAGED
         sort_root();
 #endif
     }
@@ -661,20 +656,21 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
         return _r > best ? _r : best;
     }
 
-    /* Transposition table (non-root only). */
-    if (ply) {
-        if (tt_probe(p, ply, &tt)) {
-            /* A full-key hit means the same position, so the stored move is
-               pseudo-legal here; the move loop's own-piece test below still
-               rejects a wrongly-owned move from a collided entry. */
-            PCOUNT(c_tt_hit);
-            ttm = tt.move;
-            if (node_type != NODE_PV && tt.depth >= depth && tt.score >= best &&
-                rep_prev_path[rep_n - 1] == -1) {
-                if (tt.flag == TT_EXACT) { PCOUNT(c_tt_cut); rep_n--; return tt.score; }
-                if (tt.flag == TT_LOWER && tt.score >= beta) { PCOUNT(c_tt_cut); rep_n--; return tt.score; }
-                if (tt.flag == TT_UPPER && tt.score <= alpha) { PCOUNT(c_tt_cut); rep_n--; return tt.score; }
-            }
+    /* Transposition table. The root probes too - only for its move, since the
+       root is always a PV node and the cutoff below is guarded by that - so the
+       previous iteration's best move enters the staged picker exactly the way
+       it does at every other node instead of through a side channel. */
+    if (tt_probe(p, ply, &tt)) {
+        /* A full-key hit means the same position, so the stored move is
+           pseudo-legal here; the move loop's own-piece test below still
+           rejects a wrongly-owned move from a collided entry. */
+        PCOUNT(c_tt_hit);
+        ttm = tt.move;
+        if (node_type != NODE_PV && tt.depth >= depth && tt.score >= best &&
+            rep_prev_path[rep_n - 1] == -1) {
+            if (tt.flag == TT_EXACT) { PCOUNT(c_tt_cut); rep_n--; return tt.score; }
+            if (tt.flag == TT_LOWER && tt.score >= beta) { PCOUNT(c_tt_cut); rep_n--; return tt.score; }
+            if (tt.flag == TT_UPPER && tt.score <= alpha) { PCOUNT(c_tt_cut); rep_n--; return tt.score; }
         }
     }
 
@@ -755,10 +751,10 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
     }
 #if ROOT_STAGED
     else {
-        /* The root gets the same staged picker as every interior node, seeded
-           only with the previous iteration's best move: it has no parent, so
-           there are no killers, and no path, so no counter or follow-up. */
-        mgen_init(p, &mg, 0, 0, 0, rtt, 0, 0);
+        /* The root gets the same staged picker as every interior node. Its TT
+           move and killers come from the same places they do everywhere else;
+           it has no parent, so no counter or follow-up move can apply. */
+        mgen_init(p, &mg, 0, killers[0][0], killers[0][1], ttm, 0, 0);
     }
 #endif
 
@@ -878,8 +874,10 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                 if (alpha >= beta) {
                     /* killer + history: a true quiet (no promo/ep/castle flag, empty
                        target) that caused the cutoff gets a depth^2 bonus; the deeper
-                       the cutoff, the more reliable the move, so it dominates. */
-                    if (ply && !stop_now && mfl(m) == 0 && u.cap == EMPTY) {
+                       the cutoff, the more reliable the move, so it dominates.
+                       ROOT_ORDERS: the staged root is an ordinary node and feeds
+                       the same tables; the flat root has its own score list. */
+                    if (ROOT_ORDERS(ply) && !stop_now && mfl(m) == 0 && u.cap == EMPTY) {
                         i16 dd = depth * depth;
                         if (m != killers[ply][0]) {  /* a move already in killer slot 0 must
                                                         not be duplicated into slot 1 - the
@@ -890,15 +888,18 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                         qhist_update(p, m, dd);
                         /* this quiet refuted the move that led to this node:
                            try it next time that position arises, and also after
-                           our own previous move, which set up that position */
-                        counter_move[(path_move[ply - 1] >> 6) & 0x3F]
-                                    [CMI(path_pc[ply - 1])] = m;
-                        if (ply >= 2)
-                            follow_move[(path_move[ply - 2] >> 6) & 0x3F]
-                                       [CMI(path_pc[ply - 2])] = m;
+                           our own previous move, which set up that position.
+                           The root has no parent, so only it skips these two. */
+                        if (ply) {
+                            counter_move[(path_move[ply - 1] >> 6) & 0x3F]
+                                        [CMI(path_pc[ply - 1])] = m;
+                            if (ply >= 2)
+                                follow_move[(path_move[ply - 2] >> 6) & 0x3F]
+                                           [CMI(path_pc[ply - 2])] = m;
+                        }
                     }
                     break;                            /* beta cutoff */
-                } else if (ply && score <= alpha0) {
+                } else if (ROOT_ORDERS(ply) && score <= alpha0) {
                     /* fail low: a quiet that failed to beat its window is penalized
                        (symmetric depth^2), so it sorts behind unsearched quiets. */
                     if (!stop_now && mfl(m) == 0 && u.cap == EMPTY)
@@ -913,12 +914,15 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
     if (ply && rep_n > 0) rep_n--;           /* root has no search-path entry */
     if (!legal) {
         /* mate scores: -(MATE - ply) so the root prefers the SHORTEST mate.
-           in_check was computed on entry at every ply, including the root. */
+           in_check was computed on entry at every ply, including the root.
+           A terminal root position stores nothing: the caller reports it and
+           the entry would only be a zero-move bound for a position with no
+           moves to order. */
         Score r = in_check ? (Score)-(MATE - ply) : 0;
         if (ply && !stop_now) tt_store(p, 0, depth, r, TT_EXACT, ply, tt.eval, tt.eval_valid);
         return r;
     }
-    if (ply && !stop_now && (!upcoming || best > 0)) {
+    if (ROOT_ORDERS(ply) && !stop_now && (!upcoming || best > 0)) {
         /* Classify against the entry window; alpha has risen during search. */
         i16 flag = (best >= beta) ? TT_LOWER :
                    (best <= original_alpha) ? TT_UPPER : TT_EXACT;
@@ -963,7 +967,6 @@ void search_root(Pos *p, i16 maxdepth) {
             else delta *= 2;
         }
         prev = bestscore = bsc;
-        root_prev = bm;                  /* next pass's picker TT move */
         bf = mfrom(bm); bt = mto(bm);
         t1 = engine_clock();
         secs = (double)(t1 - t0) / (double)CLOCKS_PER_SEC;
@@ -1046,7 +1049,6 @@ u16 think(Pos *p, i16 maxdepth) {
         if (stop_now) break;
         prev = bsc;
         bestm = bm;
-        root_prev = bm;                  /* next pass's picker TT move */
 #ifdef DBG_LOG
         completed_depth = d;
 #endif
@@ -1201,7 +1203,6 @@ int bench(int depth) {
                 else delta *= 2;
             }
             prev = bsc;
-            root_prev = bm;                  /* next pass's picker TT move */
             pos_nodes += nodes_search;
             if (d == depth) { bestscore = bsc; bf = mfrom(bm); bt = mto(bm); }
         }
@@ -1343,7 +1344,6 @@ int profile(int depth) {
                 else delta *= 2;
             }
             prev = bsc;
-            root_prev = bm;                  /* next pass's picker TT move */
             pos_nodes += nodes_search;
         }
         nnue_active = 0;
