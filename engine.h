@@ -247,6 +247,9 @@ i16 is_attacked_lines_c(Pos *p, i16 sq, i16 by);
 int attack_selftest(void);
 #endif
 i16 see_ge(Pos *p, u16 m, i16 threshold);
+/* material values by piece type (pawn..queen at 1..5): SEE's exchange scale,
+   and the qsearch delta bound's maximum gain. */
+extern const i16 mval[8];
 /* A move can expose its own king only when its from-square shares a rank,
    file, or diagonal with that king.  The relation depends solely on the
    signed 0x88-square difference; the valid range (-119..119) has no aliases

@@ -14,7 +14,7 @@ static const i16 bb[4] = { -17, -15, 15, 17 };
 static const i16 qd[8] = { -17, -16, -15, -1, 1, 15, 16, 17 };
 static const i16 pw[4] = { WN, WB, WR, WQ };
 static const i16 pb[4] = { BN, BB, BR, BQ };
-static const i16 mval[8] = { 0, 100, 320, 330, 500, 900, 0 };
+const i16 mval[8] = { 0, 100, 320, 330, 500, 900, 0 };
 
 u16 movebuf[32][256];
 

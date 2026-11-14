@@ -527,25 +527,15 @@ static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd)
         pc = p->board[mfrom(m)];
         if (!pc || CO(pc) != (p->side ? 8 : 0)) continue;  /* not our piece: skip */
 #ifndef NO_SEE_PRUNING
-        /* SEE pruning, with an alpha-based threshold: an ordinary capture whose
-           exchange gain cannot lift this node's best score to alpha is skipped
-           (delta pruning). `best` is the fail-soft best so far - the stand-pat
-           until a capture beats it - so the gap is only positive while this
-           node is still below alpha, which is exactly where a small capture
-           cannot change the result. Promotions, EP and king captures take
-           see_ge's early "keep" path, and mate windows keep the plain 0
-           threshold, so a resolved mate is never cut short. */
         if (!in_check) {
-            i16 see_thr = 0;
-            i32 gap = (i32)alpha - (i32)best;
-            if (gap > QFUT_MARGIN && best > -MATE + MAXPLY && beta < MATE - MAXPLY) {
-                gap -= QFUT_MARGIN;
-                see_thr = (i16)(gap > 8191 ? 8191 : gap);
-            }
-            if (!see_ge(p, m, see_thr)) {
-                if (see_thr) PCOUNT(c_qfut);
+            i16 vic = TY(p->board[mto(m)]);
+            if (!ispromo(m) && p->board[mto(m)] != EMPTY &&
+                best > -MATE + MAXPLY && beta < MATE - MAXPLY &&
+                (i32)best + (i32)mval[vic] + QFUT_MARGIN <= (i32)alpha) {
+                PCOUNT(c_qfut);
                 continue;
             }
+            if (!see_ge(p, m, 0)) continue;
         }
 #endif
         do_make(p, m, &u);
