@@ -233,6 +233,23 @@ static u16 killers[MAXPLY][2];          /* two killer moves per ply (quiet only)
 
 i16 qhist[2][6][64];   /* quiet-history: side, piece-type-1, to-square-compact */
 
+/* Row offsets for qhist and for the counter/follow-up tables (engine.h says
+   why they exist: no scaled indexing on this CPU, so the multiply is a table
+   read). Written as k*stride so the row layout stays visible here. */
+const u16 cm_row[64] = {
+     0*12,  1*12,  2*12,  3*12,  4*12,  5*12,  6*12,  7*12,
+     8*12,  9*12, 10*12, 11*12, 12*12, 13*12, 14*12, 15*12,
+    16*12, 17*12, 18*12, 19*12, 20*12, 21*12, 22*12, 23*12,
+    24*12, 25*12, 26*12, 27*12, 28*12, 29*12, 30*12, 31*12,
+    32*12, 33*12, 34*12, 35*12, 36*12, 37*12, 38*12, 39*12,
+    40*12, 41*12, 42*12, 43*12, 44*12, 45*12, 46*12, 47*12,
+    48*12, 49*12, 50*12, 51*12, 52*12, 53*12, 54*12, 55*12,
+    56*12, 57*12, 58*12, 59*12, 60*12, 61*12, 62*12, 63*12
+};
+const u16 qh_side[2] = { 0, 6*64 };
+const u16 qh_row[12] = { 0*64, 1*64,  2*64,  3*64,  4*64,  5*64,
+                         6*64, 7*64,  8*64,  9*64, 10*64, 11*64 };
+
 /* counter/follow-up ordering: the quiet reply that last cut off a move.
    `counter_move` is keyed by the opponent's last move, `follow_move` by our own
    move two plies back. path_move/path_pc hold the move that led to each ply of
@@ -252,12 +269,26 @@ void search_clear_ordering(void) {
 
 /* bonus/penalty for a quiet move's history slot, clamped to +-QH_MAX */
 static void qhist_update(Pos *p, u16 m, i16 delta) {
-    i16 *h = &qhist[p->side][TY(p->board[mfrom(m)]) - 1][(m >> 6) & 0x3F];
+    /* CMI folds the side into the piece index (side*6 + piece type-1), so the
+       whole row offset is one table read instead of an `imul` by 384. The move
+       has already been undone, so the moving piece still shows the side that
+       made it - the same side p->side reports. */
+    QH_PTR h = QH_BASE + qh_row[CMI(p->board[mfrom(m)])] + (i16)((m >> 6) & 0x3F);
     i16 v = *h + delta;
     if (v >  QH_MAX) v =  QH_MAX;
     if (v < -QH_MAX) v = -QH_MAX;
     *h = v;
 }
+
+/* depth*depth for the quiet-history bonus and penalty: the same constant
+   multiply, read once per quiet cutoff / fail-low. */
+static const i16 d2_tab[MAXPLY + 1] = {
+     0*0,  1*1,  2*2,  3*3,  4*4,  5*5,  6*6,  7*7,
+     8*8,  9*9, 10*10, 11*11, 12*12, 13*13, 14*14, 15*15,
+    16*16, 17*17, 18*18, 19*19, 20*20, 21*21, 22*22, 23*23,
+    24*24, 25*25, 26*26, 27*27, 28*28, 29*29, 30*30, 31*31,
+    32*32
+};
 
 #define MAX_QDEPTH 8    /* longest capture chain past the search leaf; guards against
                            qsearch explosions (deep recapture lines) */
@@ -267,6 +298,25 @@ static void qhist_update(Pos *p, u16 m, i16 delta) {
    searching - even a move that loses the whole margin keeps the score above
    beta. RFP_MARGIN is the centipawn slack per ply (the deeper the node, the
    wider the margin it needs to be "safe"). There is no depth cap. */
+
+/* RFP_MARGIN * depth, precomputed: this runs at every non-PV node and the
+   multiply has no shift decomposition, so it is a full `imul` on all four
+   CPUs. Tuning builds refill it in lmr_build(), like pvs_see_threshold. */
+#ifdef TUNE
+static i16 rfp_margin[MAXPLY + 1];
+#else
+static const i16 rfp_margin[MAXPLY + 1] = {
+     0*RFP_MARGIN,  1*RFP_MARGIN,  2*RFP_MARGIN,  3*RFP_MARGIN,
+     4*RFP_MARGIN,  5*RFP_MARGIN,  6*RFP_MARGIN,  7*RFP_MARGIN,
+     8*RFP_MARGIN,  9*RFP_MARGIN, 10*RFP_MARGIN, 11*RFP_MARGIN,
+    12*RFP_MARGIN, 13*RFP_MARGIN, 14*RFP_MARGIN, 15*RFP_MARGIN,
+    16*RFP_MARGIN, 17*RFP_MARGIN, 18*RFP_MARGIN, 19*RFP_MARGIN,
+    20*RFP_MARGIN, 21*RFP_MARGIN, 22*RFP_MARGIN, 23*RFP_MARGIN,
+    24*RFP_MARGIN, 25*RFP_MARGIN, 26*RFP_MARGIN, 27*RFP_MARGIN,
+    28*RFP_MARGIN, 29*RFP_MARGIN, 30*RFP_MARGIN, 31*RFP_MARGIN,
+    32*RFP_MARGIN
+};
+#endif
 
 /* Shallow non-PV SEE pruning. Allow more material loss as depth grows:
    quiets: -80 * depth; captures: -20 * depth^2, in material centipawns.
@@ -286,6 +336,11 @@ static const i16 pvs_see_threshold[2][PVS_SEE_DEPTH + 1] = {
 #ifdef SEE_TEST
 static i32 st_pvs_tries, st_pvs_prunes, st_pvs_checks_kept;
 #endif
+/* Row offsets for the [captures][depth] table: the row stride is
+   PVS_SEE_DEPTH+1 elements, another constant multiply with no shift
+   decomposition, paid per candidate move at shallow non-PV nodes. */
+static const u16 see_row[2] = { 0, PVS_SEE_DEPTH + 1 };
+#define PVS_SEE(caps, d) ((&pvs_see_threshold[0][0])[see_row[(caps)] + (d)])
 
 /* null-move pruning: NMP_DEPTH is the minimum node depth (2 keeps the null move
    active through most of the tree - a depth-4 bench search uses it, unlike the
@@ -378,6 +433,7 @@ void lmr_build(void) {
         pvs_see_threshold[0][d] = (i16)(-SEE_QUIET_MARGIN * d);
         pvs_see_threshold[1][d] = (i16)(-SEE_CAPTURE_MARGIN * d * d);
     }
+    for (d = 0; d <= MAXPLY; ++d) rfp_margin[d] = (i16)(RFP_MARGIN * d);
 #endif
     for (d = 0; d < LMR_TD; d++)
         for (m = 0; m < LMR_TM; m++) {
@@ -680,7 +736,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
            true bound). Horizon nodes have already entered qsearch above.
            On a hit, pop this node's rep-path entry (pushed above) before
            returning. */
-        if (eval - depth * RFP_MARGIN >= beta) {
+        if (eval - rfp_margin[depth] >= beta) {
             rep_n--;
             return (Score)(((i32)eval + (i32)beta) / 2);
         }
@@ -727,8 +783,8 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
         u16 pm  = path_move[ply - 1];            /* the move that led here */
         u16 pm2 = (ply >= 2) ? path_move[ply - 2] : 0;   /* our move before it */
         mgen_init(p, &mg, ply, killers[ply][0], killers[ply][1], ttm,
-                  pm  ? counter_move[(pm >> 6) & 0x3F][CMI(path_pc[ply - 1])] : 0,
-                  pm2 ? follow_move[(pm2 >> 6) & 0x3F][CMI(path_pc[ply - 2])] : 0);
+                  pm  ? CM_SLOT((pm >> 6) & 0x3F, CMI(path_pc[ply - 1])) : 0,
+                  pm2 ? FM_SLOT((pm2 >> 6) & 0x3F, CMI(path_pc[ply - 2])) : 0);
     }
 
     {
@@ -760,7 +816,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                 ++st_pvs_tries;
 #endif
                 see_prune = !see_ge(p, m,
-                    pvs_see_threshold[p->board[mto(m)] != EMPTY][depth]);
+                    PVS_SEE(p->board[mto(m)] != EMPTY, depth));
             }
             path_move[ply] = m; path_pc[ply] = pc;   /* recorded for the child's
                                                         counter-move lookup */
@@ -858,7 +914,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                        target) that caused the cutoff gets a depth^2 bonus; the deeper
                        the cutoff, the more reliable the move, so it dominates. */
                     if (ply && !stop_now && mfl(m) == 0 && u.cap == EMPTY) {
-                        i16 dd = depth * depth;
+                        i16 dd = d2_tab[depth];
                         if (m != killers[ply][0]) {  /* a move already in killer slot 0 must
                                                         not be duplicated into slot 1 - the
                                                         MG_KILLERS stage would return it twice */
@@ -869,18 +925,18 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                         /* this quiet refuted the move that led to this node:
                            try it next time that position arises, and also after
                            our own previous move, which set up that position */
-                        counter_move[(path_move[ply - 1] >> 6) & 0x3F]
-                                    [CMI(path_pc[ply - 1])] = m;
+                        CM_SLOT((path_move[ply - 1] >> 6) & 0x3F,
+                                CMI(path_pc[ply - 1])) = m;
                         if (ply >= 2)
-                            follow_move[(path_move[ply - 2] >> 6) & 0x3F]
-                                       [CMI(path_pc[ply - 2])] = m;
+                            FM_SLOT((path_move[ply - 2] >> 6) & 0x3F,
+                                    CMI(path_pc[ply - 2])) = m;
                     }
                     break;                            /* beta cutoff */
                 } else if (ply && score <= alpha0) {
                     /* fail low: a quiet that failed to beat its window is penalized
                        (symmetric depth^2), so it sorts behind unsearched quiets. */
                     if (!stop_now && mfl(m) == 0 && u.cap == EMPTY)
-                        qhist_update(p, m, -(i16)(depth * depth));
+                        qhist_update(p, m, (i16)-d2_tab[depth]);
                 }
             } else {
                 undo_move(p, m, &u);
@@ -908,6 +964,8 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
 void search_root(Pos *p, i16 maxdepth) {
     i16 d, i;
     Score prev = -INF;
+    if (maxdepth > MAXPLY - 1) maxdepth = MAXPLY - 1;   /* depth-indexed tables
+                                                           are MAXPLY+1 rows */
     root_n = gen_moves(p, root_m);
     for (i = 0; i < root_n; i++) root_score[i] = 0;
     if (nnue_ensure_default()) { nnue_reset(p); nnue_active = 1; }
@@ -985,6 +1043,8 @@ u16 think(Pos *p, i16 maxdepth) {
     u16 bestm = 0;
     Score prev = -INF;
     clock_t t0 = vtime_mode ? 0 : engine_clock();
+    if (maxdepth > MAXPLY - 1) maxdepth = MAXPLY - 1;   /* depth-indexed tables
+                                                           are MAXPLY+1 rows */
 #ifdef TIME_TEST
     time_test_depth = 0;
 #endif

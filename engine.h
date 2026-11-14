@@ -278,11 +278,20 @@ void search_clear_ordering(void);  /* clear killers and quiet history on game/po
    piece type-1 (6) and destination square in compact 0..63 (the move already
    stores it in bits 6..11, so `(m >> 6) & 0x3F` is free). 2*6*64 i16 = 1536 B
    near: the hottest ordering path (every quiet at every node), so it must be
-   fast near data - and at 72% DGROUP there is room. Values are bonus/penalty
+   fast near data - and at 93% DGROUP there is room. Values are bonus/penalty
    sums clamped to +-QH_MAX; the -32000 selection sentinel in next_move stays
    strictly below any stored value so no valid quiet is ever skipped. */
 #define QH_MAX 30000
 extern i16 qhist[2][6][64];
+/* qhist is near (DGROUP) data. The 16-bit build's default data pointer is far,
+   so the ordering scorer and qhist_update address it through a __near pointer
+   and an element offset; on every other build this is a plain i16 *. */
+#if defined(__WATCOMC__) && defined(__I86__)
+#define QH_PTR i16 __near *
+#else
+#define QH_PTR i16 *
+#endif
+#define QH_BASE ((QH_PTR) &qhist[0][0][0])
 #define CM_BONUS (QH_MAX + 2)     /* ranks the counter move first among quiets */
 #define FM_BONUS (QH_MAX + 1)     /* and the follow-up move second */
 /* counter/follow-up ordering: for each previous move (destination in compact
@@ -294,6 +303,22 @@ extern i16 qhist[2][6][64];
 #define CMI(pc) ((i16)(TY(pc) - 1 + (CO(pc) ? 6 : 0)))
 extern u16 counter_move[64][12];
 extern u16 follow_move[64][12];
+
+/* Row addressing for the ordering tables. There is no scaled indexing on the
+   8086 family, so a constant multiply by 12 (a counter/follow row) or by 384
+   (qhist's side half) compiles to a real `imul` - 128 clocks on 8086/8088 and
+   21-26 on 80186/80286 - while the same offset read from a table is one near
+   load (12 clocks on the 8088, 5 on the 80286). The tables hold the first
+   dimension's offset in *elements*, the second index is added to it directly
+   and only the final *2 for a word stays a shift. See
+   artifacts/ordering-addr-2026-11-14/REPORT.md. */
+extern const u16 cm_row[64];      /* destination -> its table row (12 entries) */
+extern const u16 qh_side[2];      /* side -> its half of qhist (384 entries) */
+extern const u16 qh_row[12];      /* CMI(pc) -> its qhist row (64 entries) */
+/* qhist[side][piece type-1][destination] as a flat offset:
+   qh_side[side] + qh_row[CMI(pc)] + destination. */
+#define CM_SLOT(dest, key) ((&counter_move[0][0])[cm_row[(dest)] + (key)])
+#define FM_SLOT(dest, key) ((&follow_move[0][0])[cm_row[(dest)] + (key)])
 void lmr_build(void);             /* one-time LMR log-table generator (dedicated init) */
 #ifdef MAME_MARKERS
 int tt_bench(void);

@@ -851,11 +851,7 @@ static void sort_quiets(u16 *list, i16 *score, i16 n) {
 u16 next_move(Pos *p, MGen *g) {
     u16 m;
     i16 i, best, bscore;
-#if defined(__WATCOMC__) && defined(__I86__)
-    i16 (__near *history)[6][64];
-#else
-    i16 (*history)[6][64];
-#endif
+    QH_PTR history;
 
     PCOUNT(c_nextmove);
 
@@ -907,16 +903,12 @@ again:
                still update qhist on a cutoff, but this list keeps the scores
                it started with; the old code re-read the 768-byte matrix on
                every scan, which was 13.8 history lookups per node. */
-#if defined(__WATCOMC__) && defined(__I86__)
-            history = (i16 (__near *)[6][64]) &qhist[p->side];
-#else
-            history = &qhist[p->side];
-#endif
+            history = QH_BASE + qh_side[p->side];
             for (i = 0; i < g->n; i++) {
                 u16 q = g->list[i];
                 i16 s;
                 PCOUNT(c_nm_qscan);
-                s = (*history)[TY(p->board[mfrom(q)]) - 1][(q >> 6) & 0x3F];
+                s = history[qh_row[TY(p->board[mfrom(q)]) - 1] + ((q >> 6) & 0x3F)];
                 /* the replies that refuted the opponent's last move and our own
                    move before it go first among the quiets; they are only
                    guesses, so they outrank the history row rather than
@@ -989,11 +981,7 @@ int order_bench(void) {
     i32 iters = 2000, acc = 0;
     i32 cap_ms, quiet_ms, kill_ms;
     clock_t t0, t1;
-#if defined(__WATCOMC__) && defined(__I86__)
-    i16 (__near *history)[6][64];
-#else
-    i16 (*history)[6][64];
-#endif
+    QH_PTR history;
 
     /* Kiwipete: 48 moves, 8 captures -- both scan stages exercised. */
     parse_fen(&pos, "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
@@ -1003,11 +991,7 @@ int order_bench(void) {
         if (pos.board[mto(m)] != EMPTY || mfl(m) == MF_EP) caps[nc++] = m;
         else quiets[nq++] = m;
     }
-#if defined(__WATCOMC__) && defined(__I86__)
-    history = (i16 (__near *)[6][64]) &qhist[pos.side];
-#else
-    history = &qhist[pos.side];
-#endif
+    history = QH_BASE + qh_side[pos.side];
 
     t0 = engine_clock();
     MAME_MARK(0x30);
@@ -1034,7 +1018,7 @@ int order_bench(void) {
             u16 q = quiets[i];
             i16 s;
             if (q == ob_ttm || q == ob_k0 || q == ob_k1) continue;
-            s = (*history)[TY(pos.board[mfrom(q)]) - 1][(q >> 6) & 0x3F];
+            s = history[qh_row[TY(pos.board[mfrom(q)]) - 1] + ((q >> 6) & 0x3F)];
             if (s > bscore) { bscore = s; best = i; }
         }
         acc += best + bscore;
@@ -1055,7 +1039,7 @@ int order_bench(void) {
        cached selection step, and the triangular sort comparison. */
     for (i = 0; i < nq; i++) {
         u16 q = quiets[i];
-        ob_score[i] = (*history)[TY(pos.board[mfrom(q)]) - 1][(q >> 6) & 0x3F];
+        ob_score[i] = history[qh_row[TY(pos.board[mfrom(q)]) - 1] + ((q >> 6) & 0x3F)];
     }
 
     t0 = engine_clock();
@@ -1079,7 +1063,7 @@ int order_bench(void) {
     for (k = 0; k < iters; k++)
         for (i = 0; i < nq; i++) {
             u16 q = quiets[i];
-            acc += (*history)[TY(pos.board[mfrom(q)]) - 1][(q >> 6) & 0x3F];
+            acc += history[qh_row[TY(pos.board[mfrom(q)]) - 1] + ((q >> 6) & 0x3F)];
         }
     MAME_MARK(0x39);
     t1 = engine_clock();
