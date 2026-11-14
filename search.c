@@ -134,6 +134,7 @@ static clock_t time_test_clock(void);
 i32 c_anodes = 0;                   /* alphabeta entries */
 i32 c_rep_scan = 0, c_rep_upscan = 0, c_rep_lookup = 0;
 i32 c_qnodes = 0;                   /* qsearch entries */
+i32 c_lmp = 0;                      /* late-move prunes taken */
 #endif
 
 static i32 nodes_search;
@@ -320,6 +321,26 @@ static i32 st_pvs_tries, st_pvs_prunes, st_pvs_checks_kept;
 #define LMR_MOVES 4
 #define LMR_TD    32    /* lmr_tab rows: node depth 0..31 (row 31 saturates) */
 #define LMR_TM    64    /* lmr_tab cols: moves already searched 0..63 (col 63 saturates) */
+
+/* late move pruning: at a shallow non-PV node the quiet tail of the move list
+   is skipped without searching it. Ordering already puts the TT move, both
+   killers, the counter move, the follow-up move and the high-history quiets
+   ahead of that tail, and LMR only ever searches a late quiet at depth 1 -
+   which for this search is a qsearch probe (depth 1 goes straight to qsearch
+   at depth 0). This removes that probe and the whole node behind it.
+   Gates mirror LMR (ordinary quiet only, non-PV, not in check) plus two:
+     - a quiet that gives check is never pruned. A check is the one thing a
+       static "this move is late" judgement cannot see, and it costs one
+       is_attacked on the child board - the same test the SEE gate already
+       makes for the same reason;
+     - mate-score windows are left alone (the SEE gate's guard), so a node that
+       has already resolved to a mate score is never cut short.
+   lmp_moves[d] is the number of legal moves searched at node depth d before
+   the tail is pruned; 0 disables the gate at that depth. A pruned move still
+   counts in move_count, so the LMR table behind it sees the same move numbers
+   it would have seen anyway. */
+#define LMP_DEPTH 3
+static const u8 lmp_moves[LMP_DEPTH + 1] = { 0, 6, 12, 20 };
 
 /* aspiration windows: from depth >= 2 the root search confines itself to a
    window of +-ASP_DELTA cp around the previous depth's score. A fail (the
@@ -716,13 +737,22 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                     (root_index < root_n ? root_m[root_index++] : 0)) != 0) {
             Undo u;
             i16 us, pc, is_cap, child_half, legal_move = 0;
-            i16 see_prune = 0;
+            i16 see_prune = 0, lmp_try = 0;
             Score score, alpha0 = alpha;         /* window this move is searched against */
             if (stop_now) break;                 /* abort: stop trying moves at this node */
             pc = p->board[mfrom(m)];                 /* moving piece, before the make */
             if (!pc || CO(pc) != (p->side ? 8 : 0)) continue;  /* not our piece: skip
                                                                   (the TT move's only validity test) */
-            if (!first && depth <= PVS_SEE_DEPTH &&
+            /* late-move-pruning candidate, decided before the SEE gate so a move
+               that is about to be skipped does not pay see_ge first. The final
+               decision needs the check test on the child board, below. */
+            if (!first && depth <= LMP_DEPTH && node_type != NODE_PV &&
+                !in_check && mfl(m) == 0 &&
+                p->board[mto(m)] == EMPTY &&
+                move_count >= lmp_moves[depth] &&
+                best > -MATE + MAXPLY && beta < MATE - MAXPLY)
+                lmp_try = 1;
+            if (!lmp_try && !first && depth <= PVS_SEE_DEPTH &&
                 !in_check && node_type != NODE_PV && best > -MATE + MAXPLY &&
                 beta < MATE - MAXPLY &&
                 mfl(m) == 0 && TY(pc) != 6) {
@@ -764,6 +794,12 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                 move_count++;
                 is_cap = (u.cap != EMPTY) || (mfl(m) == MF_EP);
                 child_half = (TY(pc) == 1 || is_cap) ? 0 : half + 1;
+                if (lmp_try && !is_attacked(p, p->ks[p->side], us)) {
+                    /* late quiet, and it gives no check: skip it unsearched */
+                    PCOUNT(c_lmp);
+                    undo_move(p, m, &u);
+                    continue;
+                }
                 if (first) {
                     /* First move: keep PV, or alternate cut/all. */
                     first = 0;
@@ -1241,6 +1277,7 @@ int profile(int depth) {
     c_tt_hit = 0;
     c_tt_cut = 0;
     c_see = c_see_step = 0;
+    c_lmp = 0;
 
     b0 = engine_clock();
     for (i = 0; i < BENCH_N; i++) {
@@ -1319,6 +1356,7 @@ int profile(int depth) {
            (long)c_tt_probe, (long)c_tt_store, (long)c_tt_eval,
            (long)c_tt_hit, (long)c_tt_cut);
     printf("profile see=%ld see_step=%ld\n", (long)c_see, (long)c_see_step);
+    printf("profile lmp=%ld\n", (long)c_lmp);
     printf("profile rep scans=%ld upscans=%ld lookups=%ld\n",
            (long)c_rep_scan, (long)c_rep_upscan, (long)c_rep_lookup);
     return 0;
