@@ -197,10 +197,10 @@ typedef struct { i32 att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm, tp, ts; } VW;
    part of the plan cost they carry is unchanged in kind. */
 static const VW vw_tab[4] = {
     /* att ps gc gq gm mk nm rf ev rn rm tp ts: cycles per counted operation */
-    {    656,      0,   4614,  12366, 135646,    950,    520,   2662,   4504,   1656,   2235,    652,    652 }, /* 80286 */
-    {   1970,      0,  12093,  37502, 465065,   3123,   1897,   8696,  15476,   3777,   4782,   2246,   2389 }, /* 8088 */
-    {   1693,      0,  10353,  32474, 413168,   2734,   1636,   7999,  12971,   2360,   3488,   1915,   2011 }, /* 8086 */
-    {   1003,    131,   6170,  18639, 215267,   1507,    907,   4669,   6999,   2433,   3006,   1181,   1228 }, /* 80186 */
+    {    656,      0,   4614,  12366, 135646,    950,    520,   2662,   4504,   2258,   2837,    652,    652 }, /* 80286 */
+    {   1970,      0,  12093,  37502, 465065,   3123,   1897,   8696,  15476,   5800,   6805,   2246,   2389 }, /* 8088 */
+    {   1693,      0,  10353,  32474, 413168,   2734,   1636,   7999,  12971,   3948,   5076,   1915,   2011 }, /* 8086 */
+    {   1003,    131,   6170,  18639, 215267,   1507,    907,   4669,   6999,   3301,   3874,   1181,   1228 }, /* 80186 */
 };
 /* 2026-11-12: counter-move ordering (artifacts/counter-move-2026-11-12/).
    The quiet scorer gained one compare per candidate and mgen_init one indexed
@@ -269,11 +269,25 @@ static const VW vw_tab[4] = {
 
    rf was shifted 2026-10-31 by the measured lodsb/stosw per-batch change
    (same 1.343 batches/node conversion): -803 (8088), -755 (8086),
-   -225 (80286) and +66 (80186, capture bodies lose to a disp8 load while the
+   -225 (80286) and +66 (80186, capture bodies lose to a disp8 reg while the
    quiet body's stosw still wins). nm and ev are untouched because planning
    and the forward pass did not change, and rn/rm stay as fitted: they are the
    per-node residual, so moving rf by the measured per-batch change moves the
-   whole-search prediction by the same amount as the real machine. */
+   whole-search prediction by the same amount as the real machine.
+
+   2026-11-13, late move pruning (artifacts/lmp-2-2026-11-13/REPORT.md). The
+   depth-4 tree shrinks 38,352 -> 29,296 nodes (-23.6%) but each node gets more
+   expensive, because a pruned candidate pays a make, a legality test, the
+   check test and an undo before it is skipped: measured cycles per node rise
+   +18.5% (80286 19,742 -> 23,394; 8088 64,289 -> 76,206; 80186 31,639 ->
+   37,342; 8086 derived 65,166), while the whole depth-4 search still gets
+   ~9.5% faster (atami 126.20 s -> 114.23 s). The make/undo, NNUE-plan and
+   is_attacked work is already charged by mk/nm/att and scaled with the new
+   counters by itself - the model with the old rows came out only 2% low on
+   all four CPUs, uniformly per node, which is the unpriced gate compares
+   (~4-6 per move at shallow nodes). That gap is the residual, so rn and rm
+   both take the measured per-node delta: +602 (80286), +2,023 (8088),
+   +1,588 (8086), +868 (80186). No other row moved. */
 
 /* Upcoming twofold: fixed overhead measured on the identical 10037-node
    bench-1 tree. Revised 286 scans measured over 20000 isolated calls:
@@ -402,13 +416,13 @@ i32 vclock_est_nps(i32 nodes) {
 
    If the tree changes (bench node total differs) the reference no longer
    applies: re-measure it, do not "fix" the model to match a stale tree. */
-#define VCLOCK_CAL_NODES   38352
+#define VCLOCK_CAL_NODES   29296
 #define VCLOCK_CAL_TOL_PCT 3
 static const i32 vclock_cal_cyc[4] = {
-    19742,  /* 80286 */
-    64289,  /* 8088 */
-    54971,  /* 8086 (derived: 8088 x 54,981/64,301) */
-    31639,  /* 80186 */
+    23394,  /* 80286 */
+    76206,  /* 8088 */
+    65166,  /* 8086 (derived: 8088 x 54,971/64,289) */
+    37342,  /* 80186 */
 };
 static const char *const vclock_cpu_name[4] = {
     "80286", "8088", "8086", "80186"
