@@ -130,18 +130,26 @@ int time_selftest(void) {
     {
         i16 model;
         i32 first_ms, second_ms;
+        const char *fixture;
         for (model = VCPU_80286; model <= VCPU_80186; ++model) {
             vcpu_model = model;
             vcpu_khz = 25000;
             vtime_mode = 1;
-            tm_prepare(&p, bench_fens[1]);
-            first = think(&p, 1);
-            first_ms = vclock_charge();
-            tm_prepare(&p, bench_fens[1]);
-            think(&p, 2);
-            second_ms = vclock_charge();
-            tm_check(second_ms > first_ms + 100, "virtual depth 2 costs more than depth 1");
-            tm_prepare(&p, bench_fens[1]);
+            /* The search tree depends on the net: choose a position with
+               enough virtual-time separation to exercise the hard limit. */
+            fixture = NULL;
+            for (i = 0; i < BENCH_N; ++i) {
+                tm_prepare(&p, bench_fens[i]);
+                first = think(&p, 1);
+                first_ms = vclock_charge();
+                tm_prepare(&p, bench_fens[i]);
+                think(&p, 2);
+                second_ms = vclock_charge();
+                if (second_ms > first_ms + 100) { fixture = bench_fens[i]; break; }
+            }
+            tm_check(fixture != NULL, "virtual fixture separates depths 1 and 2");
+            if (!fixture) continue;
+            tm_prepare(&p, fixture);
             original = p;
             vclock_set_limits(1, second_ms + 10000);
             /* Deliberately stale host deadlines must be ignored. */
@@ -152,7 +160,7 @@ int time_selftest(void) {
             tm_check(time_test_clock_calls == 0, "virtual soft ignores host clock");
             tm_check(memcmp(&p, &original, sizeof p) == 0 && rep_n == 0,
                      "virtual soft restores position/history");
-            tm_prepare(&p, bench_fens[1]);
+            tm_prepare(&p, fixture);
             original = p;
             vclock_set_limits(0, first_ms + (second_ms - first_ms) / 2);
             soft_deadline = deadline = 1;

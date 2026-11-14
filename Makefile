@@ -6,7 +6,7 @@
 #   make                -> chess_gcc   (Linux) / chess_gcc.exe   (Windows)
 #   make EXE=foo        -> foo         (Linux) / foo.exe         (Windows)
 #   make CFLAGS='...'   -> override compile flags
-#   make EVALFILE=<net> -> embed <net> instead of short-net2-finetune2.net (OpenBench)
+#   make EVALFILE=<net> -> embed <net> instead of short-net3.net (OpenBench)
 #   make -B TUNE=0     -> compiled search constants, no SPSA option interface
 #   make -B EXE=chess_checks CFLAGS='-O2 -Wall -Wextra -Werror -DSEARCH_TEST'
 #   ./chess_checks searchtest -> null-state / killer move-set regression checks
@@ -18,9 +18,9 @@
 # build and does not change node counts; -march=native lets each host use its own
 # SIMD, and workers compile their own binary.
 CC      ?= gcc
-# Default net: dense 704 v5 ReLU^2, short-net2-finetune2 (hash 56329CCE).
+# Default net: dense 704 v5 ReLU^2, short-net3 (hash 9A0558BB).
 # OpenBench overrides via EVALFILE=<net>; `make` embeds this one by default.
-EVALFILE ?= short-net2-finetune2.net
+EVALFILE ?= short-net3.net
 # -DVCLOCK compiles the weighted cycle counters used by the virtual clock
 # (vclock.c). The 16-bit build never defines it: virtual time models a CPU the
 # real machine already is, so the DOS engine paces itself with its real clock.

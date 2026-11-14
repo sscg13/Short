@@ -414,15 +414,23 @@ i32 vclock_est_nps(i32 nodes) {
    table sits beside that compare and costs nothing measurable: the new totals
    are within 0.08% of the counter-move ones, so the residual is unchanged.
 
+   2026-11-13 net3 promotion: the weights change the main-branch depth-4 tree
+   to 25,445 nodes. Isolated 86Box search-only sums are 96.73 s at 6 MHz
+   (80286) and 117.65 s at 16 MHz (8088); MAME Nimbus markers measure
+   924,384,890 search cycles (80186). The 8086 remains derived using the
+   54,971/64,289 ratio. The existing model agrees within 0.4% on all measured
+   CPUs, so no cost-row refit is needed. See
+   artifacts/net3-promotion-2026-11-13/REPORT.md.
+
    If the tree changes (bench node total differs) the reference no longer
    applies: re-measure it, do not "fix" the model to match a stale tree. */
-#define VCLOCK_CAL_NODES   29296
+#define VCLOCK_CAL_NODES   25445
 #define VCLOCK_CAL_TOL_PCT 3
 static const i32 vclock_cal_cyc[4] = {
-    23394,  /* 80286 */
-    76206,  /* 8088 */
-    65166,  /* 8086 (derived: 8088 x 54,971/64,289) */
-    37342,  /* 80186 */
+    22809,  /* 80286 */
+    73979,  /* 8088 */
+    63257,  /* 8086 (derived: 8088 x 54,971/64,289) */
+    36329,  /* 80186 */
 };
 static const char *const vclock_cpu_name[4] = {
     "80286", "8088", "8086", "80186"
