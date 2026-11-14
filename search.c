@@ -135,6 +135,7 @@ i32 c_anodes = 0;                   /* alphabeta entries */
 i32 c_rep_scan = 0, c_rep_upscan = 0, c_rep_lookup = 0;
 i32 c_qnodes = 0;                   /* qsearch entries */
 i32 c_lmp = 0;                      /* late-move prunes taken */
+i32 c_qfut = 0;                     /* qsearch captures pruned by the alpha threshold */
 #endif
 
 static i32 nodes_search;
@@ -261,6 +262,17 @@ static void qhist_update(Pos *p, u16 m, i16 delta) {
 
 #define MAX_QDEPTH 8    /* longest capture chain past the search leaf; guards against
                            qsearch explosions (deep recapture lines) */
+
+/* quiescence futility (delta pruning): a capture whose exchange gain cannot
+   lift this node's best score to alpha is not searched. QFUT_MARGIN is the
+   slack for the positional part an exchange evaluation cannot see - the
+   captured piece changes the eval by more than its material value (open files,
+   passed pawns, king safety), so a positive threshold only prunes when the gap
+   to alpha is larger than the margin plus the exchange gain. At 0 the gate
+   degenerates to the old "no losing captures in qsearch" rule, which is what it
+   falls back to whenever the margin covers the gap or a mate score is in the
+   window. */
+#define QFUT_MARGIN 200
 
 /* reverse futility pruning: a non-PV node whose static eval already beats
    beta by more than a depth-scaled margin returns that eval without
@@ -515,9 +527,26 @@ static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd)
         pc = p->board[mfrom(m)];
         if (!pc || CO(pc) != (p->side ? 8 : 0)) continue;  /* not our piece: skip */
 #ifndef NO_SEE_PRUNING
-        /* Keep every check evasion and special move. Ordinary captures whose
-           least-attacker exchange loses material do not enter qsearch. */
-        if (!in_check && !see_ge(p, m, 0)) continue;
+        /* SEE pruning, with an alpha-based threshold: an ordinary capture whose
+           exchange gain cannot lift this node's best score to alpha is skipped
+           (delta pruning). `best` is the fail-soft best so far - the stand-pat
+           until a capture beats it - so the gap is only positive while this
+           node is still below alpha, which is exactly where a small capture
+           cannot change the result. Promotions, EP and king captures take
+           see_ge's early "keep" path, and mate windows keep the plain 0
+           threshold, so a resolved mate is never cut short. */
+        if (!in_check) {
+            i16 see_thr = 0;
+            i32 gap = (i32)alpha - (i32)best;
+            if (gap > QFUT_MARGIN && best > -MATE + MAXPLY && beta < MATE - MAXPLY) {
+                gap -= QFUT_MARGIN;
+                see_thr = (i16)(gap > 8191 ? 8191 : gap);
+            }
+            if (!see_ge(p, m, see_thr)) {
+                if (see_thr) PCOUNT(c_qfut);
+                continue;
+            }
+        }
 #endif
         do_make(p, m, &u);
         us = p->side ^ 1;
@@ -1278,6 +1307,7 @@ int profile(int depth) {
     c_tt_cut = 0;
     c_see = c_see_step = 0;
     c_lmp = 0;
+    c_qfut = 0;
 
     b0 = engine_clock();
     for (i = 0; i < BENCH_N; i++) {
@@ -1356,7 +1386,7 @@ int profile(int depth) {
            (long)c_tt_probe, (long)c_tt_store, (long)c_tt_eval,
            (long)c_tt_hit, (long)c_tt_cut);
     printf("profile see=%ld see_step=%ld\n", (long)c_see, (long)c_see_step);
-    printf("profile lmp=%ld\n", (long)c_lmp);
+    printf("profile lmp=%ld qfut=%ld\n", (long)c_lmp, (long)c_qfut);
     printf("profile rep scans=%ld upscans=%ld lookups=%ld\n",
            (long)c_rep_scan, (long)c_rep_upscan, (long)c_rep_lookup);
     return 0;
