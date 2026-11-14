@@ -416,13 +416,13 @@ i32 vclock_est_nps(i32 nodes) {
 
    If the tree changes (bench node total differs) the reference no longer
    applies: re-measure it, do not "fix" the model to match a stale tree. */
-#define VCLOCK_CAL_NODES   24553
+#define VCLOCK_CAL_NODES   23942
 #define VCLOCK_CAL_TOL_PCT 3
 static const i32 vclock_cal_cyc[4] = {
-    21602,  /* 80286 */
-    70092,  /* 8088 */
-    59933,  /* 8086 (derived: 8088 x 54,971/64,289) */
-    34366,  /* 80186 */
+    22489,  /* 80286 */
+    73016,  /* 8088 */
+    62434,  /* 8086 (derived: 8088 x 54,971/64,289) */
+    35756,  /* 80186 */
 };
 static const char *const vclock_cpu_name[4] = {
     "80286", "8088", "8086", "80186"
