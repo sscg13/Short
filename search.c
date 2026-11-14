@@ -132,6 +132,10 @@ static clock_t time_test_clock(void);
 
 #if defined(PROFILE) || defined(VCLOCK)
 i32 c_anodes = 0;                   /* alphabeta entries */
+i32 c_iir = 0;                      /* nodes where IIR cut a ply */
+i32 c_ab4 = 0;                      /* nodes eligible for IIR (ply>0, depth>=IIR_DEPTH) */
+/* diagnostic: did an ancestor on this path already take an IIR cut? (one per path) */
+static u8 iir_used[MAXPLY];
 i32 c_rep_scan = 0, c_rep_upscan = 0, c_rep_lookup = 0;
 i32 c_qnodes = 0;                   /* qsearch entries */
 #endif
@@ -571,7 +575,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
        up outside the recursive-node path. Node accounting and the limit checks
        are shared - one counted root node and one deadline read per root call
        cost less than the special case, and keep the deadline honest at ply 0. */
-    if (!ply) sort_root();
+    if (!ply) { sort_root(); iir_used[0] = 0; }
     pv_len[ply] = 0;                             /* no best line yet at this ply */
     PCOUNT(c_anodes);
     nodes_search++;
@@ -720,7 +724,11 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
     /* internal iterative reductions: no TT move here means no ordering anchor,
        so the first move searched is a guess - search one ply shallower and let
        the stored move order the next visit (see IIR_DEPTH). */
-    if (ply && !ttm && depth >= IIR_DEPTH) depth--;
+    if (ply && depth >= IIR_DEPTH) {
+        PCOUNT(c_ab4);
+        iir_used[ply] = iir_used[ply - 1];
+        if (!ttm && !iir_used[ply]) { PCOUNT(c_iir); iir_used[ply] = 1; depth--; }
+    }
 
     if (ply) {
         u16 pm  = path_move[ply - 1];            /* the move that led here */
@@ -1260,6 +1268,8 @@ int profile(int depth) {
     c_tt_eval = 0;
     c_tt_hit = 0;
     c_tt_cut = 0;
+    c_iir = 0;
+    c_ab4 = 0;
     c_see = c_see_step = 0;
 
     b0 = engine_clock();
@@ -1339,6 +1349,7 @@ int profile(int depth) {
            (long)c_tt_probe, (long)c_tt_store, (long)c_tt_eval,
            (long)c_tt_hit, (long)c_tt_cut);
     printf("profile see=%ld see_step=%ld\n", (long)c_see, (long)c_see_step);
+    printf("profile iir=%ld ab4=%ld\n", (long)c_iir, (long)c_ab4);
     printf("profile rep scans=%ld upscans=%ld lookups=%ld\n",
            (long)c_rep_scan, (long)c_rep_upscan, (long)c_rep_lookup);
     return 0;
