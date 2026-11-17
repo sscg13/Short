@@ -28,6 +28,16 @@ void search_tune_features(void) {
     }
 }
 
+/* The UCI spelling of the same list (`uci` handshake). */
+void search_tune_uci_features(void) {
+    i16 i;
+    for (i = 0; i < TUNE_COUNT; ++i) {
+        const TuneParam *p = &tune_params[i];
+        xb_outf("option name %s type spin default %d min %d max %d",
+                p->name, *p->value, p->min, p->max);
+    }
+}
+
 void search_tune_spsa(void) {
     i16 i;
     for (i = 0; i < TUNE_COUNT; ++i) {
@@ -120,6 +130,18 @@ void search_set_limits(i32 soft_ms, i32 hard_ms) {
         hard_deadline_counts = 0;
 #endif
     }
+}
+
+/* `go nodes N`: the whole move may search N nodes. think() turns the total
+   into a per-depth allowance (node_cap), so the count a node sees is still the
+   per-depth one and nothing is added to the per-node path beyond one compare
+   against a near word. 0 (every other entry point) disables the check. */
+static i32 node_limit;                  /* whole-move budget, 0 = none */
+static i32 node_cap;                    /* remaining allowance this depth */
+
+void search_set_node_limit(i32 nodes) {
+    node_limit = nodes > 0 ? nodes : 0;
+    node_cap = 0;
 }
 
 #ifdef TIME_TEST
@@ -479,6 +501,7 @@ static Score qsearch(Pos *p, Score alpha, Score beta, i16 ply, i16 half, i16 qd)
     if (vtime_mode && vclock_budget_hit())
         stop_now = 1;
 #endif
+    if (node_cap && nodes_search >= node_cap) stop_now = 1;
     pv_len[ply] = 0;                             /* qsearch is a leaf: no continuation
                                                     (cleared before the early returns so a
                                                     direct child can't copy stale lines) */
@@ -604,6 +627,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
     if (vtime_mode && vclock_budget_hit())
         stop_now = 1;
 #endif
+    if (node_cap && nodes_search >= node_cap) stop_now = 1;
     if (stop_now) return best;
     if (ply >= MAXPLY) return evaluate(p);       /* hard depth cap: never index past pv/killers/movebuf */
 
@@ -976,6 +1000,28 @@ static void print_move(u16 m) {
     printf(" ");
 }
 
+/* UCI spells promotion lower case and does not want the trailing space. */
+static void print_move_uci(u16 m) {
+    static const char pn[] = " pnbrqk";
+    i16 f = mfrom(m), t = mto(m);
+    printf("%c%c%c%c", 'a' + (f & 7), '1' + (f >> 4), 'a' + (t & 7), '1' + (t >> 4));
+    if (ispromo(m)) printf("%c", pn[mfl(m) + 1]);
+}
+
+/* UCI score: centipawns relative to the side to move (the root score already
+   is), with mate as `mate N` moves - not CECP's 100000+distance form. */
+static void print_score_uci(Score score) {
+    if (score >= MATE - MAXPLY) {
+        i16 n = (MATE - score + 1) / 2;
+        printf("score mate %d", n < 1 ? 1 : (int)n);
+    } else if (score <= -(MATE - MAXPLY)) {
+        i16 n = (MATE + score + 1) / 2;
+        printf("score mate %d", -(n < 1 ? 1 : (int)n));
+    } else {
+        printf("score cp %d", (int)score);
+    }
+}
+
 /* iterative deepening root search; returns best move (0 if aborted before any depth) */
 u16 think(Pos *p, i16 maxdepth) {
     i16 d, i;
@@ -984,6 +1030,8 @@ u16 think(Pos *p, i16 maxdepth) {
 #endif
     u16 bestm = 0;
     Score prev = -INF;
+    i32 cum = 0;                    /* nodes from finished depths; `go nodes`
+                                       budgets a move, not a depth */
     clock_t t0 = vtime_mode ? 0 : engine_clock();
 #ifdef TIME_TEST
     time_test_depth = 0;
@@ -999,11 +1047,13 @@ u16 think(Pos *p, i16 maxdepth) {
         if (vtime_mode) {
             if (vclock_budget_hit()) break;
         } else if (deadline > 0 && search_clock() >= deadline) break;
+        if (node_limit && cum >= node_limit) break;     /* `go nodes`: spent */
         if (prev > -(MATE - MAXPLY) && prev < MATE - MAXPLY) {
             asp_lo = prev - delta;
             asp_hi = prev + delta;
         }
         nodes_search = 0;
+        node_cap = node_limit ? node_limit - cum : 0;
         stop_now = 0;
         rep_reset();
         for (;;) {
@@ -1025,13 +1075,35 @@ u16 think(Pos *p, i16 maxdepth) {
         if (stop_now) break;
         prev = bsc;
         bestm = bm;
+        cum += nodes_search;
 #ifdef DBG_LOG
         completed_depth = d;
 #endif
 #ifdef TIME_TEST
         time_test_depth = d;
 #endif
-        if (post_on) {
+        if (uci_mode) {
+            /* UCI `info`: milliseconds and nodes for the whole move, score from
+               the side to move's point of view (which is what bsc already is).
+               Adjudication by score and `-pgnout nodes=true` both read this. */
+            i32 ms = vtime_mode ? vclock_elapsed_ms()
+                                : (i32)((engine_clock() - t0) * 1000 / CLOCKS_PER_SEC);
+            i32 reported_nodes = vtime_mode ? vtotal_nodes : cum;
+            i32 nps = (ms > 0) ? (i32)((i64)reported_nodes * 1000 / ms) : 0;
+            printf("info depth %d ", (int)d);
+            print_score_uci(bsc);
+            printf(" nodes %ld nps %ld time %ld", (long)reported_nodes,
+                   (long)nps, (long)ms);
+            if (pv_len[0]) {
+                printf(" pv");
+                for (i = 0; i < pv_len[0]; i++) {
+                    printf(" ");
+                    print_move_uci(pv[0][i]);
+                }
+            }
+            printf("\n");
+            fflush(stdout);
+        } else if (post_on) {
             /* CECP §10 thinking output: ply score time(cs) nodes [*seldepth *speed *tbhits] pv.
                The optional ints are parsed seldepth speed tbhits (last = tbhits), so emit a
                0 tbhits to keep speed from being misread. */

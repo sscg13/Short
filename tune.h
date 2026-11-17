@@ -18,6 +18,7 @@
 SEARCH_TUNABLES(TUNE_DECLARE)
 #undef TUNE_DECLARE
 void search_tune_features(void);
+void search_tune_uci_features(void);
 void search_tune_spsa(void);
 /* 0: unknown name, 1: accepted, -1: invalid value (no state changed). */
 i16 search_tune_option(const char *name, const char *value);

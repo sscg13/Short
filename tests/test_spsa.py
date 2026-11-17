@@ -27,6 +27,10 @@ PARAMETERS = (
 )
 DEFAULTS = {name: default for name, default, _, _, _ in PARAMETERS}
 SPIN = re.compile(r'\boption="([A-Za-z0-9_]+) -spin (-?\d+) (-?\d+) (-?\d+)"')
+UCI_OPTION = re.compile(
+    r"^option name ([A-Za-z0-9_]+) type (\w+) default (\S+) min (-?\d+) max (-?\d+)$",
+    re.MULTILINE,
+)
 DONE = re.compile(r"\bdone=1(?:\s|$)")
 POSITION = re.compile(
     r"^position\s+(\d+)/(\d+)\s+depth\s+(\d+)\s+score\s+(-?\d+)"
@@ -199,6 +203,36 @@ def virtual_search_signature(executable, cwd, change=None):
     return signature
 
 
+def test_uci_options(executable, cwd):
+    """The UCI handshake has to advertise what fastchess sets.
+
+    OpenBench runs the bare binary and sends `uci` first, so this also covers
+    the CECP/UCI auto-detection. The tunables must appear with the same
+    default/min/max as the CECP `feature option` block, since an SPSA workload
+    reaches the engine through either front end.
+    """
+    commands = ["uci", "isready", "ucinewgame", "position startpos moves e2e4 e7e5",
+                "go depth 2", "quit"]
+    result = run(executable, (), commands="\n".join(commands) + "\n", cwd=cwd)
+    require("uciok" in result.stdout, "Missing uciok from the bare binary:\n" + result.stdout)
+    require("readyok" in result.stdout, "Missing readyok:\n" + result.stdout)
+    require(re.search(r"^bestmove \S+", result.stdout, re.MULTILINE),
+            "Missing bestmove after go:\n" + result.stdout)
+    announced = {}
+    for line in result.stdout.splitlines():
+        match = UCI_OPTION.match(line)
+        if not match:
+            continue
+        name, kind, default, minimum, maximum = match.groups()
+        if name in DEFAULTS:
+            require(kind == "spin", "{}: tuning option is not a spin".format(name))
+            announced[name] = (int(default), int(minimum), int(maximum))
+    wanted = {name: (default, minimum, maximum)
+              for name, default, minimum, maximum, _ in PARAMETERS}
+    require(announced == wanted,
+            "UCI tuning options differ from CECP: expected {}, received {}".format(wanted, announced))
+
+
 def test_runtime_tables(executable, cwd):
     # This low-branching endgame reaches the LMR-active depths at 1000 KHz.
     # Compare completed searches, excluding elapsed time, without fixing a
@@ -255,6 +289,8 @@ def main():
         print("PASS SPSA exporter")
         test_options(args.executable, cwd)
         print("PASS CECP/setoption values, validation, and reset persistence")
+        test_uci_options(args.executable, cwd)
+        print("PASS UCI handshake, options, and bare-binary auto-detection")
         test_runtime_tables(args.executable, cwd)
         print("PASS runtime SEE/LMR table updates")
         if args.release:

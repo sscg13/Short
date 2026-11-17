@@ -5,6 +5,7 @@
 static Pos gpos;
 static i16 force_mode = 1, game_over = 0;
 i16 post_on = 0;
+i16 uci_mode = 0;                /* set by the `uci` handshake; see engine.h */
 i16 g_half, g_full;              /* halfmove clock, fullmove number */
 /* game-history position signatures. 128 x 8 bytes = 1 KB fits DGROUP (was 1024
    x 8 = 8 KB far); cleared on every zeroing move (see apply_move). No takeback
@@ -244,6 +245,166 @@ static void xb_reset(void) {
 
 static char *skipsp(char *s) { while (*s == ' ') s++; return s; }
 
+#if PROTO_UCI
+/* Space-separated token splitter that mutates the line: returns the next
+   token and advances *s past it. UCI commands are the only users (`position
+   ... moves ...`, `go wtime ...`); CECP parses fixed prefixes instead, so the
+   two modes never see a half-consumed buffer. */
+static char *next_tok(char **s) {
+    char *t;
+    while (**s == ' ') (*s)++;
+    if (!**s) return NULL;
+    t = *s;
+    while (**s && **s != ' ') (*s)++;
+    if (**s) { **s = 0; (*s)++; }
+    return t;
+}
+
+static u16 first_legal_move(Pos *p) {
+    u16 *list = movebuf[28];
+    i16 n = gen_moves(p, list), i;
+    for (i = 0; i < n; i++)
+        if (legal_move(p, list[i])) return list[i];
+    return 0;
+}
+
+/* `uci` handshake: the same options the CECP feature block advertises, in the
+   key/value form fastchess expects (OpenBench sends them as option.<Name>=<v>). */
+static void uci_hello(void) {
+    xb_outf("id name Short");
+    xb_outf("id author sscg13");
+    xb_outf("option name Threads type spin default 1 min 1 max 16");
+    xb_outf("option name Hash type spin default 32 min 32 max 1024");
+#ifdef VCLOCK
+    xb_outf("option name CPU_model type combo default 80286"
+            " var 80286 var 80186 var 8088 var 8086");
+    xb_outf("option name CPU_KHz type spin default 25000 min 1000 max 50000");
+    xb_outf("option name VirtualTime type check default false");
+#endif
+#ifdef TUNE
+    search_tune_uci_features();
+#endif
+    xb_outf("uciok");
+}
+
+/* `position [startpos | fen <6 fields>] [moves <m1> <m2> ...]`
+   Rebuilds the game state, including the repetition signatures, without
+   touching the TT or the ordering tables: a match runner sends `position`
+   before every `go`, so clearing them per move would throw away the reuse the
+   opponent's moves already paid for. `ucinewgame` is what empties them. */
+static void uci_position(char *a) {
+    char fen[128];
+    char *s = a, *t = next_tok(&s);
+    u16 m;
+    if (!t) return;
+    if (strcmp(t, "startpos") == 0) {
+        parse_fen(&gpos, start_fen);
+    } else if (strcmp(t, "fen") == 0) {
+        i16 n = 0;
+        fen[0] = 0;
+        while (n < 6) {
+            char *f = next_tok(&s);
+            if (!f) break;
+            /* 128 B holds the longest legal FEN (~95); never append past it. */
+            if ((i16)(strlen(fen) + strlen(f) + 2) >= (i16)sizeof(fen)) break;
+            if (n) strcat(fen, " ");
+            strcat(fen, f);
+            n++;
+        }
+        if (n != 6) return;              /* malformed: keep the old position */
+        parse_fen(&gpos, fen);
+    } else return;
+    g_sigs_n = 0;
+    g_sigs[g_sigs_n++] = pos_sig(&gpos);
+    game_over = 0;
+    force_mode = 0;
+    stop_now = 0;
+    search_set_limits(0, 0);
+    search_set_node_limit(0);
+    if ((t = next_tok(&s)) != NULL && strcmp(t, "moves") == 0) {
+        while ((t = next_tok(&s)) != NULL) {
+            m = parse_coord(&gpos, t);
+            if (!m) { dbgf("uci position: bad move '%s'\n", t); break; }
+            apply_move(&gpos, m);
+        }
+    }
+    dbgf("uci position: side=%d half=%d full=%d sigs=%d\n",
+         gpos.side, g_half, g_full, g_sigs_n);
+}
+
+/* `go [wtime N btime N winc N binc N movestogo N | movetime N | depth N |
+   nodes N | infinite]`. The limit setup mirrors xb_go, so a virtual-time game
+   is decided exactly as it was under CECP; real-time limits are only used by
+   the non-virtual host build and the DOS build. */
+static void uci_go(char *a) {
+    char *s = a, *t, *v;
+    i32 wtime = -1, btime = -1, winc = 0, binc = 0, movetime = -1;
+    i32 nodes = 0;
+    i16 mtg = 0, depth = 10, depth_seen = 0;
+    i32 soft_ms = 0, hard_ms = 0;
+    u16 m;
+    char b[8];
+
+    while ((t = next_tok(&s)) != NULL) {
+        if (strcmp(t, "wtime") == 0)          { if ((v = next_tok(&s))) wtime = atol(v); }
+        else if (strcmp(t, "btime") == 0)     { if ((v = next_tok(&s))) btime = atol(v); }
+        else if (strcmp(t, "winc") == 0)      { if ((v = next_tok(&s))) winc = atol(v); }
+        else if (strcmp(t, "binc") == 0)      { if ((v = next_tok(&s))) binc = atol(v); }
+        else if (strcmp(t, "movestogo") == 0) { if ((v = next_tok(&s))) mtg = (i16)atol(v); }
+        else if (strcmp(t, "movetime") == 0)  { if ((v = next_tok(&s))) movetime = atol(v); }
+        else if (strcmp(t, "nodes") == 0)     { if ((v = next_tok(&s))) nodes = atol(v); }
+        else if (strcmp(t, "depth") == 0)     { if ((v = next_tok(&s))) { depth = (i16)atol(v); depth_seen = 1; } }
+        /* `infinite`, `ponder`, `searchmoves ...`: no special case. A bare
+           `go` searches the depth cap under whatever limits are set, and a
+           blocking search cannot honour a mid-search `stop` anyway. */
+    }
+    if (depth_seen) {
+        if (depth < 1) depth = 1;
+        if (depth > 10) depth = 10;      /* same cap as the CECP entry point */
+    }
+
+    if (vtime_mode) {
+        vclock_limits_ms(&soft_ms, &hard_ms);
+        vclock_reset();
+        vclock_set_limits(soft_ms, hard_ms);
+        search_set_limits(0, 0);
+    } else if (movetime > 0) {
+        /* A fixed move time is a cap, not a bank to borrow from. */
+        i32 remaining = gpos.side ? btime : wtime;
+        i32 avail = movetime;
+        if (remaining >= 0 && remaining < avail) avail = remaining;
+        hard_ms = avail > TIME_MARGIN_MS ? avail - TIME_MARGIN_MS : 1;
+        soft_ms = hard_ms;
+        search_set_limits(soft_ms, hard_ms);
+    } else if ((gpos.side ? btime : wtime) >= 0) {
+        i32 remaining = gpos.side ? btime : wtime;
+        i32 inc = gpos.side ? binc : winc;
+        i16 ml = mtg > 0 ? mtg : 40;     /* no movestogo: OpenBench's 40/2h */
+        time_limits_ms(remaining, ml, inc, &soft_ms, &hard_ms);
+        search_set_limits(soft_ms, hard_ms);
+    } else {
+        search_set_limits(0, 0);
+    }
+    if (nodes > 0) search_set_node_limit(nodes);
+    dbgf("uci go: side=%d depth=%d nodes=%ld mtg=%d soft_ms=%ld hard_ms=%ld\n",
+         gpos.side, depth, (long)nodes, mtg, (long)soft_ms, (long)hard_ms);
+
+    m = think(&gpos, depth);
+    if (vtime_mode) vclock_charge();
+    search_set_limits(0, 0);
+    search_set_node_limit(0);
+    stop_now = 0;
+    if (!m) m = first_legal_move(&gpos);      /* depth 0 completed: still answer */
+    if (m) {
+        move_to_coord(m, b);
+        b[4] = (char)((b[4] >= 'A' && b[4] <= 'Z') ? b[4] + 32 : b[4]);
+        xb_outf("bestmove %s", b);
+    } else {
+        xb_outf("bestmove 0000");             /* checkmate/stalemate: no move */
+    }
+}
+#endif /* PROTO_UCI */
+
 /* CECP `option name=value` / UCI-ish `setoption name X value Y` handler. */
 static void xb_option(const char *nm, const char *val) {
     char lo[40];
@@ -274,8 +435,41 @@ static void xb_option(const char *nm, const char *val) {
     dbgf("option '%s'='%s'\n", lo, val ? val : "");
 }
 
+/* `setoption name <id> value <v>`. UCI's only option syntax; CECP's
+   `option name=value` is parsed in the loop and both reach xb_option(). */
+static void proto_setoption(char *p) {
+    char *rest = skipsp(p + 9);
+    char *val;
+    if (strncmp(rest, "name", 4) == 0) rest = skipsp(rest + 4);
+    val = strstr(rest, " value ");
+    if (!val) val = strstr(rest, " value");
+    if (val) {
+        char name[40];
+        int nlen = (int)(val - rest);
+        while (nlen > 0 && rest[nlen - 1] == ' ') nlen--;
+        if (nlen > 39) nlen = 39;
+        memcpy(name, rest, nlen);
+        name[nlen] = 0;
+        xb_option(name, skipsp(val + 6));
+    }
+}
+
+/* A `position ... moves ...` line carries the whole game - fastchess re-sends
+   it before every move - so the UCI buffer is sized for a long one. The DOS
+   build only speaks CECP, where commands are short, and keeps the buffer on
+   its stack so DGROUP does not grow for a front end it never uses. */
+#if PROTO_UCI
+#define PROTO_LINE_MAX 2048
+#else
+#define PROTO_LINE_MAX 256
+#endif
+
 int xboard_main(void) {
-    char line[256];
+#if PROTO_UCI
+    static char line[PROTO_LINE_MAX];   /* DGROUP: no 2 KB stack frame */
+#else
+    char line[PROTO_LINE_MAX];
+#endif
 #ifdef DBG_LOG
     char fname[64];
     /* per-process log file so two self-play engines don't clobber each other */
@@ -298,8 +492,39 @@ int xboard_main(void) {
         }
         for (i = 0; line[i] && line[i] != '\n' && line[i] != '\r'; i++);
         line[i] = 0;
+        /* UCI compares whole commands (`uci`, `isready`); trim trailing blanks
+           so a runner that pads a line is not mistaken for an unknown command. */
+        while (i > 0 && (line[i - 1] == ' ' || line[i - 1] == '\t')) line[--i] = 0;
         while (*p == ' ') p++;
         dbgf(">> %s\n", p);
+        /* `uci` is the first command a UCI match runner sends; WinBoard and
+           the DOS harnesses send `xboard`/`protover` first instead. */
+#if PROTO_UCI
+        if (!uci_mode && strcmp(p, "uci") == 0) {
+            uci_mode = 1;
+            uci_hello();
+            continue;
+        }
+        if (uci_mode) {
+            if (strcmp(p, "isready") == 0) {
+                xb_outf("readyok");
+            } else if (strcmp(p, "ucinewgame") == 0) {
+                xb_reset();
+            } else if (strncmp(p, "position", 8) == 0) {
+                uci_position(skipsp(p + 8));
+            } else if (strncmp(p, "go", 2) == 0) {
+                uci_go(skipsp(p + 2));
+            } else if (strcmp(p, "stop") == 0) {
+                stop_now = 1;
+            } else if (strncmp(p, "setoption", 9) == 0) {
+                proto_setoption(p);
+            } else if (strcmp(p, "quit") == 0) {
+                break;
+            }
+            /* debug/register/ponderhit and blank lines: nothing to do */
+            continue;
+        }
+#endif
         if (strncmp(p, "xboard", 6) == 0) {
         } else if (strncmp(p, "protover", 8) == 0) {
             /* announce the options FIRST, done=1 on the last feature line.
@@ -387,21 +612,7 @@ int xboard_main(void) {
                 xb_option(name, skipsp(eq + 1));
             }
         } else if (strncmp(p, "setoption", 9) == 0) {
-            /* lenient UCI-style fallback: setoption name Threads value 1 */
-            char *rest = skipsp(p + 9);
-            char *val;
-            if (strncmp(rest, "name", 4) == 0) rest = skipsp(rest + 4);
-            val = strstr(rest, " value ");
-            if (!val) val = strstr(rest, " value");
-            if (val) {
-                char name[40];
-                int nlen = (int)(val - rest);
-                while (nlen > 0 && rest[nlen - 1] == ' ') nlen--;
-                if (nlen > 39) nlen = 39;
-                memcpy(name, rest, nlen);
-                name[nlen] = 0;
-                xb_option(name, skipsp(val + 6));
-            }
+            proto_setoption(p);        /* lenient: a UCI-style line under CECP */
         } else if (p[0] == '?') {
             stop_now = 1;
         } else {
