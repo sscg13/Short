@@ -232,6 +232,21 @@ def test_uci_options(executable, cwd):
     require(announced == wanted,
             "UCI tuning options differ from CECP: expected {}, received {}".format(wanted, announced))
 
+    # A match runner re-sends the whole game before every move, so the command
+    # outgrows any small fixed buffer: 400 plies is ~2 KB and a real game in
+    # test 2206 hit 2048 exactly, after which the engine answered from the
+    # previous position and fastchess called the move illegal. Nothing may be
+    # refused or silently truncated here.
+    reps = " ".join(["g1f3 g8f6 f3g1 f6g8"] * 150)
+    long_cmd = "position startpos moves " + reps
+    require(len(long_cmd) > 2800, "long-move test did not build a long command")
+    result = run(executable, (), commands="\n".join(
+        ["uci", long_cmd, "go depth 1", "quit"]) + "\n", cwd=cwd)
+    require("command too long" not in result.stdout,
+            "engine refused a {} character position command:\n{}".format(len(long_cmd), result.stdout))
+    require(re.search(r"^bestmove [a-h][1-8][a-h][1-8]", result.stdout, re.MULTILINE),
+            "no bestmove after a long position command:\n" + result.stdout)
+
 
 def test_runtime_tables(executable, cwd):
     # This low-branching endgame reaches the LMR-active depths at 1000 KHz.

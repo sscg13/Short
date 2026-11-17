@@ -455,11 +455,15 @@ static void proto_setoption(char *p) {
 }
 
 /* A `position ... moves ...` line carries the whole game - fastchess re-sends
-   it before every move - so the UCI buffer is sized for a long one. The DOS
-   build only speaks CECP, where commands are short, and keeps the buffer on
-   its stack so DGROUP does not grow for a front end it never uses. */
+   it before every move - and grows by five characters per ply. 2048 was too
+   small: a 393-ply game in test 2206 hit exactly the limit, the command was
+   rejected as "too long" and the engine then answered from the previous
+   position (fastchess: "Black makes an illegal move"). 8192 covers ~1600 plies,
+   well past any game a match runner produces; the DOS build only speaks CECP,
+   where commands are short, and keeps its small buffer on the stack so DGROUP
+   does not grow for a front end it never uses. */
 #if PROTO_UCI
-#define PROTO_LINE_MAX 2048
+#define PROTO_LINE_MAX 8192
 #else
 #define PROTO_LINE_MAX 256
 #endif
