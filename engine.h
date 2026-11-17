@@ -120,6 +120,17 @@ typedef struct {
 #define MAX_REP_PATH 64   /* search-line repetition signatures */
 #define MAX_HALF 100      /* half-moves before the 50-move rule declares a draw */
 
+/* The UCI front end exists for OpenBench's fastchess, which only speaks UCI.
+   The 16-bit build is driven by CECP (WinBoard, DOSBox and the emulator
+   harnesses), and DGROUP cannot spare the option strings, so the handshake and
+   the position/go parsers compile only into the native build. `uci_mode` stays
+   declared everywhere (search.c prints its `info` lines when it is set). */
+#if defined(__WATCOMC__) && defined(__I86__)
+#define PROTO_UCI 0
+#else
+#define PROTO_UCI 1
+#endif
+
 /* 16-bit evaluation score. All eval/search scores (alpha/beta/best/root
    scores) live in this type so the gcc (32-bit int) build does the SAME i16
    arithmetic as the 16-bit target (where int is already 16-bit), keeping the
@@ -185,7 +196,11 @@ extern u16 movebuf[32][256];            /* move lists, one row per search ply + 
 extern volatile i16 stop_now;
 extern clock_t deadline, soft_deadline; /* engine_clock() ticks; 0 = no limit */
 void search_set_limits(i32 soft_ms, i32 hard_ms);
+void search_set_node_limit(i32 nodes);  /* `go nodes N`; 0 = no limit */
 extern i16 post_on;
+/* 1 while the session speaks UCI (OpenBench/fastchess send `uci` first).
+   thinking output switches to `info ...` lines; CECP's `post` stays as-is. */
+extern i16 uci_mode;
 
 /* ---- timing.c (wall clock) ---- */
 void timing_init(void);              /* one-time: 8253/8254 ch0 mode 2 on DOS */
