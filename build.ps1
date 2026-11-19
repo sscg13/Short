@@ -150,7 +150,7 @@ if ($memLine) {
 
 if (-not $NoNNUE) {
     # DOS loads the official net through its 8.3 filename.
-    Copy-Item -LiteralPath (Join-Path $root "short-net3.net") `
+    Copy-Item -LiteralPath (Join-Path $root "short-net3-ema.net") `
               -Destination (Join-Path $root "chess.net") -Force
 }
 

@@ -19,6 +19,7 @@ W1_END = FEATURES * HIDDEN
 B1_END = W1_END + HIDDEN
 W2_END = B1_END + 2 * HIDDEN
 PARAM_COUNT = W2_END + 1
+EMA_SAMPLE_STEPS = 128
 if (getattr(nnue_extension, "NET_VERSION", None) != NET_VERSION or
         getattr(nnue_extension, "TRAINER_API_VERSION", None) != 2):
     raise RuntimeError("Rebuild nnue_extension: python setup.py build_ext --inplace")
@@ -176,9 +177,20 @@ def evaluate(backend, records, weights, gradients, batch_size):
     return total / len(records)
 
 
-def train_epoch(backend, records, weights, gradients, optimizer, base, activation, generator, args):
+def ema_rate(steps, steps_per_epoch):
+    return 1 - 2 ** (-steps / (2 * steps_per_epoch))
+
+
+def train_epoch(backend, records, weights, gradients, optimizer, base, activation, generator, args,
+                ema_weights=None):
     chunks = (len(records) + args.chunk_records - 1) // args.chunk_records
     order = torch.randperm(chunks, generator=generator) if args.shuffle_chunks else torch.arange(chunks)
+    if ema_weights is not None:
+        full_chunks, tail = divmod(len(records), args.chunk_records)
+        full_steps = (args.chunk_records + args.batch_size - 1) // args.batch_size
+        tail_steps = (tail + args.batch_size - 1) // args.batch_size
+        steps_per_epoch = full_chunks * full_steps + tail_steps
+        sample_rate = ema_rate(EMA_SAMPLE_STEPS, steps_per_epoch)
     total, steps = 0.0, 0
     for chunk in order.tolist():
         first = chunk * args.chunk_records
@@ -197,6 +209,11 @@ def train_epoch(backend, records, weights, gradients, optimizer, base, activatio
             count = len(selected) if selected is not None else len(batch)
             total += loss * count
             steps += 1
+            if ema_weights is not None and steps % EMA_SAMPLE_STEPS == 0:
+                ema_weights.lerp_(weights.detach(), sample_rate)
+    remainder = steps % EMA_SAMPLE_STEPS
+    if ema_weights is not None and remainder:
+        ema_weights.lerp_(weights.detach(), ema_rate(remainder, steps_per_epoch))
     if not torch.isfinite(weights).all() or not torch.isfinite(gradients).all():
         raise RuntimeError("non-finite training state")
     digest = hashlib.sha256(json.dumps(order.tolist()).encode()).hexdigest()
@@ -214,6 +231,8 @@ def parse_args(argv=None):
     parser.add_argument("records", type=Path, help="SH01 records; use a pre-shuffled file for the FD50 recipe")
     parser.add_argument("--output", type=Path, default=Path("nets/trained.net"))
     parser.add_argument("--best-output", type=Path)
+    parser.add_argument("--ema", action="store_true",
+                        help="also export a late-EMA blend (e.g. trained-ema.net)")
     parser.add_argument("--checkpoint", type=Path, help="optimizer/RNG checkpoint (default: output with .pt suffix)")
     parser.add_argument("--metrics", type=Path, help="epoch metrics (default: output with .json suffix)")
     parser.add_argument("--resume", type=Path, help="restore saved recipe, optimizer and shuffle state")
@@ -248,8 +267,11 @@ def parse_args(argv=None):
         checkpoint = torch.load(args.resume, map_location="cpu", weights_only=True)
         if checkpoint.get("format") != 1:
             parser.error("unsupported trainer checkpoint")
+        config = checkpoint["config"]
+        if args.ema and not config.get("ema"):
+            parser.error("resume would change --ema; use the saved training recipe")
         explicit = {token.split("=")[0] for token in tokens if token.startswith("--")}
-        for key, value in checkpoint["config"].items():
+        for key, value in config.items():
             flag = "--lambda" if key == "lambda_value" else "--" + key.replace("_", "-")
             if flag in explicit and getattr(args, key) != value:
                 parser.error(f"resume would change {flag}; use the saved training recipe")
@@ -284,6 +306,8 @@ def main(argv=None):
     dataset = {"records": count, "bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns,
                "path": str(args.records.resolve())}
     config = {key: getattr(args, key) for key in CONFIG_FIELDS}
+    if args.ema:
+        config["ema"] = True
     generator = torch.Generator().manual_seed(args.seed)
     if checkpoint:
         if checkpoint["dataset"] != dataset:
@@ -301,19 +325,26 @@ def main(argv=None):
     backend = Backend(args)
     history = checkpoint["epochs"][:] if checkpoint else []
     start_epoch = len(history)
+    ema_start_epoch = 7 * args.epochs // 10
+    ema_weights = checkpoint.get("ema_weights") if args.ema and checkpoint else None
+    if args.ema and start_epoch > ema_start_epoch and ema_weights is None:
+        raise ValueError("checkpoint is missing the late EMA weights")
     best = checkpoint["best_validation_loss"] if checkpoint else None
     best_weights = checkpoint["best_weights"] if checkpoint else None
     step = checkpoint["step"] if checkpoint else 0
+    metrics = {"config": config, "dataset": dataset, "epochs": history, "best_validation_loss": best}
     checkpoint_path = args.checkpoint or args.output.with_suffix(".pt")
     metrics_path = args.metrics or args.output.with_suffix(".json")
+    ema_output = args.output.with_stem(args.output.stem + "-ema") if args.ema else None
     # Fail before training if outputs would overwrite a dataset, input net or one another.
-    destinations = [args.output, checkpoint_path, metrics_path] + ([args.best_output] if args.best_output else [])
+    net_outputs = [path for path in (args.output, args.best_output, ema_output) if path is not None]
+    destinations = [*net_outputs, checkpoint_path, metrics_path]
     sources = [args.records] + ([args.init_net] if args.init_net else [])
     resolved = [p.resolve() for p in destinations]
     if len(set(resolved)) != len(resolved) or any(p.resolve() in resolved for p in sources):
         raise ValueError("output paths must be distinct from one another and from input files")
     if args.resume and any(p.resolve() == args.resume.resolve() for p in
-                           [args.output, metrics_path] + ([args.best_output] if args.best_output else [])):
+                           [*net_outputs, metrics_path]):
         raise ValueError("only the checkpoint output may replace the resume checkpoint")
     print(json.dumps({"method": args.method, "activation": args.activation, "train": train_count,
                       "validation": val_count, "parameters": weights.numel(), "resume_epoch": len(history)}), flush=True)
@@ -322,8 +353,10 @@ def main(argv=None):
         lr = scheduled_lr(args.lr, args.final_lr, epoch / max(1, args.epochs - 1), args.lr_schedule)
         for group in optimizer.param_groups:
             group["lr"] = lr * group["lr_scale"]
+        if args.ema and epoch >= ema_start_epoch and ema_weights is None:
+            ema_weights = weights.detach().clone()
         train_loss, steps, order = train_epoch(backend, records[:train_count], weights, gradients,
-                                               optimizer, base, activation, generator, args)
+                                               optimizer, base, activation, generator, args, ema_weights)
         step += steps
         val_loss = evaluate(backend, records[train_count:], weights, gradients, args.batch_size)
         digest = export_net(weights, args.output)
@@ -340,18 +373,25 @@ def main(argv=None):
                  "optimizer": optimizer.state_dict(), "generator_state": generator.get_state(),
                  "step": step, "epochs": history, "best_validation_loss": best,
                  "best_weights": best_weights}
+        if ema_weights is not None:
+            saved["ema_weights"] = ema_weights
         save_checkpoint(checkpoint_path, saved)
-        write_json(metrics_path, {"config": config, "dataset": dataset, "epochs": history,
-                                  "best_validation_loss": best})
+        metrics["best_validation_loss"] = best
+        write_json(metrics_path, metrics)
         print(json.dumps(row), flush=True)
     # Recreate outputs even when resuming an already completed checkpoint.
     if checkpoint and start_epoch == args.epochs:
         export_net(weights, args.output)
         save_checkpoint(checkpoint_path, checkpoint)
-        write_json(metrics_path, {"config": config, "dataset": dataset, "epochs": history,
-                                  "best_validation_loss": best})
+        write_json(metrics_path, metrics)
     if args.best_output and best_weights is not None:
         export_net(best_weights, args.best_output)
+    if ema_output is not None:
+        digest = export_net(torch.lerp(weights, ema_weights, 0.75), ema_output)
+        val_loss = evaluate(backend, records[train_count:], load_net(ema_output), gradients, args.batch_size)
+        metrics["ema"] = {"net_sha256": digest, "validation_loss": val_loss}
+        write_json(metrics_path, metrics)
+        print(json.dumps({"ema": metrics["ema"]}), flush=True)
 
 
 if __name__ == "__main__":

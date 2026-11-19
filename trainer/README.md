@@ -44,6 +44,21 @@ and zero weight decay by default. PyTorch uses one optimizer thread; --threads
 controls the persistent C++ record workers.
 Zero selects one worker, retaining the previous command-line convention.
 
+## Late EMA export
+
+Add `--ema` to write a second net alongside the final checkpoint's net.
+For example, `--output nets/fd50.net --ema` also writes
+`nets/fd50-ema.net` at the end of training. The option works with QAT and
+factored FD, including learned activation tables.
+Enable it at the start of the run to capture the EMA in checkpoints.
+
+The trainer starts averaging the float parameters after 70% of the scheduled
+epochs, rounded down. It samples every 128 optimizer updates and at each
+epoch boundary with a two-epoch half-life. The final export blends 75% EMA
+with 25% final weights before quantization. The run's JSON metrics include
+the EMA net's hash and its loss on the held-out set after quantization. It
+uses the same optimizer trajectory and best-loss selection as a plain run.
+
 ## Activations and compatibility
 
 | Activation | Parameters | Export |
@@ -78,9 +93,9 @@ python trainer.py data/train.records --resume nets/fd50.pt --output nets/fd50.ne
 ```
 
 Resume restores the original method, activation, LR schedule, epoch budget,
-optimizer and shuffle generator. Explicit changes to the saved recipe are
-rejected. Dataset path, count, size and modification time must match. Recovery
-restarts at the last completed epoch; it does not resume within an epoch.
+optimizer, shuffle generator and EMA state when enabled. Explicit changes to
+the saved recipe are rejected. Dataset path, count, size and modification time
+must match. Recovery restarts at the last completed epoch boundary.
 Use --init-net for a new fine-tuning schedule with a fresh optimizer.
 
 ## Validation

@@ -5,6 +5,7 @@ Build trainer/nnue_extension first, then run: python tests/test_trainer.py
 import contextlib
 from concurrent.futures import ThreadPoolExecutor
 import io
+import json
 import math
 from pathlib import Path
 import struct
@@ -364,6 +365,82 @@ class TrainerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "dataset metadata"):
                 t.main([str(alternate), "--resume", str(folder / "resumed.pt"),
                         "--output", str(folder / "alternate.net")])
+
+    def test_late_ema_export_and_resume(self):
+        with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stdout(io.StringIO()):
+            folder = Path(folder)
+            records = self.records.repeat(210, 1)
+            data = folder / "data.records"
+            data.write_bytes(struct.pack("<4sIII", b"SH01", 40, len(records), 0)
+                             + bytes(records.flatten().tolist()))
+            common = [str(data), "--method", "factored-fd", "--epochs", "4", "--batch-size", "6",
+                      "--chunk-records", "83", "--shuffle-chunks", "--val-fraction", ".25",
+                      "--lr", ".1", "--final-lr", ".02", "--threads", "1"]
+            t.main(common + ["--output", str(folder / "plain.net")])
+
+            # 788 training positions give nine 14-update chunks and a 7-update tail.
+            # Check both the 128-step samples and the shorter epoch-end updates.
+            updates_per_epoch = 133
+            start = 2 * updates_per_epoch
+            sample_steps = (start, start + 128, 3 * updates_per_epoch,
+                            3 * updates_per_epoch + 128, 4 * updates_per_epoch)
+            samples = {}
+            steps = 0
+            original_clamp = t.clamp_quantized_ranges_
+
+            def capture(weights):
+                nonlocal steps
+                original_clamp(weights)
+                steps += 1
+                if steps in sample_steps:
+                    samples[steps] = weights.clone()
+
+            with patch.object(t, "clamp_quantized_ranges_", side_effect=capture):
+                t.main(common + ["--ema", "--output", str(folder / "control.net")])
+            plain = torch.load(folder / "plain.pt", weights_only=True)
+            control = torch.load(folder / "control.pt", weights_only=True)
+            for key in ("weights", "optimizer", "generator_state", "best_weights"):
+                self.assert_state_equal(plain[key], control[key])
+            self.assertEqual((folder / "plain.net").read_bytes(), (folder / "control.net").read_bytes())
+            self.assertFalse((folder / "plain-ema.net").exists())
+
+            average = samples[start].clone()
+            for previous, current in zip(sample_steps, sample_steps[1:]):
+                average.lerp_(samples[current], 1 - 0.5 ** ((current - previous) / (2 * updates_per_epoch)))
+            self.assertTrue(torch.equal(control["ema_weights"], average))
+            candidate = folder / "control-ema.net"
+            expected = folder / "expected.net"
+            digest = t.export_net(torch.lerp(control["weights"], average, 0.75), expected)
+            self.assertEqual(candidate.read_bytes(), expected.read_bytes())
+            self.assertNotEqual(candidate.read_bytes(), (folder / "control.net").read_bytes())
+            metrics = json.loads((folder / "control.json").read_text())
+            self.assertEqual(metrics["ema"]["net_sha256"], digest)
+            self.assertIsNotNone(metrics["ema"]["validation_loss"])
+
+            original_epoch, calls = t.train_epoch, 0
+
+            def interrupt(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 4:
+                    raise KeyboardInterrupt()
+                return original_epoch(*args, **kwargs)
+
+            with patch.object(t, "train_epoch", side_effect=interrupt), self.assertRaises(KeyboardInterrupt):
+                t.main(common + ["--ema", "--output", str(folder / "resumed.net")])
+            self.assertFalse((folder / "resumed-ema.net").exists())
+            resume = [str(data), "--resume", str(folder / "resumed.pt"), "--output"]
+            t.main(resume + [str(folder / "resumed.net")])
+            resumed = torch.load(folder / "resumed.pt", weights_only=True)
+            self.assert_state_equal(control["ema_weights"], resumed["ema_weights"])
+            self.assertEqual(candidate.read_bytes(), (folder / "resumed-ema.net").read_bytes())
+            t.main(resume + [str(folder / "copied.net")])
+            self.assertEqual(candidate.read_bytes(), (folder / "copied-ema.net").read_bytes())
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                t.parse_args([str(data), "--resume", str(folder / "plain.pt"), "--ema"])
+            with self.assertRaisesRegex(ValueError, "output paths must be distinct"):
+                t.main(resume + [str(folder / "copied.net"),
+                                 "--best-output", str(folder / "copied-ema.net")])
 
 
 if __name__ == "__main__":

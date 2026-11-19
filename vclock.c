@@ -422,15 +422,20 @@ i32 vclock_est_nps(i32 nodes) {
    CPUs, so no cost-row refit is needed. See
    artifacts/net3-promotion-2026-11-13/REPORT.md.
 
+   2026-11-18 net3 EMA promotion: the new depth-4 tree has 27,351 nodes.
+   The 80286 and 8088 references use 86Box guest timings. The 80186 reference
+   uses MAME Nimbus search markers, and the 8086 uses the same derived ratio.
+   See artifacts/net3-ema-promotion-2026-11-18/REPORT.md.
+
    If the tree changes (bench node total differs) the reference no longer
    applies: re-measure it, do not "fix" the model to match a stale tree. */
-#define VCLOCK_CAL_NODES   25445
+#define VCLOCK_CAL_NODES   27351
 #define VCLOCK_CAL_TOL_PCT 3
 static const i32 vclock_cal_cyc[4] = {
-    22809,  /* 80286 */
-    73979,  /* 8088 */
-    63257,  /* 8086 (derived: 8088 x 54,971/64,289) */
-    36329,  /* 80186 */
+    23139,  /* 80286 */
+    74995,  /* 8088 */
+    64126,  /* 8086 (derived: 8088 x 54,971/64,289) */
+    36826,  /* 80186 */
 };
 static const char *const vclock_cpu_name[4] = {
     "80286", "8088", "8086", "80186"
