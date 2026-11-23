@@ -8,8 +8,6 @@ run.bat
 *.map
 *.nnue
 *.net
-!short-net2-finetune2.net
-!short-net3.net
 !short-net3-ema.net
 __pycache__/
 # trainer: track only the source (.py/.cpp); nets, data, binaries, and scratch stay out
