@@ -199,7 +199,7 @@ static const VW vw_tab[4] = {
     /* att ps gc gq gm mk nm rf ev rn rm tp ts: cycles per counted operation */
     {    656,      0,   4614,  12366, 135646,    950,    520,   2662,   4504,   2258,   2837,    652,    652 }, /* 80286 */
     {   1970,      0,  12093,  37502, 465065,   3123,   1897,   8696,  15476,   5800,   6805,   2246,   2389 }, /* 8088 */
-    {   1693,      0,  10353,  32474, 413168,   2734,   1636,   7999,  12971,   3948,   5076,   1915,   2011 }, /* 8086 */
+    {   1693,      0,  10353,  32474, 413168,   2734,   1636,   7999,  12971,   4534,   5662,   1915,   2011 }, /* 8086 */
     {   1003,    131,   6170,  18639, 215267,   1507,    907,   4669,   6999,   3301,   3874,   1181,   1228 }, /* 80186 */
 };
 /* 2026-11-12: counter-move ordering (artifacts/counter-move-2026-11-12/).
@@ -288,6 +288,15 @@ static const VW vw_tab[4] = {
    (~4-6 per move at shallow nodes). That gap is the residual, so rn and rm
    both take the measured per-node delta: +602 (80286), +2,023 (8088),
    +1,588 (8086), +868 (80186). No other row moved. */
+
+/* 2026-11-23: the 8086 column is no longer derived from the 8088. The
+   deskpro8086 fixture (8086 @ 8 MHz, 640 KB) booted the 720 KB XT image and
+   reproduced the 27,351-node tree; its 12 search intervals sum to 221.72 s,
+   i.e. 64,852 cycles/node. The model was 64,266 (0.91% low), so rn/rm both
+   take the measured per-node gap +586 (3,948->4,534, 5,076->5,662), the same
+   level-refit rule used for the counter-move and LMP changes. The 8086
+   reference is now the direct 64,852 instead of 64,126 derived from the 8088.
+   See artifacts/8086-deskpro-2026-11-23/REPORT.md. */
 
 /* Upcoming twofold: fixed overhead measured on the identical 10037-node
    bench-1 tree. Revised 286 scans measured over 20000 isolated calls:
@@ -417,15 +426,17 @@ i32 vclock_est_nps(i32 nodes) {
    2026-11-13 net3 promotion: the weights change the main-branch depth-4 tree
    to 25,445 nodes. Isolated 86Box search-only sums are 96.73 s at 6 MHz
    (80286) and 117.65 s at 16 MHz (8088); MAME Nimbus markers measure
-   924,384,890 search cycles (80186). The 8086 remains derived using the
+   924,384,890 search cycles (80186). The 8086 was derived then using the
    54,971/64,289 ratio. The existing model agrees within 0.4% on all measured
    CPUs, so no cost-row refit is needed. See
    artifacts/net3-promotion-2026-11-13/REPORT.md.
 
    2026-11-18 net3 EMA promotion: the new depth-4 tree has 27,351 nodes.
    The 80286 and 8088 references use 86Box guest timings. The 80186 reference
-   uses MAME Nimbus search markers, and the 8086 uses the same derived ratio.
-   See artifacts/net3-ema-promotion-2026-11-18/REPORT.md.
+   uses MAME Nimbus search markers, and the 8086 now uses a direct
+   deskpro8086 measurement (2026-11-23): 221.72 s at 8 MHz = 64,852 cyc/node.
+   See artifacts/net3-ema-promotion-2026-11-18/REPORT.md and
+   artifacts/8086-deskpro-2026-11-23/REPORT.md.
 
    If the tree changes (bench node total differs) the reference no longer
    applies: re-measure it, do not "fix" the model to match a stale tree. */
@@ -434,7 +445,7 @@ i32 vclock_est_nps(i32 nodes) {
 static const i32 vclock_cal_cyc[4] = {
     23139,  /* 80286 */
     74995,  /* 8088 */
-    64126,  /* 8086 (derived: 8088 x 54,971/64,289) */
+    64852,  /* 8086: direct deskpro8086, was 8088 x 54,971/64,289 (64,126) */
     36826,  /* 80186 */
 };
 static const char *const vclock_cpu_name[4] = {
