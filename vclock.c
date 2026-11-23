@@ -197,10 +197,10 @@ typedef struct { i32 att, ps, gc, gq, gm, mk, nm, rf, ev, rn, rm, tp, ts; } VW;
    part of the plan cost they carry is unchanged in kind. */
 static const VW vw_tab[4] = {
     /* att ps gc gq gm mk nm rf ev rn rm tp ts: cycles per counted operation */
-    {    656,      0,   4614,  12366, 135646,    950,    520,   2662,   4504,   2258,   2837,    652,    652 }, /* 80286 */
-    {   1970,      0,  12093,  37502, 465065,   3123,   1897,   8696,  15476,   5800,   6805,   2246,   2389 }, /* 8088 */
-    {   1693,      0,  10353,  32474, 413168,   2734,   1636,   7999,  12971,   4534,   5662,   1915,   2011 }, /* 8086 */
-    {   1003,    131,   6170,  18639, 215267,   1507,    907,   4669,   6999,   3301,   3874,   1181,   1228 }, /* 80186 */
+    {    656,      0,   4614,  12366, 135646,    950,    520,   2662,   4504,   2435,   3014,    652,    652 }, /* 80286 */
+    {   1970,      0,  12093,  37502, 465065,   3123,   1897,   8696,  15476,   5975,   6980,   2246,   2389 }, /* 8088 */
+    {   1693,      0,  10353,  32474, 413168,   2734,   1636,   7999,  12971,   4864,   5992,   1915,   2011 }, /* 8086 */
+    {   1003,    131,   6170,  18639, 215267,   1507,    907,   4669,   6999,   3454,   4027,   1181,   1228 }, /* 80186 */
 };
 /* 2026-11-12: counter-move ordering (artifacts/counter-move-2026-11-12/).
    The quiet scorer gained one compare per candidate and mgen_init one indexed
@@ -438,15 +438,25 @@ i32 vclock_est_nps(i32 nodes) {
    See artifacts/net3-ema-promotion-2026-11-18/REPORT.md and
    artifacts/8086-deskpro-2026-11-23/REPORT.md.
 
+   2026-11-23 LMP improving split (artifacts/lmp-improving-2026-11-23/): the
+   depth-4 tree has 26,237 nodes and cycles per node rise ~1.7% on every CPU -
+   a pruned candidate pays a make, a legality test, the check test and an undo
+   before it is skipped, and more of them are skipped per node. Re-measured on
+   the same fixtures: 80286 23,525 (86Box atami, 102.87 s at 6 MHz), 8088
+   76,271 (86Box xt, 125.07 s at 16 MHz), 8086 65,977 (86Box deskpro8086,
+   216.38 s at 8 MHz), 80186 37,428 (MAME Nimbus markers, 982,017,316 search
+   cycles). The model was 0.2-0.8% low, so rn/rm take the measured per-node
+   delta: +177 (80286), +175 (8088), +330 (8086), +153 (80186).
+
    If the tree changes (bench node total differs) the reference no longer
    applies: re-measure it, do not "fix" the model to match a stale tree. */
-#define VCLOCK_CAL_NODES   27351
+#define VCLOCK_CAL_NODES   26237
 #define VCLOCK_CAL_TOL_PCT 3
 static const i32 vclock_cal_cyc[4] = {
-    23139,  /* 80286 */
-    74995,  /* 8088 */
-    64852,  /* 8086: direct deskpro8086, was 8088 x 54,971/64,289 (64,126) */
-    36826,  /* 80186 */
+    23525,  /* 80286 */
+    76271,  /* 8088 */
+    65977,  /* 8086: direct deskpro8086 */
+    37428,  /* 80186 */
 };
 static const char *const vclock_cpu_name[4] = {
     "80286", "8088", "8086", "80186"

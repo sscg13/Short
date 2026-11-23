@@ -157,6 +157,10 @@ i32 c_anodes = 0;                   /* alphabeta entries */
 i32 c_rep_scan = 0, c_rep_upscan = 0, c_rep_lookup = 0;
 i32 c_qnodes = 0;                   /* qsearch entries */
 i32 c_lmp = 0;                      /* late-move prunes taken */
+#ifdef PROFILE
+i32 c_lmp_cand[2] = { 0, 0 };       /* LMP candidates: not improving / improving */
+i32 c_lmp_row[2] = { 0, 0 };        /* prunes actually taken, by threshold row */
+#endif
 #endif
 
 static i32 nodes_search;
@@ -251,6 +255,16 @@ static i16 any_legal(Pos *p, i16 ply) {
 static u16 pv[MAXPLY + 1][MAXPLY];
 static i16 pv_len[MAXPLY + 1];
 
+/* Same-side static eval history (the signal the rejected `lmr-improving`
+   experiment built). One slot per ply, cleared on entry to -INF and filled only
+   where the node already computes its eval (not in check, not a PV node), so
+   nothing extra is evaluated. The side to move at ply and at ply-2 is the same,
+   so the two scores are directly comparable; "improving" means this node's
+   static eval is no worse than the one two plies back. A PV or in-check
+   ancestor has no usable score, so the four-plies-back slot is tried instead
+   and unknown history counts as not improving. */
+static Score static_eval[MAXPLY];
+
 static u16 killers[MAXPLY][2];          /* two killer moves per ply (quiet only) */
 
 i16 qhist[2][6][64];   /* quiet-history: side, piece-type-1, to-square-compact */
@@ -307,6 +321,10 @@ static const i16 pvs_see_threshold[2][PVS_SEE_DEPTH + 1] = {
 #endif
 #ifdef SEE_TEST
 static i32 st_pvs_tries, st_pvs_prunes, st_pvs_checks_kept;
+/* LMP candidates kept because they give check. A shorter depth-1 LMP
+   threshold moves that safeguard from the SEE gate to the LMP gate, so the
+   integration test counts both. */
+static i32 st_lmp_checks;
 #endif
 
 /* null-move pruning: NMP_DEPTH is the minimum node depth (2 keeps the null move
@@ -360,9 +378,21 @@ static i32 st_pvs_tries, st_pvs_prunes, st_pvs_checks_kept;
    lmp_moves[d] is the number of legal moves searched at node depth d before
    the tail is pruned; 0 disables the gate at that depth. A pruned move still
    counts in move_count, so the LMR table behind it sees the same move numbers
-   it would have seen anyway. */
+   it would have seen anyway.
+
+   The threshold depends on the same-side eval trend. A quiet tail is more
+   likely to be futile - not to raise alpha - when the position has not been
+   improving, so that row is the aggressive one; when the static eval has
+   improved, the tail gets the conservative row and the search spends the nodes.
+   The improving row is the previously hand-set curve, so the change only ever
+   prunes EARLIER than the accepted LMP, never later. Unknown history (PV or
+   in-check ancestor, depth-1 nodes with no two-ply compare) counts as not
+   improving, exactly as in the `lmr-improving` record. */
 #define LMP_DEPTH 3
-static const u8 lmp_moves[LMP_DEPTH + 1] = { 0, 6, 12, 20 };
+static const u8 lmp_moves[2][LMP_DEPTH + 1] = {
+    { 0, 5, 10, 16 },   /* not improving: prune the tail earlier */
+    { 0, 6, 12, 20 }    /* improving: the accepted curve, unchanged */
+};
 
 /* aspiration windows: from depth >= 2 the root search confines itself to a
    window of +-ASP_DELTA cp around the previous depth's score. A fail (the
@@ -593,6 +623,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
     u16 m, ttm = 0, bestmove = 0;
     Score best = -INF, original_alpha = alpha;
     i16 legal = 0, in_check = 0, move_count = 0, upcoming = 0, root_index = 0;
+    i16 improving = 0;       /* same-side eval trend, for LMP's threshold row */
     NodeType child_type;     /* non-PV child expectation: PV scouts also expect cut */
     TTData tt;
 
@@ -687,9 +718,12 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
     in_check = is_attacked(p, p->ks[p->side], p->side ^ 1);
     child_type = node_type == NODE_CUT ? NODE_ALL : NODE_CUT;
 
+    /* No usable static eval until the block below fills this ply's slot. */
+    static_eval[ply] = -INF;
+
     /* RFP and NMP both need the static eval, and only at a non-PV, non-check
        node is it trustworthy enough to prune on, so it is computed once here
-       and shared by the two stages below. */
+       and shared by the two stages below (and by the LMP improving test). */
     if (!in_check && node_type != NODE_PV) {
         Score eval;
         if (!tt.eval_valid) {
@@ -698,6 +732,7 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
             tt_store_eval(p, tt.slot, tt.eval);
         }
         eval = tt.eval;
+        static_eval[ply] = eval;
 
         /* reverse futility pruning. Skipped while in check (the eval is
            unreliable with the king exposed), at PV nodes (their score becomes a
@@ -747,6 +782,16 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
         }
     }
 
+    /* LMP trend: same-side eval two plies back (four if that slot is unusable).
+       Only nodes that compute an eval can be "improving"; anything else is not,
+       which keeps PV and check nodes on the conservative row. */
+    if (static_eval[ply] != -INF) {
+        if (ply >= 2 && static_eval[ply - 2] != -INF)
+            improving = static_eval[ply] >= static_eval[ply - 2];
+        else if (ply >= 4 && static_eval[ply - 4] != -INF)
+            improving = static_eval[ply] >= static_eval[ply - 4];
+    }
+
     if (ply) {
         u16 pm  = path_move[ply - 1];            /* the move that led here */
         u16 pm2 = (ply >= 2) ? path_move[ply - 2] : 0;   /* our move before it */
@@ -773,9 +818,12 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
             if (!first && depth <= LMP_DEPTH && node_type != NODE_PV &&
                 !in_check && mfl(m) == 0 &&
                 p->board[mto(m)] == EMPTY &&
-                move_count >= lmp_moves[depth] &&
+                move_count >= lmp_moves[improving][depth] &&
                 best > -MATE + MAXPLY && beta < MATE - MAXPLY)
                 lmp_try = 1;
+#ifdef PROFILE
+            if (lmp_try) ++c_lmp_cand[improving];
+#endif
             if (!lmp_try && !first && depth <= PVS_SEE_DEPTH &&
                 !in_check && node_type != NODE_PV && best > -MATE + MAXPLY &&
                 beta < MATE - MAXPLY &&
@@ -821,9 +869,15 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                 if (lmp_try && !is_attacked(p, p->ks[p->side], us)) {
                     /* late quiet, and it gives no check: skip it unsearched */
                     PCOUNT(c_lmp);
+#ifdef PROFILE
+                    ++c_lmp_row[improving];
+#endif
                     undo_move(p, m, &u);
                     continue;
                 }
+#ifdef SEE_TEST
+                else if (lmp_try) ++st_lmp_checks;   /* kept: it gives check */
+#endif
                 if (first) {
                     /* First move: keep PV, or alternate cut/all. */
                     first = 0;
@@ -1429,6 +1483,9 @@ int profile(int depth) {
            (long)c_tt_hit, (long)c_tt_cut);
     printf("profile see=%ld see_step=%ld\n", (long)c_see, (long)c_see_step);
     printf("profile lmp=%ld\n", (long)c_lmp);
+    printf("profile lmp cand nimp=%ld imp=%ld | prunes nimp=%ld imp=%ld\n",
+           (long)c_lmp_cand[0], (long)c_lmp_cand[1],
+           (long)c_lmp_row[0], (long)c_lmp_row[1]);
     printf("profile rep scans=%ld upscans=%ld lookups=%ld\n",
            (long)c_rep_scan, (long)c_rep_upscan, (long)c_rep_lookup);
     return 0;
