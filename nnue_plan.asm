@@ -23,7 +23,7 @@
 ;     flags are one SHR by 12;
 ;   * the perspective/mirror index is folded ONCE into a 1 KB word table,
 ;     nn_cidxw[pm][sq88] = (compact(sq) ^ cm(pm)) * 2, where
-;     pm = perspective | (mirror << 1) and cm = {0, 63, 7, 56}.  A row lookup
+;     pm = perspective | (mirror << 1) and cm = {0, 56, 7, 63}.  A row lookup
 ;     is then four instructions and three memory reads:
 ;           mov  ax, [bx+di]     ; c2 = nn_cidxw[pm][sq]   (di = 2*sq)
 ;           add  ax, poff        ; poff = rowtab + piece*128
@@ -262,9 +262,8 @@ pl_nopromo:
         shr     ax, 1                   ; 0 or 2  (mirror << 1)
         mov     [bp+pm0], ax
         mov     cx, ax
-        mov     ax, [si+264]            ; ks[1]: black mirror is inverted
+        mov     ax, [si+264]            ; ks[1]: black mirror = king on e-h
         and     ax, 4
-        xor     ax, 4
         shr     ax, 1
         inc     ax                      ; 3 or 1  (persp | mirror << 1)
         mov     [bp+pm1], ax
@@ -286,7 +285,6 @@ pl_chkbk:
         jne     short pl_flipdone
         mov     bx, [bp+fr]
         and     bx, 4
-        xor     bx, 4
         shr     bx, 1
         inc     bx                      ; parent pm1
         cmp     bx, ax                  ; ax = pm1

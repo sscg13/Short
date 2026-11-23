@@ -7,13 +7,13 @@
  *   output weights (x64), with each product shifted by NNUE_ACT2_SHIFT ->
  *   i16 output bias (x8192) -> raw score (>> NNUE_SCALE_SHIFT = cp).
  *
- * The black POV is the white POV of the position rotated 180 degrees with
- * colors swapped, so the net is color-symmetric by construction. Both POVs
- * additionally HORIZONTALLY MIRROR every square when their own king is on the
- * e-h files, so the perspective king always lands in files a-d. Because a
- * position and its left-right mirror get the same features, the net is also
- * left-right symmetric by construction (and the 32 king buckets fold e-h ->
- * a-d without losing information).
+ * The black POV is the white POV of the position flipped vertically (ranks
+ * exchanged) with colors swapped, so the net is color-symmetric by
+ * construction. Both POVs additionally HORIZONTALLY MIRROR every square when
+ * their own king is on the e-h files, so the perspective king always lands in
+ * files a-d. Because a position and its left-right mirror get the same
+ * features, the net is also left-right symmetric by construction (and the 32
+ * king buckets fold e-h -> a-d without losing information).
  *
  * Incremental: do_make() records per-feature-row deltas for both accumulators.
  * PLY-INDEXED accumulator: nn_acc[ply][2][NNUE_N] is a stack of snapshots
@@ -188,11 +188,12 @@ static i32 nn_curve_term(i16 slot, i16 a) {
 /* ------------------------------------------------------------------ */
 
 /* per-perspective mirror flags from the king squares: mirror a POV's board
-   when that POV's king (after its 180 transform for persp 1) sits on e-h,
-   so the own king always normalizes to files a-d. */
+   when that POV's own king sits on the e-h files, so it always normalizes to
+   files a-d. The vertical perspective flip leaves files alone, so both POVs
+   use the same test. */
 static void nn_mirrors(Pos *p, i16 m[2]) {
     m[0] = (p->ks[0] & 4) ? 1 : 0;                   /* white king file >= e */
-    m[1] = (p->ks[1] & 4) ? 0 : 1;                   /* R180 of black king file >= e */
+    m[1] = (p->ks[1] & 4) ? 1 : 0;                   /* black king file >= e */
 }
 
 /* feature row for a color-normalized piece on a mirror-normalized compact
@@ -223,9 +224,10 @@ static i16 nn_rowtab_ready;
 
 /* Same lookup, inlined for the make path (nn_row is 5-6 rows of -0 code plus a
    call for what is two table reads). pm = perspective | (mirror << 1), so the
-   mirror is always folded into one xor and the 180 colour swap into the piece
-   xor: c ^= {0, 63, 7, 56}. Kept as a macro because Watcom -0 never inlines. */
-static const u8 nn_cm[4] = { 0, 63, 7, 56 };
+   black POV's rank flip and the file mirror fold into one xor, and the colour
+   swap into the piece xor: c ^= {0, 56, 7, 63}. Kept as a macro because
+   Watcom -0 never inlines. */
+static const u8 nn_cm[4] = { 0, 56, 7, 63 };
 #define NN_ROW(pm, pc, sq88) \
     (nn_rowtab[(i16)((pc) ^ (((pm) & 1) << 3))] \
                [(i16)(((((sq88) >> 1) & 56) | ((sq88) & 7)) ^ nn_cm[(pm) & 3])])
@@ -253,9 +255,9 @@ static void nn_rowtab_build(void) {
 static i16 nn_row(i16 persp, i16 pc, i16 sq88, i16 mirror) {
     i16 c = (sq88 >> 1) & 56;
     c |= sq88 & 7;
-    if (persp == 1) {                 /* black POV: 180 flip + color swap */
+    if (persp == 1) {                 /* black POV: rank flip + color swap */
         pc ^= 8;
-        c ^= 63;
+        c ^= 56;
     }
     if (mirror) c ^= 7;
     return nn_rowtab[pc][c];
@@ -451,15 +453,15 @@ static i16 nn_plan_c(Pos *p, u16 m, Undo *u) {
     if (ispromo(m)) mover = (mover_col == 0) ? WP : BP;   /* it was a pawn */
 
     /* pm = the per-perspective index mask: bit0 = perspective, bit1 = mirror
-       (nn_cm folds the 180 colour swap of the black POV with the file mirror). */
+       (nn_cm folds the black POV's rank flip and colour swap with the file
+       mirror). Both POVs mirror when their own king is on the e-h files. */
     pm[0] = (p->ks[0] & 4) ? 2 : 0;       /* white POV: mirror = king on e-h */
-    pm[1] = (p->ks[1] & 4) ? 1 : 3;       /* black POV: R180, so inverted */
-    /* The parent flag is read from the king's FROM square (mirror = file >= e,
-       and for the black POV that flips: mirror = file < e). */
+    pm[1] = (p->ks[1] & 4) ? 3 : 1;       /* black POV: same file test */
+    /* The parent flag is read from the king's FROM square (mirror = file >= e). */
     if (mover == WK) {
         if ((pm[0] >> 1) != ((from & 4) ? 1 : 0)) flip = 1;
     } else if (mover == BK) {
-        if ((pm[1] >> 1) != ((from & 4) ? 0 : 1)) flip = 2;
+        if ((pm[1] >> 1) != ((from & 4) ? 1 : 0)) flip = 2;
     }
     /* Capture target hoisted out of the perspective loop: EP's victim square
        and pawn colour depend on the mover only, not on the perspective. */
@@ -544,7 +546,7 @@ void nnue_make(Pos *p, u16 m, Undo *u) {
     if (flip & 2) {
         PCOUNT(c_flip);
 #ifdef NNUE_ASM_COMPUTE
-        nn_compute_persp_slot(p, (i16)((p->ks[1] & 4) ? 1 : 3), slot);
+        nn_compute_persp_slot(p, (i16)((p->ks[1] & 4) ? 3 : 1), slot);
 #else
         nn_compute_persp(p, 1, nn_acc[slot][1]);
 #endif
@@ -820,7 +822,7 @@ static void flip_pos(Pos *dst, const Pos *src) {
     memset(dst, 0, sizeof *dst);
     for (c = 0; c < 64; c++) {
         i16 pc = src->board[c2sq(c)];
-        if (pc) dst->board[c2sq(63 - c)] = pc ^ 8;   /* rotate 180 + swap colors */
+        if (pc) dst->board[c2sq(c ^ 56)] = pc ^ 8;   /* rank flip + swap colors */
     }
     dst->side = src->side ^ 1;
     dst->castle = 0;
@@ -1155,7 +1157,7 @@ int nnue_selftest(const char *fen) {
         if (nn_rowtab[WK][35] == nn_rowtab[WP][11]) map_fail++;
     }
 
-    /* color symmetry: acc_black(x) must equal acc_white(rot180 + colorflip x) */
+    /* color symmetry: acc_black(x) must equal acc_white(rankflip + colorflip x) */
     nn_compute(&pos, a);
     flip_pos(&flipped, &pos);
     nn_compute(&flipped, b);
@@ -1239,7 +1241,7 @@ int nnue_selftest(const char *fen) {
     }
 
     nnue_reset(&pos);
-    printf("nn selftest: moves=%d  acc-sym(R180)=%d  acc-sym(H)=%d  roundtrip-fails=%d  fwd-fails=%d  map-fails=%d  eval=%d\n",
+    printf("nn selftest: moves=%d  acc-sym(V)=%d  acc-sym(H)=%d  roundtrip-fails=%d  fwd-fails=%d  map-fails=%d  eval=%d\n",
            n, asym, asymH, fail, fwd_fail, map_fail, nnue_eval(&pos));
 #if defined(NN_PLAN_DIFF)
     printf("nn plan-diff fails=%ld (asm plan vs C oracle)\n", (long)nn_plan_fails);

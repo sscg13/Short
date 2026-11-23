@@ -3583,7 +3583,7 @@ nn_compute_persp_slot_ PROC FAR
         mov     cx, 64
         rep     movsw                   ; out[0..63] = sign-extended bias
         mov     di, dx                  ; keep the out base
-; --- masks: ch = persp*8, cl = (persp?63:0) ^ (mirror?7:0) ---
+; --- masks: ch = persp*8, cl = (persp?56:0) ^ (mirror?7:0) ---
         mov     ax, bx
         and     ax, 1                   ; persp
         mov     ch, al
@@ -3591,7 +3591,7 @@ nn_compute_persp_slot_ PROC FAR
         shl     ch, cl
         mov     cl, al
         neg     cl
-        and     cl, 63
+        and     cl, 56
         mov     al, bl
         shr     al, 1
         and     al, 1                   ; mirror
