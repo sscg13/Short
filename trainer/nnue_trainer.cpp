@@ -308,7 +308,7 @@ static inline void append_feature(ActiveFeatures& out, int& n0, int& n1,
         if (n0 >= 32) throw std::runtime_error("too many active NNUE features");
         out.rows[0][n0++] = row0;
     }
-    int compact1 = 63 - sq;
+    int compact1 = sq ^ 56;
     if (mirror1) compact1 ^= 7;
     int row1 = feature_row_table.row[(black ? 0 : 8) | type][compact1];
     if (row1 >= 0) {
@@ -322,7 +322,7 @@ static ActiveFeatures features(const Record& r) {
     int n0 = 0;
     int n1 = 0;
     int mirror0 = (r.white_king & 7) >= 4;
-    int mirror1 = (7 - (r.black_king & 7)) >= 4;
+    int mirror1 = (r.black_king & 7) >= 4;
     // SH01 packs two squares per byte. Collapse each nonempty nibble into
     // its low bit, then visit occupied squares in the original ascending
     // order so floating-point gradient accumulation remains identical.

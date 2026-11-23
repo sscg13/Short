@@ -57,14 +57,14 @@ def feature_rows(record):
     result = [[], []]
     for perspective in range(2):
         king = record[33 + perspective]
-        king = 63 - king if perspective else king
+        king = king ^ 56 if perspective else king
         for square in range(64):
             piece = (record[square // 2] >> (4 * (square % 2))) & 15
             if not piece:
                 continue
             enemy = (piece > 6) != bool(perspective)
             kind = (piece - 1) % 6 + 1
-            compact = 63 - square if perspective else square
+            compact = square ^ 56 if perspective else square
             if king % 8 >= 4:
                 compact ^= 7
             rank, file = divmod(compact, 8)
