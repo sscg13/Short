@@ -1496,6 +1496,11 @@ int main(int argc, char **argv) {
         return bench(bd);
     }
 
+#ifdef HIST_TEST
+    if (argc > 1 && strcmp(argv[1], "hprobe") == 0)
+        return hist_probe((argc > 2) ? atoi(argv[2]) : 8);
+#endif
+
 #ifdef VCLOCK
     if (argc > 1 && strcmp(argv[1], "calcheck") == 0)
         return calcheck();

@@ -364,6 +364,67 @@ static i32 st_pvs_tries, st_pvs_prunes, st_pvs_checks_kept;
 #define LMP_DEPTH 3
 static const u8 lmp_moves[LMP_DEPTH + 1] = { 0, 6, 12, 20 };
 
+/* history pruning: the same skip, but decided by the move's quiet-history
+   value instead of its list position, and at depths 4-6 where LMP is off.
+   The quiet-history table already ranks the tail (a quiet that failed low
+   loses depth^2, one that cut gains it), so a deeply negative entry means
+   the move was refuted every time it was tried. The margin scales with the
+   node depth, Stockfish-style: -4096*depth, i.e. -16384 at depth 4 and
+   -24576 at depth 6. A flat threshold does not survive a deep search - the
+   table accumulates across iterative deepening and nothing ages it, so at
+   depth 10 more than 40% of the late quiets sit below -1024 and a flat gate
+   skips almost the whole tail (test 2220: -118.61 Elo). The scaled margin
+   prunes 8% of the late quiets in a depth-10 search for 4 lost cutoffs,
+   against 46% / 159 for the flat -1024 (`hprobe 10` on the base tree).
+   move_count >= 6 protects the killer, counter and follow-up guesses, which
+   are returned before the history stage and can carry a stale (negative)
+   history entry. Gates mirror LMP: non-PV, not in check, quiet, no mate
+   window, and the check test below still runs before the move is skipped. */
+#define HPRUNE_DEPTH 6
+#define HPRUNE_MOVES 6
+static const i16 hprune_thr[HPRUNE_DEPTH + 1] = {
+    0, -2048, -4096, -6144, -8192, -10240, -12288
+};
+
+#ifdef HIST_TEST
+/* History-pruning study (`chess hprobe [depth]`, probe build only).
+   For every quiet move actually searched at a non-PV node it records the
+   move's quiet-history value at the moment it was tried, together with the
+   outcome (improved alpha, cutoff, or fail low). The threshold rows of the
+   report are exactly the candidate gates "prune a quiet whose history is
+   below T", so a threshold whose hit column is empty is free to take.
+   Moves the prune gate already skips are counted separately by history
+   bucket: that shows how much of the pruned tail a history gate explains. */
+#define HP_MAXD  8
+#define HP_NB    23
+#define HP_NBAND 5
+static const i16 hp_edge[HP_NB - 1] = {
+    -16384, -8192, -4096, -2048, -1024, -512, -256, -128, -64, -32, -16, -8, 0,
+          8,    16,    32,    64,   128,  256,  512, 1024, 2048
+};
+/* move-count bands: 1..3 (never pruned today), 4..5, 6..11, 12..19, 20+ */
+static long hp_seen[HP_NBAND][HP_MAXD + 1][HP_NB];
+static long hp_imp[HP_NBAND][HP_MAXD + 1][HP_NB];
+static long hp_cut[HP_NBAND][HP_MAXD + 1][HP_NB];
+static long hp_lmpc[HP_MAXD + 1][HP_NB];      /* moves the LMP gate pruned */
+static long hp_tot[HP_NBAND][HP_MAXD + 1], hp_imp_tot[HP_NBAND][HP_MAXD + 1],
+            hp_cut_tot[HP_NBAND][HP_MAXD + 1], hp_lmp_tot[HP_MAXD + 1];
+static i16 hp_active;
+
+static i16 hp_bucket(i16 v) {
+    i16 b = 0;
+    while (b < HP_NB - 1 && v >= hp_edge[b]) ++b;
+    return b;
+}
+static i16 hp_band(i16 mc) {
+    if (mc < 4) return 0;
+    if (mc < 6) return 1;
+    if (mc < 12) return 2;
+    if (mc < 20) return 3;
+    return 4;
+}
+#endif
+
 /* aspiration windows: from depth >= 2 the root search confines itself to a
    window of +-ASP_DELTA cp around the previous depth's score. A fail (the
    search result lands at or outside the window - with fail-soft that means
@@ -762,6 +823,9 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
             Undo u;
             i16 us, pc, is_cap, child_half, legal_move = 0;
             i16 see_prune = 0, lmp_try = 0;
+#ifdef HIST_TEST
+            i16 hp_hist = 0, hp_cand = 0, hp_bkt = -1;
+#endif
             Score score, alpha0 = alpha;         /* window this move is searched against */
             if (stop_now) break;                 /* abort: stop trying moves at this node */
             pc = p->board[mfrom(m)];                 /* moving piece, before the make */
@@ -769,11 +833,15 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                                                                   (the TT move's only validity test) */
             /* late-move-pruning candidate, decided before the SEE gate so a move
                that is about to be skipped does not pay see_ge first. The final
-               decision needs the check test on the child board, below. */
-            if (!first && depth <= LMP_DEPTH && node_type != NODE_PV &&
+               decision needs the check test on the child board, below. LMP
+               decides on list position at depths 1-3; history pruning decides
+               on the quiet-history value at depths 4-6. */
+            if (!first && depth <= HPRUNE_DEPTH && node_type != NODE_PV &&
                 !in_check && mfl(m) == 0 &&
                 p->board[mto(m)] == EMPTY &&
-                move_count >= lmp_moves[depth] &&
+                ((depth <= LMP_DEPTH && move_count >= lmp_moves[depth]) ||
+                 (depth > LMP_DEPTH && move_count >= HPRUNE_MOVES &&
+                  qhist[p->side][TY(pc) - 1][(m >> 6) & 0x3F] < hprune_thr[depth])) &&
                 best > -MATE + MAXPLY && beta < MATE - MAXPLY)
                 lmp_try = 1;
             if (!lmp_try && !first && depth <= PVS_SEE_DEPTH &&
@@ -788,6 +856,16 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
             }
             path_move[ply] = m; path_pc[ply] = pc;   /* recorded for the child's
                                                         counter-move lookup */
+#ifdef HIST_TEST
+            /* capture the history value before the make; `pc` and p->side are
+               still the mover's, and no update for this move has run yet */
+            if (hp_active && !first && depth >= 1 && depth <= HP_MAXD &&
+                node_type != NODE_PV && !in_check && mfl(m) == 0 &&
+                p->board[mto(m)] == EMPTY) {
+                hp_hist = qhist[p->side][TY(pc) - 1][(m >> 6) & 0x3F];
+                hp_cand = 1;
+            }
+#endif
             do_make(p, m, &u);
             us = p->side ^ 1;                        /* mover */
             /* Legality: if not in check, a non-king, non-EP move from a square off
@@ -821,9 +899,23 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                 if (lmp_try && !is_attacked(p, p->ks[p->side], us)) {
                     /* late quiet, and it gives no check: skip it unsearched */
                     PCOUNT(c_lmp);
+#ifdef HIST_TEST
+                    if (hp_cand) {
+                        hp_lmpc[depth][hp_bucket(hp_hist)]++;
+                        hp_lmp_tot[depth]++;
+                    }
+#endif
                     undo_move(p, m, &u);
                     continue;
                 }
+#ifdef HIST_TEST
+                if (hp_cand) {
+                    i16 band = hp_band(move_count);
+                    hp_bkt = hp_bucket(hp_hist);
+                    hp_seen[band][depth][hp_bkt]++;
+                    hp_tot[band][depth]++;
+                }
+#endif
                 if (first) {
                     /* First move: keep PV, or alternate cut/all. */
                     first = 0;
@@ -864,6 +956,18 @@ static Score alphabeta(Pos *p, i16 depth, Score alpha, Score beta, i16 ply, i16 
                         score = -alphabeta(p, depth - 1, -beta, -alpha, ply + 1, child_half, NODE_PV);
                     }
                 }
+#ifdef HIST_TEST
+                if (hp_bkt >= 0) {
+                    i16 band = hp_band(move_count);
+                    if (score >= beta) {
+                        hp_cut[band][depth][hp_bkt]++;
+                        hp_cut_tot[band][depth]++;
+                    } else if (score > alpha0) {
+                        hp_imp[band][depth][hp_bkt]++;
+                        hp_imp_tot[band][depth]++;
+                    }
+                }
+#endif
                 if (!ply) root_score[root_index - 1] = score;
                 if (score > best) {
                     best = score;
@@ -1304,6 +1408,88 @@ int bench(int depth) {
 #endif
     return 0;
 }
+
+#ifdef HIST_TEST
+/* Print the probe collected by hist_probe(). One row per candidate gate:
+   "prune a late quiet whose quiet history is below T". `hit` counts the moves
+   that would have been lost (they improved alpha or caused a cutoff); the
+   `lmp` column is how many of the moves LMP already prunes that row covers. */
+static void hp_report(void) {
+    static const char *band_name[HP_NBAND] = { "1-3", "4-5", "6-11", "12-19", "20+" };
+    static const i16 thr_idx[7] = { 1, 2, 3, 4, 6, 8, 12 };  /* -8192,-4096,-2048,-1024,-256,-64,0 */
+    i16 d, i, b, k;
+    printf("\n== history-pruning probe: quiet moves at non-PV nodes ==\n");
+    printf("band = legal moves already searched; hit = improved alpha or cutoff\n");
+    printf("cells are gate 'history < T' -> searched/hit\n");
+    for (d = 1; d <= HP_MAXD; ++d) {
+        i16 any = 0;
+        for (i = 0; i < HP_NBAND; ++i) if (hp_tot[i][d]) any = 1;
+        if (!any && !hp_lmp_tot[d]) continue;
+        printf("\ndepth %d  (gate-pruned %ld)\n", (int)d, hp_lmp_tot[d]);
+        printf("  band    searched    hit |");
+        for (k = 0; k < 7; ++k) printf("   <%d n/hit", (int)hp_edge[thr_idx[k]]);
+        printf("\n");
+        for (i = 0; i < HP_NBAND; ++i) {
+            long hit = hp_imp_tot[i][d] + hp_cut_tot[i][d];
+            if (!hp_tot[i][d] && !hit) continue;
+            printf("  %-6s %8ld %6ld |", band_name[i], hp_tot[i][d], hit);
+            for (k = 0; k < 7; ++k) {
+                long n = 0, miss = 0;
+                for (b = 0; b <= thr_idx[k]; ++b) {
+                    n += hp_seen[i][d][b];
+                    miss += hp_imp[i][d][b] + hp_cut[i][d][b];
+                }
+                printf(" %8ld/%-5ld", n, miss);
+            }
+            printf("\n");
+        }
+    }
+    printf("\ngate-pruned moves by history bucket (depth: < -64 / < 0 / >= 0):\n");
+    for (d = 1; d <= HP_MAXD; ++d) {
+        long neg64 = 0, neg0 = 0, pos = 0;
+        if (!hp_lmp_tot[d]) continue;
+        for (b = 0; b < HP_NB; ++b) {
+            i16 up = (b < HP_NB - 1) ? hp_edge[b] : 32767;
+            if (up <= -64) neg64 += hp_lmpc[d][b];
+            if (up <= 0) neg0 += hp_lmpc[d][b];
+            else pos += hp_lmpc[d][b];
+        }
+        printf("  depth %d: %ld / %ld / %ld\n", (int)d, neg64, neg0, pos);
+    }
+    /* raw sufficient statistics for offline gate evaluation */
+    printf("\nhpraw,depth,band,bucket,lo,hi,seen,imp,cut\n");
+    for (d = 1; d <= HP_MAXD; ++d)
+        for (i = 0; i < HP_NBAND; ++i)
+            for (b = 0; b < HP_NB; ++b) {
+                long s = hp_seen[i][d][b];
+                if (!s) continue;
+                printf("hpraw,%d,%d,%d,%d,%d,%ld,%ld,%ld\n",
+                       (int)d, (int)i, (int)b,
+                       (int)(b ? hp_edge[b - 1] : -32768),
+                       (int)(b < HP_NB - 1 ? hp_edge[b] : 32767),
+                       s, hp_imp[i][d][b], hp_cut[i][d][b]);
+            }
+    printf("\n");
+}
+
+int hist_probe(int depth) {
+    if (depth < 1) depth = 8;
+    if (depth > HP_MAXD) depth = HP_MAXD;
+    memset(hp_seen, 0, sizeof hp_seen);
+    memset(hp_imp, 0, sizeof hp_imp);
+    memset(hp_cut, 0, sizeof hp_cut);
+    memset(hp_lmpc, 0, sizeof hp_lmpc);
+    memset(hp_tot, 0, sizeof hp_tot);
+    memset(hp_imp_tot, 0, sizeof hp_imp_tot);
+    memset(hp_cut_tot, 0, sizeof hp_cut_tot);
+    memset(hp_lmp_tot, 0, sizeof hp_lmp_tot);
+    hp_active = 1;
+    (void)bench(depth);
+    hp_active = 0;
+    hp_report();
+    return 0;
+}
+#endif
 
 #ifdef VCLOCK
 /* `chess calcheck`: run the depth-4 bench and compare the model's cycles/node
