@@ -314,6 +314,9 @@ void lmr_build(void);             /* one-time LMR log-table generator (dedicated
 int tt_bench(void);
 #endif
 int bench(int depth);
+#ifdef HIST_TEST
+int hist_probe(int depth);       /* `chess hprobe [depth]`: history-pruning study */
+#endif
 int profile(int depth);
 int sbench(void);
 #ifdef TIME_TEST
